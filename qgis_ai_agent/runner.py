@@ -14,9 +14,9 @@ ADAPTERS = {
     "agy (Antigravity CLI)": {
         "bin": "agy",
         "models": [
-            ("gemini-3.8-flash-high (Rekomendasi Cepat)", "gemini-3.8-flash-high"),
+            ("gemini-3.8-flash-high (Fast & Recommended)", "gemini-3.8-flash-high"),
             ("gemini-3.8-flash-medium", "gemini-3.8-flash-medium"),
-            ("gemini-4-argon-high (Rekomendasi Akurat)", "gemini-4-argon-high"),
+            ("gemini-4-argon-high (High Precision)", "gemini-4-argon-high"),
             ("gemini-4-argon-medium", "gemini-4-argon-medium"),
             ("claude-opus-5-5-high", "claude-opus-5-5-high"),
             ("claude-sonnet-5-5-high", "claude-sonnet-5-5-high"),

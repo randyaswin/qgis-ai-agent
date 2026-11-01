@@ -1,15 +1,17 @@
 import html
 import json
 import os
+import random
 import re
 import subprocess
 import time
 
-from qgis.PyQt.QtCore import Qt, QSettings
+from qgis.PyQt.QtCore import Qt, QSettings, QTimer
 from qgis.PyQt.QtGui import QTextCursor
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QPlainTextEdit,
     QTextEdit, QCheckBox, QLabel, QLineEdit, QFileDialog, QMessageBox, QDialog,
+    QInputDialog, QFrame,
 )
 from qgis.core import Qgis, QgsProject
 
@@ -258,6 +260,13 @@ class AgentDock(QDockWidget):
         self._current_assistant_text = ""
         self._current_model_header = ""
         self._last_tool_call = {}
+        self.message_queue = []
+        self.attachments = []
+        self._running_words = [
+            "Thinking", "Analyzing", "Calculating", "Querying", "Synthesizing",
+            "Inspecting", "Buffering", "Projecting", "Rendering", "Drafting",
+            "Orchestrating", "Formatting", "Verifying", "Refining", "Solving"
+        ]
         s = QSettings()
 
         # Session Manager bound to QGIS project
@@ -269,6 +278,11 @@ class AgentDock(QDockWidget):
         self.server.tool_called.connect(self._on_tool_called)
         self.server.tool_completed.connect(self._on_tool_completed)
         self.server.tool_failed.connect(self._on_tool_failed)
+
+        # Pulse timer for running indicator
+        self.indicator_timer = QTimer(self)
+        self.indicator_timer.setInterval(2200)
+        self.indicator_timer.timeout.connect(self._pulse_indicator)
 
         w = QWidget()
         lay = QVBoxLayout(w)
@@ -406,6 +420,41 @@ class AgentDock(QDockWidget):
         """)
         lay.addWidget(self.log, 1)
 
+        # Process Indicator Bar (Claude Code style running indicator)
+        self.indicator_frame = QFrame()
+        self.indicator_frame.setStyleSheet("""
+            QFrame {
+                background-color: #1e1e2d;
+                border: 1px solid #3b3b54;
+                border-radius: 4px;
+                padding: 2px 6px;
+            }
+        """)
+        ind_lay = QHBoxLayout(self.indicator_frame)
+        ind_lay.setContentsMargins(6, 2, 6, 2)
+        self.indicator_label = QLabel("Thinking…")
+        self.indicator_label.setStyleSheet("color: #a78bfa; font-weight: bold; font-size: 11px;")
+        self.queue_label = QLabel("")
+        self.queue_label.setStyleSheet("color: #38bdf8; font-size: 11px; margin-left: 8px;")
+        ind_lay.addWidget(self.indicator_label)
+        ind_lay.addWidget(self.queue_label)
+        ind_lay.addStretch()
+        self.interrupt_btn = QPushButton("⚡ Interrupt")
+        self.interrupt_btn.setToolTip("Interrupt the running process immediately with your next message")
+        self.interrupt_btn.setStyleSheet("background-color: #dc2626; color: white; font-size: 10px; padding: 2px 6px; border-radius: 3px;")
+        self.interrupt_btn.clicked.connect(self._interrupt_now)
+        ind_lay.addWidget(self.interrupt_btn)
+        self.indicator_frame.hide()
+        lay.addWidget(self.indicator_frame)
+
+        # Attachment pills bar
+        self.attach_bar = QWidget()
+        self.attach_bar_lay = QHBoxLayout(self.attach_bar)
+        self.attach_bar_lay.setContentsMargins(2, 0, 2, 0)
+        self.attach_bar_lay.addStretch()
+        self.attach_bar.hide()
+        lay.addWidget(self.attach_bar)
+
         # User prompt input
         self.prompt = QPlainTextEdit()
         self.prompt.setPlaceholderText("Type map request (e.g. 'Build a disaster infographic layout with inset map and bar chart' or 'Buffer roads 500m') [Ctrl+Enter]")
@@ -424,6 +473,9 @@ class AgentDock(QDockWidget):
 
         # Action buttons
         row6 = QHBoxLayout()
+        self.attach_btn = QPushButton("📎 Attach")
+        self.attach_btn.setToolTip("Attach reference images, geodata, or style files")
+        self.attach_btn.clicked.connect(self._add_attachment)
         self.run_btn = QPushButton("▶ Run")
         self.run_btn.setStyleSheet("font-weight: bold; background-color: #2e7d32; color: white; padding: 6px;")
         self.run_btn.clicked.connect(self._run)
@@ -432,6 +484,7 @@ class AgentDock(QDockWidget):
         self.stop_btn.clicked.connect(self.runner.stop)
         clr = QPushButton("Clear")
         clr.clicked.connect(self.log.clear)
+        row6.addWidget(self.attach_btn)
         row6.addWidget(self.run_btn, 1)
         row6.addWidget(self.stop_btn)
         row6.addWidget(clr)
@@ -786,12 +839,125 @@ class AgentDock(QDockWidget):
             summary.append(info)
         return "\n".join(summary)
 
-    def _run(self):
-        if self.runner.running():
+    def _add_attachment(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Attach Reference Material", "",
+            "All Supported (*.png *.jpg *.jpeg *.tif *.tiff *.pdf *.geojson *.shp *.gpkg *.qml *.txt);;Images (*.png *.jpg *.jpeg *.tif);;Vector Data (*.geojson *.shp *.gpkg);;Styles (*.qml);;All Files (*)"
+        )
+        if paths:
+            for p in paths:
+                if p not in self.attachments:
+                    self.attachments.append(p)
+            self._update_attachment_bar()
+
+    def _update_attachment_bar(self):
+        # Clear existing items
+        while self.attach_bar_lay.count():
+            item = self.attach_bar_lay.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not self.attachments:
+            self.attach_bar.hide()
             return
+
+        self.attach_bar.show()
+        for idx, path in enumerate(self.attachments):
+            base = os.path.basename(path)
+            pill = QFrame()
+            pill.setStyleSheet("""
+                QFrame {
+                    background-color: #272738;
+                    border: 1px solid #4a4a68;
+                    border-radius: 3px;
+                    padding: 1px 4px;
+                }
+            """)
+            p_lay = QHBoxLayout(pill)
+            p_lay.setContentsMargins(4, 1, 4, 1)
+            lbl = QLabel(f"📎 {base}")
+            lbl.setStyleSheet("color: #e2e8f0; font-size: 11px;")
+            p_lay.addWidget(lbl)
+
+            btn_del = QPushButton("×")
+            btn_del.setStyleSheet("color: #f87171; font-weight: bold; font-size: 11px; background: transparent; border: none; padding: 0 2px;")
+            btn_del.clicked.connect(lambda _, i=idx: self._remove_attachment(i))
+            p_lay.addWidget(btn_del)
+            self.attach_bar_lay.addWidget(pill)
+
+        self.attach_bar_lay.addStretch()
+
+    def _remove_attachment(self, idx):
+        if 0 <= idx < len(self.attachments):
+            self.attachments.pop(idx)
+            self._update_attachment_bar()
+
+    def _pulse_indicator(self):
+        if not self.runner.running():
+            self.indicator_frame.hide()
+            self.indicator_timer.stop()
+            return
+        word = random.choice(self._running_words)
+        self.indicator_label.setText(f"{word}…")
+        if self.message_queue:
+            self.queue_label.setText(f"({len(self.message_queue)} queued)")
+        else:
+            self.queue_label.setText("")
+
+    def _interrupt_now(self):
+        if not self.runner.running():
+            return
+        new_text = self.prompt.toPlainText().strip()
+        if not new_text and not self.message_queue:
+            QMessageBox.information(self, "Interrupt", "Type a message in the prompt input to send as an interrupt.")
+            return
+
+        self._append_html(
+            f"<div style='margin: 4px 0; padding: 4px 8px; background-color: #451a1a; border-left: 3px solid #dc2626; border-radius: 3px; font-size: 11px; color: #fca5a5;'>"
+            f"⚡ <b>Interrupted</b> by user with immediate priority.</div>"
+        )
+        self.runner.stop()
+        # The prompt will trigger _done which can dequeue or start immediately
+        QTimer.singleShot(400, self._run)
+
+    def _run(self):
         user = self.prompt.toPlainText().strip()
+        if self.runner.running():
+            if user:
+                # Process is already running -> Queue the user's message
+                self.message_queue.append({
+                    "text": user,
+                    "attachments": list(self.attachments)
+                })
+                self.prompt.clear()
+                self.attachments = []
+                self._update_attachment_bar()
+                self._append_html(
+                    f"<div style='margin: 4px 0; padding: 4px 8px; background-color: #172554; border-left: 3px solid #38bdf8; border-radius: 3px; font-size: 11px; color: #bae6fd;'>"
+                    f"📥 <b>Message queued</b> (#{len(self.message_queue)}): <i>{html.escape(user[:120])}...</i></div>"
+                )
+                self.queue_label.setText(f"({len(self.message_queue)} queued)")
+            return
+
+        # Dequeue message if prompt is empty but queue exists
+        attach_list = list(self.attachments)
+        if not user and self.message_queue:
+            queued = self.message_queue.pop(0)
+            user = queued["text"]
+            attach_list = queued.get("attachments", [])
+
         if not user:
             return
+
+        # Build prompt with attached reference materials if present
+        if attach_list:
+            att_block = ["\n\n# User Attached References / Files:"]
+            for a_path in attach_list:
+                att_block.append(f"- File: `{a_path}`")
+            user += "\n".join(att_block)
+            self.attachments = []
+            self._update_attachment_bar()
+
         outdir = self.outdir.text().strip() or os.path.expanduser("~/qgis-ai-maps")
         os.makedirs(outdir, exist_ok=True)
         cont = self.cont.isChecked() and not self.first_turn
@@ -875,6 +1041,9 @@ class AgentDock(QDockWidget):
         self.prompt.clear()
         self.run_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
+        self.indicator_label.setText(f"{random.choice(self._running_words)}…")
+        self.indicator_frame.show()
+        self.indicator_timer.start()
         try:
             # Use isolated project workspace for CLI subprocess
             proj_workspace = self.session_manager.get_workspace_dir()
@@ -884,6 +1053,8 @@ class AgentDock(QDockWidget):
             self._done(-1)
 
     def _done(self, code):
+        self.indicator_timer.stop()
+        self.indicator_frame.hide()
         elapsed = time.time() - self.start_time if self.start_time else 0
         status_color = "#10b981" if code == 0 else "#ef4444"
         done_html = (
@@ -911,6 +1082,10 @@ class AgentDock(QDockWidget):
         self.run_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.iface.mapCanvas().refreshAllLayers()
+
+        # Check if there are queued messages to execute next
+        if self.message_queue:
+            QTimer.singleShot(500, self._run)
 
     def shutdown(self):
         self.runner.stop()

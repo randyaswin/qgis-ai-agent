@@ -275,21 +275,37 @@
     ]
   },
   "keywords": {
-    "indonesia-geodata-crs": [
-      "indonesia",
+    "coordinate-systems-and-crs": [
+      "crs",
+      "srs",
+      "projection",
       "utm",
-      "srgi2013",
-      "dgn95",
-      "bps",
-      "kemendagri",
-      "proyeksi",
-      "koordinat",
-      "jawa",
-      "sumatera",
-      "kalimantan",
-      "sulawesi",
-      "papua",
-      "bali"
+      "epsg",
+      "wgs84",
+      "datum",
+      "projected",
+      "geographic",
+      "reproject",
+      "transform",
+      "zone"
+    ],
+    "advanced-map-layouting": [
+      "layout",
+      "composability",
+      "wayfinding",
+      "signage",
+      "signboard",
+      "tourist",
+      "board",
+      "poster",
+      "legend",
+      "scalebar",
+      "north",
+      "arrow",
+      "print",
+      "custom",
+      "label",
+      "frame"
     ],
     "choropleth-density-map": [
       "kepadatan",
@@ -404,14 +420,6 @@
       "a3",
       "dpi"
     ],
-    "peta-bahasa-indonesia": [
-      "bahasa",
-      "indonesia",
-      "istilah",
-      "judul",
-      "keterangan",
-      "teks"
-    ],
     "qgis-processing-toolbox": [
       "processing",
       "toolbox",
@@ -438,23 +446,19 @@
     ],
     "disaster-infographic-dashboard": [
       "disaster",
-      "bencana",
-      "infografis",
+      "hazard",
+      "infographic",
       "dashboard",
-      "bnpb",
-      "bpbd",
-      "bali",
-      "kejadian",
+      "emergency",
+      "incident",
       "callout",
       "cluster",
       "inset",
-      "denpasar",
-      "diagram",
-      "batang",
-      "bar",
       "chart",
+      "bar",
       "heatmap",
-      "komposit"
+      "composite",
+      "evacuation"
     ],
     "natgeo-cartography-style": [
       "natgeo",

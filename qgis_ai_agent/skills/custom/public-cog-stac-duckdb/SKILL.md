@@ -1,7 +1,7 @@
 ---
 name: public-cog-stac-duckdb
 description: Use when discovering, querying, streaming, or analyzing public geospatial datasets without API keys — including Overture Maps Foundation (buildings, places, transportation, water) via DuckDB over remote S3 GeoParquet, public STAC catalogs (Earth Search Sentinel-2, Landsat, Copernicus DEM GLO-30), and Cloud-Optimized GeoTIFFs (COGs) via GDAL /vsicurl/.
-keywords: cog, stac, overture, duckdb, geoparquet, parquet, s3, sentinel, copernicus, dem, glo-30, earth search, planetary computer, open data, public data, satellite imagery, buildings, poi, places, roads, contours, data publik
+keywords: cog, stac, overture, duckdb, geoparquet, parquet, s3, sentinel, copernicus, dem, glo-30, earth search, planetary computer, open data, public data, satellite imagery, buildings, poi, places, roads, contours, open geodata
 license: MIT
 ---
 
@@ -119,14 +119,14 @@ For advanced queries joining remote Parquet files on S3 or the web:
 ```python
 query_duckdb_spatial(
     query="""
-        SELECT id, names.primary AS name, geometry 
+        SELECT id, names.primary AS name, categories.primary AS category, geometry 
         FROM read_parquet('s3://overturemaps-us-west-2/release/2026-10-21.0/theme=places/type=place/*', hive_partitioning=1)
-        WHERE bbox.xmin >= 115.10 AND bbox.xmax <= 115.30
-          AND bbox.ymin >= -8.75 AND bbox.ymax <= -8.55
-          AND taxonomy.primary = 'hotel'
+        WHERE bbox.xmin >= 138.60 AND bbox.xmax <= 138.63
+          AND bbox.ymin >= 35.21 AND bbox.ymax <= 35.24
+          AND categories.primary IN ('hotel', 'restaurant', 'museum')
         LIMIT 200
     """,
-    layer_name="DuckDB_Hotels"
+    layer_name="DuckDB_Local_POIs"
 )
 ```
 The query result is automatically converted into a temporary GeoJSON and loaded into QGIS as a native vector layer.

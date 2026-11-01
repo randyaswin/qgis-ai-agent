@@ -983,7 +983,7 @@ def create_layout(name="Map", title="", subtitle="", credits="", page_size="A4",
        "y": S("number", "y position on page in mm"), "width": S("number", "inset width in mm"),
        "height": S("number", "inset height in mm"), "extent_layer": S("string", "layer name to zoom inset map to"),
        "bbox": S("array", "[xmin,ymin,xmax,ymax] in project CRS"), "scale": S("number", "optional map scale denominator"),
-       "title": S("string", "optional header text, e.g. 'DETAIL KOTA DENPASAR'"),
+       "title": S("string", "optional header text, e.g. 'DETAIL VIEW / INSET AREA'"),
        "show_overview_on_main": S("boolean", "draw an overview rectangle on the main map (default true)"),
        "grid": S("boolean", "include coordinate grid on the inset map")})
 def add_layout_inset_map(layout, x, y, width, height, extent_layer=None, bbox=None, scale=None,
@@ -1212,7 +1212,7 @@ def add_layout_callout_box(layout, x, y, width, height, title, subtitle="", badg
     return {"callout_added": True, "badge": badge, "title": title}
 
 
-@tool("Create a publication-quality styled print layout with professional themes: 'infographic_disaster' (or 'infographic_bencana': disaster dashboard with inset, chart, and multi-bar legends like BNPB), 'natgeo' (National Geographic: classic neatline borders, serif typography, warm tones), 'relief_topographic' (Swiss/Imhof alpine topo), or 'modern_clean' (executive corporate).",
+@tool("Create a publication-quality styled print layout with professional themes: 'infographic_disaster' (disaster dashboard with header banner, side metric panels, inset, chart, and multi-bar legends), 'natgeo' (National Geographic: classic neatline borders, serif typography, warm tones), 'relief_topographic' (Swiss/Imhof alpine topo), or 'modern_clean' (executive corporate).",
       {"name": S("string", "layout name, default 'Map'"),
        "style_theme": S("string", "'infographic_disaster' | 'infographic_bencana' | 'natgeo' | 'relief_topographic' | 'modern_clean'"),
        "title": S("string", "main map title"), "subtitle": S("string", "subtitle"),
@@ -1392,7 +1392,7 @@ def list_skills(query="", limit=10):
 
 
 @tool("Load the full contents and instructions of a specialized skill by name, or a specific reference document from that skill.",
-      {"name": S("string", "skill name, e.g. 'choropleth-density-map', 'indonesia-geodata-crs', 'terrain-hydrology'"),
+      {"name": S("string", "skill name, e.g. 'choropleth-density-map', 'coordinate-systems-and-crs', 'terrain-hydrology'"),
        "reference": S("string", "optional filename inside the skill references/ directory")})
 def load_skill(name, reference=None):
     from .skills import REGISTRY
@@ -1605,6 +1605,9 @@ def exec_pyqgis(code):
 
 
 # ---------------------------------------------------------------- dispatch
+from . import layout_tools  # noqa: F401 - register layout composability tools
+
+
 def list_tools():
     return [{"name": k, "description": v["description"], "inputSchema": v["inputSchema"]} for k, v in TOOLS.items()]
 

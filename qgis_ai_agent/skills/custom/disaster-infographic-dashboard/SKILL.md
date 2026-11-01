@@ -1,69 +1,198 @@
 ---
 name: disaster-infographic-dashboard
-description: Use when building comprehensive disaster, hazard, or incident infographic maps (like BNPB / BPBD / BMKG situational dashboards). Covers combining relief DEM, multi-category incident symbols, KDE heatmap density, 10km cluster buffer zones, capital city inset map, callout cards A-B-C-D-E, horizontal bar chart ranking, and continuous gradient legend bars.
-keywords: disaster, hazard, incident, infographic, dashboard, bnpb, bpbd, situational map, flood, landslide, fire, callout, cluster, inset, bar chart, heatmap, relief, composite map, bencana, infografis, kejadian
+description: Comprehensive guide for constructing multi-hazard disaster situational reports (SITREPs) and emergency management dashboards. Covers incident point classification, terrain relief overlays, Kernel Density Estimation (KDE) heatmaps, 10km buffer hazard clusters, urban detail insets, analytical ranking charts, continuous gradient bars, and cluster callout cards.
+keywords: disaster, hazard, emergency, incident, sitrep, situational map, flood, landslide, wildfire, earthquake, storm, callout, cluster, inset, bar chart, heatmap, relief, composite map, dashboard
 license: MIT
 ---
 
-# Situational Disaster & Hazard Infographic Dashboard
+# Situational Disaster & Emergency Management Dashboard Guide
 
-Comprehensive guide for creating professional disaster and hazard situational infographic maps (such as provincial/national disaster situational reports):
-
----
-
-## 1. Data Preparation & Geometry
-
-1. **Coordinate Reference System (CRS) & Basemap:**
-   - Always use a local metric projected CRS (e.g. UTM Zone). Call `set_project_crs` before calculating buffers or KDE heatmaps.
-   - Use 100% free, keyless XYZ tile basemaps: call `add_basemap(preset="carto_light")` (CartoDB Positron with soft gray tones so thematic layers stand out) or `add_basemap(preset="esri_satellite")` for aerial imagery. Adjust opacity if needed (`update_layer(opacity=0.4)`).
-2. **Terrain Relief (DEM):**
-   - Derive hillshade from DEM (`native:hillshade`, Azimuth 315°, V_Angle 45°).
-   - Apply smooth elevation pseudocolor symbology (`style_raster` with `Spectral` or inverted `YlOrBr` ramp), overlaying hillshade on top with 45–50% opacity (`update_layer opacity=0.5`).
-3. **Incident Points (Categorized Symbology):**
-   - Apply `style_categorized` based on incident type column using standard emergency cartography shapes and colors:
-     - **Flood**: Blue circle (`#1976d2`)
-     - **Landslide**: Brown/red triangle (`#d32f2f`)
-     - **Wildfire / Forest Fire**: Orange diamond (`#f57c00`)
-     - **Building / Urban Fire**: Crimson square (`#c2185b`)
-     - **Extreme Weather / Storm**: Purple star (`#7b1fa2`)
-     - **Drought**: Golden yellow circle (`#fbc02d`)
-4. **Heatmap Density (KDE):**
-   - Run `qgis:heatmapkerneldensityestimation` with an appropriate search radius (e.g., 10,000 meters / 10 km) and 100m pixel size.
-   - Style with `style_raster` using `YlOrRd` (yellow to dark red) ramp and lower-end transparency so base features remain visible.
-5. **Cluster Ring Buffers (10 km):**
-   - Aggregate points or select primary cluster centroids, then generate 10 km buffers (`native:buffer` distance 10,000 m).
-   - Apply thin outline symbology with no fill (`style_single` with 0.8 mm outline width and 0.7 opacity).
+Situational disaster maps and emergency dashboards (SITREPs) communicate critical spatial intelligence to decision-makers, relief agencies, and the public under time pressure. They combine relief terrain, multi-category incident symbology, spatial density hot-spots, high-risk cluster annotations, and summary analytics into a single coherent visual document.
 
 ---
 
-## 2. Assembling Composite Infographic Layouts
+## 1. Data Layers & Spatial Preparation
 
-Use the modern composite layout tools step-by-step:
+### A. Coordinate Reference System (CRS)
+All buffers, heatmaps, and spatial counts must be calculated in a local metric projected CRS:
+- Check existing CRS with `get_project_state()`.
+- Reproject layers to the local UTM zone (`coordinate-systems-and-crs` skill) using `native:reprojectlayer`.
 
-1. **Initialize Layout Template:**
-   - Call `create_styled_layout(name="Disaster_Map", style_theme="infographic_disaster", title="PROVINCIAL DISASTER SITUATION REPORT", subtitle="OCTOBER 2026", page_size="A3", orientation="landscape", grid=True)`.
-   - Automatically sets up a neatline frame with graticules, north arrow, scale bar, and reserved space for insets and analytics cards.
-2. **Detail Urban / Regional Inset Map:**
-   - Call `add_layout_inset_map(layout="Disaster_Map", x=12, y=60, width=80, height=85, extent_layer="Capital_City", title="DETAIL CAPITAL CITY", show_overview_on_main=True, grid=True)`.
-   - The inset map maintains its own scale and automatically renders an overview rectangle on the main map canvas.
-3. **Cluster Callout Cards (A, B, C, D, E):**
-   - Call `add_layout_callout_box` for significant hazard clusters:
-     - `badge="A"`, `title="NORTH CLUSTER"`, `subtitle="18 incidents · 10 km radius"`.
-     - `badge="B"`, `title="EAST CLUSTER"`, `subtitle="18 incidents · 10 km radius"`.
-     - `badge="C"`, `title="METROPOLITAN CLUSTER"`, `subtitle="15 incidents · 10 km radius"`.
-4. **Horizontal Gradient Legend Bars:**
-   - Call `add_layout_gradient_legend` for continuous variables along the bottom dock:
-     - Elevation: `title="Elevation (m)"`, `ramp="Spectral"`, `min_val="-3"`, `max_val="2,945"`, `invert_ramp=True`.
-     - Flood Hazard: `title="Flood hazard index"`, `ramp="Blues"`, `min_val="0 Low"`, `max_val="1 High"`.
-     - Incident Density: `title="Incident density"`, `ramp="YlOrRd"`, `min_val="Low"`, `max_val="High"`.
-5. **Infographic Bar Chart:**
-   - Aggregate incidents per administrative division.
-   - Call `add_layout_infographic_chart(layout="Disaster_Map", x=325, y=200, width=85, height=85, title="INCIDENTS BY DISTRICT", subtitle="October 2026 · total 143 incidents", data=[{"label":"District A","value":36}, {"label":"District B","value":27}, ...], bar_color="#2b5c8f")`.
+### B. Terrain Relief Context (DEM + Hillshade)
+Natural hazards (floods, landslides, storm surges) are strongly governed by topography:
+1. **Derive Hillshade:**
+   ```python
+   run_processing("native:hillshade", {
+       "INPUT": "dem_metric",
+       "Z_FACTOR": 1.5,
+       "AZIMUTH": 315.0,  # Standard northwest illumination
+       "V_ANGLE": 45.0
+   }, output_name="dem_hillshade")
+   ```
+2. **Hypsometric Tinting & Blending:**
+   - Style underlying DEM with `style_raster(layer="dem_metric", ramp="Spectral", invert_ramp=True, classes=8)` or warm topographic tints (`YlOrBr`).
+   - Move hillshade immediately above DEM in layer stack (`update_layer position=...`).
+   - Set hillshade opacity to 45–50% (`update_layer(layer="dem_hillshade", opacity=0.48)`).
+
+### C. Multi-Category Incident Symbology (UN-OCHA / FEMA Standards)
+Classify incident points by hazard type (`style_categorized`) using standardized shapes and high-contrast emergency cartography colors:
+
+| Hazard Category | Recommended Symbol | Hex Color | Symbology Details |
+| :--- | :--- | :--- | :--- |
+| **Inundation / Flash Flood** | Circle | `#1976d2` (Deep Blue) | White 0.3mm outline |
+| **Landslide / Mudflow / Rockfall** | Triangle | `#d32f2f` (Crimson Red)| Warning point up |
+| **Wildfire / Forest Fire** | Diamond | `#f57c00` (Vivid Orange)| Bold contrast |
+| **Urban / Industrial Fire** | Square | `#c2185b` (Deep Pink) | Saturated warning |
+| **Extreme Storm / Wind / Cyclone**| Star | `#7b1fa2` (Purple) | Multi-point star |
+| **Earthquake / Seismic Shake** | Hexagon | `#5d4037` (Dark Brown) | Earth tone |
+| **Drought / Water Scarcity** | Circle | `#fbc02d` (Golden Yellow)| Distinct from flood |
+
+### D. Incident Density Hot-Spots (Kernel Density Estimation)
+To visualize concentration of events beyond discrete points:
+```python
+run_processing("qgis:heatmapkerneldensityestimation", {
+    "INPUT": "incidents_layer",
+    "RADIUS": 8000,        # 8 km search radius
+    "PIXEL_SIZE": 100,     # 100 m raster cell resolution
+    "KERNEL": 0            # 0 = Quartic
+}, output_name="incident_kde_density")
+
+# Apply sequential heat ramp with transparent low-density base
+style_raster(
+    layer="incident_kde_density",
+    ramp="YlOrRd",
+    classes=6
+)
+# Lower layer opacity so base roads and topography remain visible
+update_layer(layer="incident_kde_density", opacity=0.65)
+```
+
+### E. High-Risk Cluster Buffer Zones (e.g. 10 km Radius)
+```python
+run_processing("native:buffer", {
+    "INPUT": "cluster_centroids",
+    "DISTANCE": 10000.0,   # 10,000 meters = 10 km
+    "DISSOLVE": False
+}, output_name="hazard_cluster_10km")
+
+# Style with clean outline only (no solid fill)
+style_single(
+    layer="hazard_cluster_10km",
+    color="#00000000",       # Transparent fill
+    outline_color="#b71c1c", # Deep red boundary
+    width=0.6
+)
+```
 
 ---
 
-## 3. Verification & Export
+## 2. Dashboard Layout Assembly Sequence
 
-1. Call `export_layout(name="Disaster_Map", path=".../disaster_map_preview.png", preview=True)` to inspect the rendered map directly in the agent chat.
-2. Check typography hierarchy, label readability, and color contrast.
-3. Export publication-quality print deliverable: `export_layout(name="Disaster_Map", path=".../disaster_map.pdf", dpi=300)`.
+Use the composite layouting engine (`create_styled_layout` or layout primitives):
+
+### Step 1: Initialize Dashboard Canvas
+```python
+create_styled_layout(
+    name="Disaster_Situation_Dashboard",
+    style_theme="infographic_disaster",
+    title="PROVINCIAL DISASTER SITUATION REPORT",
+    subtitle="Emergency Management Operations Center · Verified Incidents",
+    credits="Data: Regional Disaster Management Center & Public Open Geodata · Coordinate System: WGS 84 / UTM",
+    extent_layer="Administrative_Boundary",
+    page_size="A3",
+    orientation="landscape",
+    grid=True
+)
+```
+
+### Step 2: Urban / Critical Inset Detail Map
+Add a high-resolution inset focused on the hardest-hit municipality or capital city:
+```python
+add_layout_inset_map(
+    layout="Disaster_Situation_Dashboard",
+    x=12, y=36, width=82, height=90,
+    extent_layer="Capital_District",
+    title="DETAIL CAPITAL METROPOLITAN AREA",
+    show_overview_on_main=True,
+    grid=True
+)
+```
+
+### Step 3: High-Priority Cluster Callout Badges (A, B, C...)
+Anchor callout cards with badges to highlight primary disaster impact zones:
+```python
+# Cluster A Callout Card
+add_layout_callout_box(
+    layout="Disaster_Situation_Dashboard",
+    x=110, y=70, width=54, height=18,
+    badge="A",
+    title="NORTH BASIN CLUSTER",
+    subtitle="42 incidents · Inundation alert",
+    pointer_x=135, pointer_y=95  # Connects pointer line to map coordinates
+)
+
+# Cluster B Callout Card
+add_layout_callout_box(
+    layout="Disaster_Situation_Dashboard",
+    x=215, y=140, width=54, height=18,
+    badge="B",
+    title="MOUNTAIN PASS SECTOR",
+    subtitle="18 landslides · Roads severed",
+    pointer_x=205, pointer_y=165
+)
+```
+
+### Step 4: Continuous Gradient Legend Bars
+Continuous environmental layers (elevation, flood hazard index, heat density) need clean horizontal color strips:
+```python
+# Elevation Gradient Bar
+add_layout_gradient_legend(
+    layout="Disaster_Situation_Dashboard",
+    x=12, y=242, width=65, height=18,
+    title="Elevation (m a.s.l.)",
+    ramp="Spectral",
+    min_val="0 m",
+    max_val="2,850 m",
+    invert_ramp=True
+)
+
+# Incident Density Gradient Bar
+add_layout_gradient_legend(
+    layout="Disaster_Situation_Dashboard",
+    x=82, y=242, width=65, height=18,
+    title="Incident Concentration",
+    ramp="YlOrRd",
+    min_val="Low Density",
+    max_val="Extreme Cluster"
+)
+```
+
+### Step 5: Summary Analytical Ranking Bar Chart
+Quantify incident distribution across administrative divisions using an integrated HTML bar chart card:
+```python
+add_layout_infographic_chart(
+    layout="Disaster_Situation_Dashboard",
+    x=324, y=36, width=84, height=140,
+    title="INCIDENTS BY DISTRICT",
+    subtitle="Official verified reports",
+    data=[
+        {"label": "District North", "value": 58},
+        {"label": "District East", "value": 44},
+        {"label": "District Central", "value": 37},
+        {"label": "District West", "value": 26},
+        {"label": "District South", "value": 19}
+    ],
+    bar_color="#1565c0"
+)
+```
+
+---
+
+## 3. Pre-Flight Verification & Delivery
+
+1. **Inline Chat Inspection:** Call `export_layout(name="Disaster_Situation_Dashboard", path="preview.png", preview=True)` to inspect the rendered composite visually.
+2. **Review Checks:**
+   - Do callout lines point accurately to the corresponding incident cluster?
+   - Is text readable against the underlying topography?
+   - Are colorblind-sensitive red and green combinations mitigated by distinct geometric shapes (triangles for landslides, circles for floods)?
+3. **High-Resolution Production Export:** Call `export_layout(name="Disaster_Situation_Dashboard", path="output_dir/Disaster_Situation_Report.pdf", dpi=300)`.

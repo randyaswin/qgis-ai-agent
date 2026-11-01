@@ -1,37 +1,150 @@
 ---
 name: choropleth-density-map
-description: Use for thematic polygon maps that colour administrative or zonal units by a rate or density (population density, poverty rate, cases per 1000, income, yield). Handles normalisation, equal-area CRS, classification choice, colour ramp, and legend. Do not use for raw counts on unequal-size units without normalising.
-keywords: choropleth, thematic map, density, rate, per capita, population density, kepadatan penduduk, peta tematik, kecamatan, kabupaten, provinsi, desa, persentase, rasio, indikator, klasifikasi, gradasi
+description: End-to-end guide for creating publication-quality choropleth and density maps. Covers attribute data normalization (rate, density, ratio, percentage), statistical classification methods (Jenks, Quantile, Equal Interval, Pretty, StdDev), color theory (ColorBrewer sequential vs diverging ramps), table joins, equal-area projection handling, and legend cartography.
+keywords: choropleth, thematic map, density, rate, per capita, population density, administrative, district, census, statistics, normalization, classification, jenks, quantile, color ramp, table join
 license: MIT
 ---
 
-# Choropleth / density map
+# Choropleth & Thematic Density Mapping Guide
 
-## Decide before styling
-1. `describe_layer` the polygon layer and any table to join. Identify the value field, the unit-code field, NULL counts, geometry validity.
-2. **Normalise.** Never colour raw counts across units of different size or population. Compute a rate/density with `calculate_field`:
-   - density per km²: `"pop" / ($area / 1000000)` only if the layer CRS is projected in metres. In EPSG:4326 `$area` follows the project ellipsoid setting; prefer `area($geometry)` after reprojecting to an equal-area/UTM CRS.
-   - rate per 1000: `"cases" / "pop" * 1000`.
-3. **CRS.** Area-based maps need an equal-area or local UTM CRS (see `indonesia-geodata-crs`). `run_processing native:reprojectlayer` then work on the result.
-4. **Joins.** Join tabular data with `native:joinattributestable` (INPUT, FIELD, INPUT_2, FIELD_2). Join keys must have the same type; admin codes are text with leading zeros. Check `describe_layer` afterwards: unmatched rows show as NULLs, report their count.
+A choropleth map portrays quantitative spatial data aggregated into administrative, political, or statistical polygon units. 
 
-## Classification (use `field_stats` first)
-| Data shape | Method |
-| :--- | :--- |
-| Skewed, a few extreme values | `jenks` (natural breaks) or `quantile` |
-| Roughly uniform | `equal` |
-| Diverging around a meaningful value (mean, 0) | `stddev` or manual breaks, diverging ramp |
-| Need comparable maps | same fixed breaks on every map |
-- 4 to 6 classes. More than 7 is unreadable. State the method in the legend/subtitle.
-- Treat NULL/zero as a separate "no data" class instead of the lowest class.
+---
 
-## Colour
-- Sequential data: `style_graduated` with ramp `YlOrRd`, `Blues`, `Greens`, `Viridis`. Diverging data: `RdBu`, `Spectral`. Use `list_color_ramps` if unsure.
-- Light = low, dark = high. Thin light-grey outline (`outline_color="#ffffff"` or `#999999`) so units stay distinct.
-- Colour-blind safe: avoid red-green pairs; Viridis and Blues are safe.
+## 1. The Fundamental Cartographic Rule: Never Map Raw Counts
 
-## Steps
-`style_graduated(layer, field, classes=5, method="jenks", ramp="YlOrRd", outline_color="#ffffff")`, then `set_labels` only if there are few units (< 40) or label with the value; add a keyless XYZ basemap below at low opacity only if it helps (`add_basemap(preset="carto_light")` then `update_layer opacity=0.45`). Never use basemaps that require API keys. Verify with `snapshot_canvas`, then `create_layout` and `export_layout`.
+> [!IMPORTANT]
+> **Never color polygons directly by raw counts** (e.g., total population, total COVID cases, total crimes) across administrative units of unequal size or population. Doing so produces a misleading map that merely reflects unit land area or population size rather than true intensity.
 
-## Report
-Name the value field, normalisation formula, class breaks, data year and source on the map credits line.
+### Mandatory Normalization Strategies
+Always calculate a normalized density, rate, ratio, or proportion using `calculate_field`:
+
+1. **Areal Density (e.g., People per km²):**
+   ```sql
+   "population" / (area($geometry) / 1000000.0)
+   ```
+   *Prerequisite:* The layer MUST be in a projected metric CRS (e.g., UTM or Equal-Area). In `EPSG:4326`, `area($geometry)` returns square degrees, which is completely invalid.
+2. **Per Capita Rate (e.g., Incidents per 10,000 residents):**
+   ```sql
+   ("incidents" / "population") * 10000.0
+   ```
+3. **Percentage or Proportion of a Total:**
+   ```sql
+   ("agricultural_area" / "total_area") * 100.0
+   ```
+4. **Location Quotient (LQ) or Relative Index:**
+   ```sql
+   ("local_industry_jobs" / "local_total_jobs") / ("national_industry_jobs" / "national_total_jobs")
+   ```
+
+---
+
+## 2. Table Joins & Attribute Hygiene
+
+Most thematic maps involve joining an external statistical table (CSV, Excel, GeoJSON) to a spatial boundary layer:
+
+1. **Key Matching:** Join keys must share identical data types and formatting. Administrative codes often have leading zeros (e.g., `"0102"` vs `102`). Ensure both columns are formatted as String/Text:
+   ```python
+   # Join boundary layer with census table
+   run_processing("native:joinattributestable", {
+       "INPUT": "districts_boundary",
+       "FIELD": "district_code",
+       "INPUT_2": "census_data_table",
+       "FIELD_2": "code",
+       "METHOD": 1,  # 1:1 join
+       "PREFIX": "stat_"
+   }, output_name="districts_joined")
+   ```
+2. **Audit Post-Join Integrity:**
+   - Call `describe_layer("districts_joined")` or `field_stats("districts_joined", "stat_population")`.
+   - Inspect NULL counts: unmatched rows indicate code discrepancies or boundary version mismatches.
+   - Separate NULLs or zero values into an explicit "No Data" category rather than lumping them into the lowest statistical class.
+
+---
+
+## 3. Selecting the Correct Classification Method
+
+Use `field_stats` first to inspect the data distribution (min, max, mean, standard deviation, skewness):
+
+| Data Distribution | Recommended Method (`method=`) | Characteristics & Use Cases |
+| :--- | :--- | :--- |
+| **Skewed / Long-tailed** | `jenks` (Natural Breaks) | Minimizes within-class variance and maximizes between-class variance. Ideal for real-world census and economic data with extreme outliers. |
+| **Rankings / Percentiles**| `quantile` | Places an equal number of polygons in each class. Highlights relative standing (e.g., top 20%, bottom 20%), but may place vastly different values together in sparse tails. |
+| **Uniform / Familiar Scales** | `equal` | Divides range `(max - min)` into equal intervals (e.g. 0–20, 20–40). Ideal for percentages or standardized indices. Sensitive to outliers. |
+| **Public-Facing / Rounded** | `pretty` | Creates human-friendly round class boundaries (e.g., 10, 25, 50, 100). Highly readable on general public maps. |
+| **Diverging / Critical Mean** | `stddev` | Shows distance from the mean in standard deviation units (+1σ, +2σ, -1σ). Requires a diverging color ramp centered on the mean. |
+
+### Number of Classes Rule
+- **Use 5 classes as standard** (minimum 4, maximum 7).
+- Human visual perception struggles to distinguish more than 7 graduated tints reliably.
+
+---
+
+## 4. Color Theory & Palette Selection
+
+Use ColorBrewer-tested palettes:
+
+1. **Sequential Color Ramps (Single Direction: Low to High):**
+   - Population density, wealth, elevation, precipitation:
+     - `YlOrRd` (Yellow -> Orange -> Red): High visual energy, warmth, urgency.
+     - `Blues` (Light Blue -> Deep Navy): Water, rainfall, calm demographics.
+     - `Greens` (Pale Green -> Deep Forest): Agriculture, vegetation, income.
+     - `Viridis` (Yellow -> Green -> Purple): Perceptually uniform, excellent for colorblind accessibility and black-and-white printing.
+2. **Diverging Color Ramps (Two Extremes Around a Critical Neutral Center):**
+   - Population change (+ / -), election swings, standard deviations, temperature anomalies:
+     - `RdBu` (Red = Negative, Blue = Positive; or inverted).
+     - `Spectral` (Warm Red to Cool Blue with neutral Yellow center).
+     - `PiYG` (Pink to Yellow-Green).
+3. **Polygon Boundary Outlines:**
+   - Thin white outline (`outline_color="#ffffff"`, width 0.2–0.3 mm) provides crisp visual separation between dark saturated units.
+   - On light basemaps, use subtle slate gray (`outline_color="#b0bec5"`).
+
+---
+
+## 5. End-to-End Execution Sequence
+
+```python
+# 1. Reproject to an equal-area or local metric CRS
+run_processing("native:reprojectlayer", {
+    "INPUT": "admin_units",
+    "TARGET_CRS": "EPSG:32653"
+}, output_name="admin_metric")
+
+# 2. Compute density per square kilometer
+calculate_field(
+    layer="admin_metric",
+    field="pop_density",
+    expression="\"population\" / (area($geometry) / 1000000.0)"
+)
+
+# 3. Apply Graduated Symbology (5 classes, Jenks Natural Breaks)
+style_graduated(
+    layer="admin_metric",
+    field="pop_density",
+    classes=5,
+    method="jenks",
+    ramp="YlOrRd",
+    outline_color="#ffffff"
+)
+
+# 4. Optional background context: add muted, unobtrusive basemap below
+add_basemap(preset="carto_light")
+update_layer(layer="CartoDB Positron (No Key)", opacity=0.4)
+update_layer(layer="CartoDB Positron (No Key)", position=-1)  # Bottom of stack
+
+# 5. Build Print Layout
+create_layout(
+    name="Population_Density_Map",
+    title="POPULATION DENSITY BY ADMINISTRATIVE DISTRICT",
+    subtitle="Normalized Inhabitants per Square Kilometer · 2026 Census",
+    credits="Sources: National Bureau of Statistics · Projected CRS: WGS 84 / UTM Zone 53N",
+    page_size="A3",
+    orientation="landscape",
+    legend=True,
+    scalebar=True,
+    north_arrow=True
+)
+
+# 6. Verify and Export
+export_layout(name="Population_Density_Map", path="preview.png", preview=True)
+```

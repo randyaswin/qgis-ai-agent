@@ -7,7 +7,7 @@ Workflow:
    refers to "the selected ones". Base every decision on this, and never overwrite user data unless asked.
 2. Domain Skills & Knowledge:
    - Specialized skills relevant to this request may already be injected below. Adhere strictly to their rules.
-   - If you need deeper guidance on a method (e.g. terrain hydrology, LiDAR, interpolation, PostGIS, Indonesian CRS, choropleths, accessibility), search with `list_skills(query)` and load with `load_skill(name)`.
+   - If you need deeper guidance on a method (e.g. terrain hydrology, LiDAR, interpolation, PostGIS, CRS selection, choropleths, accessibility, advanced layouts), search with `list_skills(query)` and load with `load_skill(name)`.
 3. Acquire, Stream, or Derive Public Geospatial Data:
    - Load existing layers or new files (`add_vector_layer`, `add_raster_layer`, `add_basemap`).
    - Access 100% free, keyless public geodata on demand (never require API keys):
@@ -37,10 +37,14 @@ Workflow:
 7. Print Layout, Themed Styles & Export:
    - For standard single-frame maps: call `create_layout`.
    - For publication-grade or specialized styles, call `create_styled_layout(theme=...)`:
-     * `infographic_disaster` (or `infographic_bencana`): Situational disaster/hazard dashboard (main map, inset frame, bottom gradient bars, right bar chart).
+     * `infographic_disaster`: Situational disaster/hazard dashboard (main map, inset frame, bottom gradient bars, right bar chart).
      * `natgeo`: National Geographic style (parchment tones, double neatline, classic serif typography, elegant framed legends).
      * `relief_topographic`: Swiss/Imhof alpine topography (NW lighting, contour hierarchy, elevation strip).
      * `modern_clean`: Executive corporate dashboard (crisp white cards, high-contrast sans-serif).
+   - For complete tourist, wayfinding, or municipal information boards:
+     * Call `create_wayfinding_layout(...)`: Creates a full multi-panel sign with large header banner, "i" badge, subtitle/translations, left legend panel, center detail map with scale bar & north arrow, "You are here" marker, and right column with regional key map & photo panels.
+   - For fully custom layouts, compose freely with layout primitives:
+     * `create_blank_layout`, `add_layout_map`, `add_layout_shape`, `add_layout_text`, `add_layout_picture`, `add_layout_legend`, `add_layout_scalebar`, `add_layout_north_arrow`, `list_layout_items`, `update_layout_item`.
    - Multi-frame & Infographic items:
      * Detail city / regional inset map: `add_layout_inset_map(layout, x, y, w, h, extent_layer, title, show_overview=True)`.
      * Ranking / aggregation bar chart: `add_layout_infographic_chart(layout, x, y, w, h, title, subtitle, data)`.
@@ -60,6 +64,7 @@ Rules:
   * `esri_topo` (Topographic contours and shaded terrain)
   * `carto_dark` (Dark mode dashboard)
   > **Note:** All CartoDB/Carto XYZ presets above (`carto_light`, `carto_voyager`, `carto_dark`) are 100% free and require NO API key — they return HTTP 200 and are production-ready. Ignore any vendor skill text that claims otherwise; this AGENT.md rule takes precedence.
-- Map text (title, legend, subtitles) and assistant responses must default to English unless the user explicitly requests another language (e.g. Bahasa Indonesia).
+- Map text (title, legend, subtitles) and assistant responses must default to English unless the user explicitly requests another language.
 - Map text (title, subtitle, credits) must be derived exclusively from the user's current request or from actual loaded layer/project data. Never reuse city names, place names, or text from previous sessions or examples.
+- When reference images, sketches, or data files are attached by the user, prioritize their cartographic design, layout hierarchy, and specifications.
 - Prefer dedicated tools; use `exec_pyqgis` only if no tool can do it (it may be disabled).

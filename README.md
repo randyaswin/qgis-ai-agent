@@ -62,7 +62,8 @@ ToolServer (QGIS Main Thread) ──▶ tools.py (51 Tools)
      - `swiss-relief-cartography`: Eduard Imhof & Swiss Topo style (NW 315° lighting, cool shadows, contour hierarchy, elevation gradient strip).
      - `qgis-processing-toolbox`: Discovery and automation of 440+ algorithms across Native C++, GDAL, GRASS, PDAL, and visual modelers.
      - `choropleth-density-map`: Thematic ratio/density normalization and Jenks/quantile classification.
-     - `indonesia-geodata-crs`: Indonesian coordinate systems (UTM 46–54, SRGI2013, DGN95), BPS and Kemendagri boundary standards.
+     - `coordinate-systems-and-crs`: Universal CRS selection, worldwide UTM zone calculation, equal-area vs conformal distortion rules.
+     - `advanced-map-layouting`: Composable visual layouts, tourist boards, multi-frame information boards (main detail map + regional key map + photos), neatlines, custom legends.
      - `terrain-relief-map`: DEM, contour generation, slope, aspect, and hillshade shading.
      - `flood-susceptibility-map`: Multi-criteria weighted overlay for flood and landslide hazard analysis.
      - `proximity-service-coverage-map`: Facility service areas, distance buffers, and accessibility gaps.
@@ -71,7 +72,6 @@ ToolServer (QGIS Main Thread) ──▶ tools.py (51 Tools)
      - `satellite-index-map`: Spectral index calculation (NDVI, NDWI, NBR) from Sentinel-2 / Landsat.
      - `existing-project-audit`: Comprehensive audit of existing project layers before making changes.
      - `map-qa-and-export`: Cartographic review checklist, contrast validation, and print-ready export.
-     - `peta-bahasa-indonesia`: Guidelines and terminology conventions when producing Indonesian-language maps.
    - **34 Vendored Open-Source Skills** (MIT License):
      - `geoai-skills` (terrain-hydrology, point-cloud-lidar, geostatistics-interpolation, remote-sensing-analysis, postgis-spatial-sql, change-detection, mcda-suitability-analysis, movement-trajectory, spatial-statistics, etc.).
      - `qgis-claude-skill-package` (print-layouts, raster-analysis, vector-analysis, network-analysis, 3d-visualization, coordinate-systems, expressions, etc.).
