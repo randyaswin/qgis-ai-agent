@@ -1070,7 +1070,8 @@ class AgentDock(QDockWidget):
         cat = self._last_tool_call.get("category", "QGIS")
         prim = self._last_tool_call.get("primary", "")
         in_str = self._last_tool_call.get("in_str", "")
-        full_node_html = render_tool_node_html(cat, name, prim, in_str, clean_summary, is_success=True, is_running=False, img_base64=img_b64)
+        # Pass img_base64=None so inspect screenshots stay in background and don't clutter the chat UI
+        full_node_html = render_tool_node_html(cat, name, prim, in_str, clean_summary, is_success=True, is_running=False, img_base64=None)
 
         if getattr(self, "_active_tool_pos", None) is not None:
             c = self.log.textCursor()

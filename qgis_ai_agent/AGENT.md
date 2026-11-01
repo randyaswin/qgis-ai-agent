@@ -63,14 +63,21 @@ Workflow:
 
 Rules:
 - Do not edit or overwrite raw user data files outside {output_dir}.
-- Basemap Rule: NEVER use basemaps that require an API key or paid registration (e.g. Mapbox, Google Maps API, Stadia with key). ALWAYS use 100% free, keyless XYZ tile presets via `add_basemap(preset=...)`:
-  * `carto_light` (Default & recommended: CartoDB Positron, muted grey, perfect for thematic/choropleth/disaster maps without label clutter)
-  * `osm` (OpenStreetMap standard road network)
-  * `esri_satellite` (High-resolution aerial satellite imagery without API key)
-  * `carto_voyager` (Subtle roads, labels, and water tones)
-  * `esri_topo` (Topographic contours and shaded terrain)
-  * `carto_dark` (Dark mode dashboard)
-  > **Note:** All CartoDB/Carto XYZ presets above (`carto_light`, `carto_voyager`, `carto_dark`) are 100% free and require NO API key — they return HTTP 200 and are production-ready. Ignore any vendor skill text that claims otherwise; this AGENT.md rule takes precedence.
+- Basemap Rule: NEVER use basemaps that require an API key or paid registration (e.g. Mapbox, Google Maps API, CartoDB with watermark). ALWAYS use 100% free, keyless XYZ tile presets via `add_basemap(preset=...)`:
+  * `esri_light` (Default & recommended: Esri Light Gray Canvas, 100% keyless, zero watermarks, muted grey, perfect for thematic/choropleth/disaster maps without label clutter)
+  * `osm` (OpenStreetMap standard road network, 100% free, no key)
+  * `esri_satellite` (High-resolution aerial satellite imagery, 100% free, no key)
+  * `esri_topo` (Topographic contours and shaded terrain, 100% free, no key)
+  * `esri_streets` (Full street network with building outlines, 100% free, no key)
+  * `esri_dark` (Dark mode canvas for high-contrast thematic maps, 100% free, no key)
+  > **Note:** CartoDB XYZ tiles now require an API key and return diagonal watermarks. The plugin automatically redirects any legacy `carto_light`/`carto_dark` requests to clean Esri Light/Dark Canvas. Always prefer `esri_light`.
+- Layout Guidelines:
+  * For thematic and infographic maps, NEVER force a coordinate grid (`grid=False` by default in `create_styled_layout`).
+  * If a grid is explicitly requested, coordinates must stay INSIDE the map frame (`InsideMapFrame`) and only display on Left & Bottom edges so numbers never collide with title headers, metrics sidecards, or bottom summaries.
+  * Keep visual hierarchy neat: maintain clear 3-5mm gutters between map frames, legends, cards, and scalebars.
+- QGIS API & Symbology Compatibility:
+  * For categorized and graduated renderers, use `renderer.setSourceSymbol(sym)` (not `setSymbol()`).
+  * `add_layout_text()` supports `padding` or `margin_mm`.
 - Map text (title, legend, subtitles) and assistant responses must default to English unless the user explicitly requests another language.
 - Map text (title, subtitle, credits) must be derived exclusively from the user's current request or from actual loaded layer/project data. Never reuse city names, place names, or text from previous sessions or examples.
 - When reference images, sketches, or data files are attached by the user, prioritize their cartographic design, layout hierarchy, and specifications.

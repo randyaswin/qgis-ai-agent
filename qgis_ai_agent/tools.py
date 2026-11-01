@@ -32,6 +32,13 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QMetaType
 
+# QGIS API compatibility monkey-patches for renderer symbol setters
+if hasattr(QgsCategorizedSymbolRenderer, "setSourceSymbol") and not hasattr(QgsCategorizedSymbolRenderer, "setSymbol"):
+    QgsCategorizedSymbolRenderer.setSymbol = lambda self, sym: self.setSourceSymbol(sym)
+
+if hasattr(QgsGraduatedSymbolRenderer, "setSourceSymbol") and not hasattr(QgsGraduatedSymbolRenderer, "setSymbol"):
+    QgsGraduatedSymbolRenderer.setSymbol = lambda self, sym: self.setSourceSymbol(sym)
+
 TOOLS = {}
 ALLOW_PYTHON = {"value": True}
 
@@ -410,34 +417,39 @@ def digitize_features(layer, features, auto_fix_geometry=True):
 
 
 BASEMAP_PRESETS = {
-    "carto_light": ("https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png", "CartoDB Positron (No Key)", 20),
-    "osm": ("https://tile.openstreetmap.org/{z}/{x}/{y}.png", "OpenStreetMap (No Key)", 19),
+    "esri_light": ("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}", "Esri Light Gray Canvas (No Key)", 19),
+    "carto_light": ("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}", "Light Gray Canvas (No Key)", 19),
+    "osm": ("https://tile.openstreetmap.org/{z}/{x}/{y}.png", "OpenStreetMap Standard (No Key)", 19),
     "esri_satellite": ("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", "Esri World Imagery (No Key)", 19),
-    "carto_voyager": ("https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png", "CartoDB Voyager (No Key)", 20),
-    "carto_dark": ("https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png", "CartoDB Dark Matter (No Key)", 20),
+    "esri_dark": ("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", "Esri Dark Gray Canvas (No Key)", 19),
+    "carto_dark": ("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", "Dark Gray Canvas (No Key)", 19),
+    "carto_voyager": ("https://tile.openstreetmap.org/{z}/{x}/{y}.png", "OpenStreetMap (No Key)", 19),
     "esri_topo": ("https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}", "Esri World Topo (No Key)", 19),
+    "esri_streets": ("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", "Esri World Street Map (No Key)", 19),
+    "opentopomap": ("https://tile.opentopomap.org/{z}/{x}/{y}.png", "OpenTopoMap (No Key)", 17),
 }
 
 
 @tool("Add a 100% free XYZ tile basemap at the bottom of the layer stack without requiring ANY API key. "
-      "Choose from proven no-key presets: 'carto_light' (default, recommended muted grey for thematic & choropleth maps), "
+      "Choose from proven 100% keyless presets: 'esri_light' (default, pristine muted grey for thematic & choropleth maps), "
       "'osm' (OpenStreetMap standard roads), 'esri_satellite' (high-res public aerial imagery), "
-      "'carto_voyager' (subtle roads/labels), 'carto_dark' (dark mode), or 'esri_topo' (topographic). "
+      "'esri_dark' (dark grey mode), 'esri_topo' (topographic), or 'esri_streets'. "
       "Never use basemaps that require API keys or credentials.",
-      {"preset": S("string", "'carto_light' | 'osm' | 'esri_satellite' | 'carto_voyager' | 'carto_dark' | 'esri_topo' (default 'carto_light')"),
+      {"preset": S("string", "'esri_light' | 'osm' | 'esri_satellite' | 'esri_dark' | 'esri_topo' | 'esri_streets' (default 'esri_light')"),
        "url": S("string", "custom keyless XYZ tile URL template"),
        "name": S("string", "optional custom layer name")})
-def add_basemap(preset="carto_light", url=None, name=None):
-    if preset and preset.lower() in BASEMAP_PRESETS:
-        p_url, p_name, zmax = BASEMAP_PRESETS[preset.lower()]
+def add_basemap(preset="esri_light", url=None, name=None, **kwargs):
+    preset_key = (preset or "esri_light").lower()
+    if preset_key in BASEMAP_PRESETS:
+        p_url, p_name, zmax = BASEMAP_PRESETS[preset_key]
         target_url = url or p_url
         layer_name = name or p_name
     else:
-        target_url = url or BASEMAP_PRESETS["carto_light"][0]
+        target_url = url or BASEMAP_PRESETS["esri_light"][0]
         layer_name = name or "Basemap"
         zmax = 19
 
-    uri = f"type=xyz&url={target_url}&zmax={zmax}&zmin=0&http-header:User-Agent=QGIS-AI-Agent"
+    uri = f"type=xyz&url={target_url}&zmax={zmax}&zmin=0&http-header:User-Agent=Mozilla/5.0%20(Windows%20NT%2010.0;%20Win64;%20x64)%20QGIS/3.44"
     lyr = QgsRasterLayer(uri, layer_name, "wms")
     if not lyr.isValid():
         raise ValueError(f"Basemap failed to load from {target_url}")
@@ -1227,7 +1239,7 @@ def create_layout(name="Map", title="", subtitle="", credits="", page_size="A4",
        "show_overview_on_main": S("boolean", "draw an overview rectangle on the main map (default true)"),
        "grid": S("boolean", "include coordinate grid on the inset map")})
 def add_layout_inset_map(layout, x, y, width, height, extent_layer=None, bbox=None, scale=None,
-                         title="", show_overview_on_main=True, grid=False):
+                         title="", show_overview_on_main=True, grid=False, **kwargs):
     lay = QgsProject.instance().layoutManager().layoutByName(layout)
     if not lay:
         raise ValueError(f"No layout {layout}")
@@ -1305,7 +1317,7 @@ def add_layout_inset_map(layout, x, y, width, height, extent_layer=None, bbox=No
        "data": S("array", "list of dicts [{'label':'District A','value':36}, ...] or key-value dict"),
        "bar_color": S("string", "hex color, default '#2b5c8f'"),
        "max_value": S("number", "optional axis maximum for percentage scaling")})
-def add_layout_infographic_chart(layout, x, y, width, height, title, subtitle="", data=None, bar_color="#2b5c8f", max_value=None):
+def add_layout_infographic_chart(layout, x, y, width, height, title, subtitle="", data=None, bar_color="#2b5c8f", max_value=None, **kwargs):
     import html as _html
     lay = QgsProject.instance().layoutManager().layoutByName(layout)
     if not lay:
@@ -1368,7 +1380,7 @@ def add_layout_infographic_chart(layout, x, y, width, height, title, subtitle=""
        "min_val": S("string", "minimum label e.g. '-3' or '0 Rendah'"),
        "max_val": S("string", "maximum label e.g. '2.945' or '1 Tinggi'"),
        "invert_ramp": S("boolean", "invert color direction")})
-def add_layout_gradient_legend(layout, x, y, width, height, title, ramp="Spectral", min_val="0", max_val="100", invert_ramp=False):
+def add_layout_gradient_legend(layout, x, y, width, height, title, ramp="Spectral", min_val="0", max_val="100", invert_ramp=False, **kwargs):
     import html as _html
     lay = QgsProject.instance().layoutManager().layoutByName(layout)
     if not lay:
@@ -1409,7 +1421,7 @@ def add_layout_gradient_legend(layout, x, y, width, height, title, ramp="Spectra
        "badge": S("string", "e.g. 'A', 'B', 'C'"),
        "pointer_x": S("number", "optional pointer target x in layout mm"),
        "pointer_y": S("number", "optional pointer target y in layout mm")})
-def add_layout_callout_box(layout, x, y, width, height, title, subtitle="", badge="", pointer_x=None, pointer_y=None):
+def add_layout_callout_box(layout, x, y, width, height, title, subtitle="", badge="", pointer_x=None, pointer_y=None, **kwargs):
     import html as _html
     lay = QgsProject.instance().layoutManager().layoutByName(layout)
     if not lay:
@@ -1442,7 +1454,6 @@ def add_layout_callout_box(layout, x, y, width, height, title, subtitle="", badg
         from qgis.core import QgsLayoutItemPolyline
         from qgis.PyQt.QtCore import QPointF
         from qgis.PyQt.QtGui import QPolygonF
-        # Connect from card center edge to target
         start_x = float(x) + (float(width) if float(pointer_x) > float(x) else 0)
         start_y = float(y) + float(height) / 2
         line = QgsLayoutItemPolyline(QPolygonF([QPointF(start_x, start_y), QPointF(float(pointer_x), float(pointer_y))]), lay)
@@ -1460,10 +1471,11 @@ def add_layout_callout_box(layout, x, y, width, height, title, subtitle="", badg
        "extent_layer": S("string", "main study area layer name"),
        "page_size": S("string", "A4|A3|A2, default A3"),
        "orientation": S("string", "landscape|portrait, default landscape"),
-       "grid": S("boolean", "include coordinate grid (default true)")})
+       "grid": S("boolean", "include coordinate grid (default false)")})
 def create_styled_layout(name="Map", style_theme="infographic_disaster", title="", subtitle="", credits="",
-                         extent_layer=None, page_size="A3", orientation="landscape", grid=True):
+                         extent_layer=None, page_size="A3", orientation="landscape", grid=False, **kwargs):
     import html as _html
+    import math
     p = QgsProject.instance()
     mgr = p.layoutManager()
     old = mgr.layoutByName(name)
@@ -1492,33 +1504,35 @@ def create_styled_layout(name="Map", style_theme="infographic_disaster", title="
         page.setBackgroundColor(QColor("#fcfbf7"))
 
     # Top Header
-    header_h = 20 if title else 0
+    header_h = 18 if title else 0
     if title:
         header_card = QgsLayoutItemLabel(lay)
         header_card.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
-        sub_txt = f"<div style='font-size: 11px; color: #546e7a; margin-top: 2px;'>{_html.escape(subtitle)}</div>" if subtitle else ""
+        sub_txt = f"<div style='font-size: 10.5px; color: #546e7a; margin-top: 2px;'>{_html.escape(subtitle)}</div>" if subtitle else ""
         border_css = "border: 1.5px solid #263238;" if is_natgeo else "border: 1px solid #cfd8dc; border-radius: 5px;"
         bg_css = "background: #fbf9f4;" if is_natgeo else "background: #ffffff;"
         header_card.setText(
-            f"<div style='font-family: {font_family}, serif; text-align: center; padding: 6px; {bg_css} {border_css}'>"
-            f"<div style='font-size: 16px; font-weight: bold; color: #0d47a1; letter-spacing: 0.8px;'>{_html.escape(title)}</div>"
+            f"<div style='font-family: {font_family}, serif; text-align: center; padding: 5px; {bg_css} {border_css}'>"
+            f"<div style='font-size: 15px; font-weight: bold; color: #0d47a1; letter-spacing: 0.8px;'>{_html.escape(title)}</div>"
             f"{sub_txt}"
             f"</div>"
         )
         lay.addLayoutItem(header_card)
         header_card.attemptMove(QgsLayoutPoint(m, m, mm))
-        header_card.attemptResize(QgsLayoutSize(W - 2 * m, 18, mm))
+        header_card.attemptResize(QgsLayoutSize(W - 2 * m, header_h, mm))
 
-    # Main Map frame placement
-    map_top = m + (22 if title else 0)
-    bottom_h = 55 if is_infographic else 20
-    right_w = 80 if is_infographic else 0
+    # Main Map frame placement with strict non-overlapping gutters
+    map_top = m + (header_h + 3 if title else 0)
+    bottom_h = 58 if is_infographic else 18
+    right_w = 82 if is_infographic else 0
+    map_w = W - 2 * m - right_w
+    map_h = H - map_top - bottom_h
 
     mp = QgsLayoutItemMap(lay)
     mp.setRect(0, 0, 10, 10)
     lay.addLayoutItem(mp)
     mp.attemptMove(QgsLayoutPoint(m, map_top, mm))
-    mp.attemptResize(QgsLayoutSize(W - 2 * m - right_w, H - map_top - bottom_h, mm))
+    mp.attemptResize(QgsLayoutSize(map_w, map_h, mm))
 
     if extent_layer:
         lyr = _layer(extent_layer)
@@ -1528,35 +1542,60 @@ def create_styled_layout(name="Map", style_theme="infographic_disaster", title="
         ext = _canvas().extent()
     mp.zoomToExtent(ext)
     mp.setFrameEnabled(True)
+    mp.setFrameStrokeColor(QColor("#334155"))
+    mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.3, mm))
 
-    # Coordinate Grid
+    # Coordinate Grid (default False; when enabled, coordinates stay INSIDE frame so they never overlap outer panels)
     if grid:
-        from qgis.core import QgsLayoutItemMapGrid
+        from qgis.core import QgsLayoutItemMapGrid, QgsLineSymbol
         g = QgsLayoutItemMapGrid("grid", mp)
-        iv = max(ext.width(), ext.height()) / 5
-        g.setIntervalX(iv)
-        g.setIntervalY(iv)
+        g.setStyle(QgsLayoutItemMapGrid.GridStyle.Cross)
+        g.setCrossLength(1.5)
+
+        map_crs = mp.crs() if hasattr(mp, "crs") and mp.crs().isValid() else p.crs()
+        if map_crs.isGeographic():
+            iv = max(round(max(ext.width(), ext.height()) / 4, 3), 0.001)
+            g.setIntervalX(iv)
+            g.setIntervalY(iv)
+            g.setAnnotationFormat(QgsLayoutItemMapGrid.AnnotationFormat.DegreeMinute)
+            g.setAnnotationPrecision(1)
+        else:
+            raw_iv = max(ext.width(), ext.height()) / 5
+            mag = 10 ** math.floor(math.log10(max(raw_iv, 1)))
+            clean_iv = max(round(raw_iv / mag) * mag, mag)
+            g.setIntervalX(clean_iv)
+            g.setIntervalY(clean_iv)
+            g.setAnnotationFormat(QgsLayoutItemMapGrid.AnnotationFormat.Decimal)
+            g.setAnnotationPrecision(0)
+
         g.setAnnotationEnabled(True)
-        g.setAnnotationFormat(QgsLayoutItemMapGrid.AnnotationFormat.DegreeMinute if is_natgeo or is_infographic else QgsLayoutItemMapGrid.AnnotationFormat.Decimal)
+        g.setAnnotationPosition(QgsLayoutItemMapGrid.InsideMapFrame, QgsLayoutItemMapGrid.BorderSide.Left)
+        g.setAnnotationPosition(QgsLayoutItemMapGrid.InsideMapFrame, QgsLayoutItemMapGrid.BorderSide.Bottom)
+        g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.HideAll, QgsLayoutItemMapGrid.BorderSide.Top)
+        g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.HideAll, QgsLayoutItemMapGrid.BorderSide.Right)
+        g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.ShowAll, QgsLayoutItemMapGrid.BorderSide.Bottom)
+        g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.ShowAll, QgsLayoutItemMapGrid.BorderSide.Left)
+        g.setAnnotationDirection(QgsLayoutItemMapGrid.Vertical, QgsLayoutItemMapGrid.BorderSide.Left)
+        g.setLineSymbol(QgsLineSymbol.createSimple({"color": "#94a3b8", "width": "0.15", "opacity": "0.6"}))
         mp.grids().addGrid(g)
 
-    # Scale bar
+    # Scale bar (placed inside map at bottom left)
     sb = QgsLayoutItemScaleBar(lay)
     sb.setStyle("Single Box" if is_natgeo else "Line Ticks Up")
     sb.setLinkedMap(mp)
     sb.applyDefaultSize()
     lay.addLayoutItem(sb)
-    sb.attemptMove(QgsLayoutPoint(m + 5, H - bottom_h - 15, mm))
+    sb.attemptMove(QgsLayoutPoint(m + 5, map_top + map_h - 12, mm))
 
-    # North arrow
+    # North arrow (placed inside map at top right, clear of right panel)
     na = QgsLayoutItemPicture(lay)
     na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
     na.setLinkedMap(mp)
     lay.addLayoutItem(na)
-    na.attemptResize(QgsLayoutSize(14, 20, mm))
-    na.attemptMove(QgsLayoutPoint(W - 2 * m - right_w - 18, map_top + 4, mm))
+    na.attemptResize(QgsLayoutSize(12, 18, mm))
+    na.attemptMove(QgsLayoutPoint(m + map_w - 18, map_top + 4, mm))
 
-    # Credits footer
+    # Credits footer (placed at bottom margin)
     if credits:
         lbl_cred = QgsLayoutItemLabel(lay)
         lbl_cred.setText(f"Sources: {credits} | Created with QGIS {Qgis.version()}")
@@ -1565,11 +1604,12 @@ def create_styled_layout(name="Map", style_theme="infographic_disaster", title="
         lbl_cred.setTextFormat(fmt)
         lay.addLayoutItem(lbl_cred)
         lbl_cred.attemptMove(QgsLayoutPoint(m, H - m - 4, mm))
-        lbl_cred.attemptResize(QgsLayoutSize(W - 2 * m, 6, mm))
+        lbl_cred.attemptResize(QgsLayoutSize(W - 2 * m, 5, mm))
 
     mgr.addLayout(lay)
     return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale(),
-            "inset_reserved_left": is_infographic, "chart_reserved_right": is_infographic}
+            "right_panel_rect": [m + map_w + 3, map_top, right_w - 3, map_h] if is_infographic else None,
+            "bottom_panel_rect": [m, map_top + map_h + 3, W - 2 * m, bottom_h - 3 - 6] if is_infographic else None}
 
 
 @tool("Change any layout item text or the map scale/extent after creation.",

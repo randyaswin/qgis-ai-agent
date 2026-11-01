@@ -128,9 +128,9 @@ style_graduated(
 )
 
 # 4. Optional background context: add muted, unobtrusive basemap below
-add_basemap(preset="carto_light")
-update_layer(layer="CartoDB Positron (No Key)", opacity=0.4)
-update_layer(layer="CartoDB Positron (No Key)", position=-1)  # Bottom of stack
+add_basemap(preset="esri_light")
+update_layer(layer="Light Gray Canvas (No Key)", opacity=0.4)
+update_layer(layer="Light Gray Canvas (No Key)", position=-1)  # Bottom of stack
 
 # 5. Build Print Layout
 create_layout(

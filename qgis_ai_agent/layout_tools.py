@@ -201,7 +201,7 @@ def create_blank_layout(name="Map", page_size="A3", orientation="landscape", wid
        "rotation": S("number", "map rotation degrees")})
 def add_layout_map(layout, x, y, width, height, item_id=None, extent_layer=None, bbox=None, bbox_crs=None, scale=None,
                    margin=0.05, layers=None, overview_of=None, overview_color="#c62828", frame_color="#333333",
-                   frame_width=0.3, background=None, grid=False, grid_interval=None, rotation=None):
+                   frame_width=0.3, background=None, grid=False, grid_interval=None, rotation=None, **kwargs):
     lay = _lay(layout)
     mp = QgsLayoutItemMap(lay)
     mp.setRect(0, 0, 10, 10)
@@ -229,12 +229,35 @@ def add_layout_map(layout, x, y, width, height, item_id=None, extent_layer=None,
                                                       "outline_width": "0.8"}))
         mp.overviews().addOverview(ov)
     if grid:
+        import math
         g = QgsLayoutItemMapGrid("grid", mp)
-        iv = float(grid_interval) if grid_interval else max(ext.width(), ext.height()) / 5
-        g.setIntervalX(iv)
-        g.setIntervalY(iv)
+        g.setStyle(QgsLayoutItemMapGrid.GridStyle.Cross)
+        g.setCrossLength(1.5)
+        map_crs = mp.crs() if hasattr(mp, "crs") and mp.crs().isValid() else QgsProject.instance().crs()
+        if map_crs.isGeographic():
+            iv = float(grid_interval) if grid_interval else max(round(max(ext.width(), ext.height()) / 4, 3), 0.001)
+            g.setIntervalX(iv)
+            g.setIntervalY(iv)
+            g.setAnnotationFormat(QgsLayoutItemMapGrid.AnnotationFormat.DegreeMinute)
+            g.setAnnotationPrecision(1)
+        else:
+            raw_iv = float(grid_interval) if grid_interval else max(ext.width(), ext.height()) / 5
+            mag = 10 ** math.floor(math.log10(max(raw_iv, 1)))
+            iv = max(round(raw_iv / mag) * mag, mag)
+            g.setIntervalX(iv)
+            g.setIntervalY(iv)
+            g.setAnnotationFormat(QgsLayoutItemMapGrid.AnnotationFormat.Decimal)
+            g.setAnnotationPrecision(0)
+
         g.setAnnotationEnabled(True)
-        g.setFrameStyle(QgsLayoutItemMapGrid.FrameStyle.Zebra)
+        g.setAnnotationPosition(QgsLayoutItemMapGrid.InsideMapFrame, QgsLayoutItemMapGrid.BorderSide.Left)
+        g.setAnnotationPosition(QgsLayoutItemMapGrid.InsideMapFrame, QgsLayoutItemMapGrid.BorderSide.Bottom)
+        g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.HideAll, QgsLayoutItemMapGrid.BorderSide.Top)
+        g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.HideAll, QgsLayoutItemMapGrid.BorderSide.Right)
+        g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.ShowAll, QgsLayoutItemMapGrid.BorderSide.Bottom)
+        g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.ShowAll, QgsLayoutItemMapGrid.BorderSide.Left)
+        g.setAnnotationDirection(QgsLayoutItemMapGrid.Vertical, QgsLayoutItemMapGrid.BorderSide.Left)
+        g.setLineSymbol(QgsLineSymbol.createSimple({"color": "#94a3b8", "width": "0.15", "opacity": "0.6"}))
         mp.grids().addGrid(g)
     lay.refresh()
     return {"item_id": mp.id() or mp.uuid(), "scale": round(mp.scale()), "extent": [ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()]}
@@ -247,7 +270,7 @@ def add_layout_map(layout, x, y, width, height, item_id=None, extent_layer=None,
        "stroke_width": S("number", "mm, default 0.3"), "corner_radius": S("number", "mm, rounded corners for rectangles"),
        "opacity": S("number", "0..1")})
 def add_layout_shape(layout, x, y, width, height, item_id=None, shape="rectangle", fill="#ffffff", stroke="none",
-                     stroke_width=0.3, corner_radius=0, opacity=None):
+                     stroke_width=0.3, corner_radius=0, opacity=None, **kwargs):
     lay = _lay(layout)
     it = QgsLayoutItemShape(lay)
     kinds = {"rectangle": QgsLayoutItemShape.Shape.Rectangle, "ellipse": QgsLayoutItemShape.Shape.Ellipse,
@@ -278,15 +301,25 @@ def add_layout_shape(layout, x, y, width, height, item_id=None, shape="rectangle
        "halo_color": S("string", "text halo colour"), "halo_size": S("number", "halo mm")})
 def add_layout_text(layout, x, y, width, height, text, item_id=None, size=10, color="#000000", font=None, bold=False,
                     italic=False, align="left", valign="middle", background=None, frame_color=None, padding=1.0,
-                    html=False, halo_color=None, halo_size=0):
+                    html=False, halo_color=None, halo_size=0, **kwargs):
+    if "margin_mm" in kwargs:
+        padding = kwargs["margin_mm"]
+    elif "margin" in kwargs:
+        padding = kwargs["margin"]
+    elif "padding_mm" in kwargs:
+        padding = kwargs["padding_mm"]
+
+    margin_x = float(kwargs.get("margin_x", padding))
+    margin_y = float(kwargs.get("margin_y", padding))
+
     lay = _lay(layout)
     it = QgsLayoutItemLabel(lay)
     it.setText(text)
     it.setTextFormat(_fmt(size, color, bold, font, italic, halo_color, halo_size, html))
     it.setHAlign(ALIGN_H.get(align, Qt.AlignmentFlag.AlignLeft))
     it.setVAlign(ALIGN_V.get(valign, Qt.AlignmentFlag.AlignVCenter))
-    it.setMarginX(float(padding))
-    it.setMarginY(float(padding))
+    it.setMarginX(margin_x)
+    it.setMarginY(margin_y)
     if background:
         it.setBackgroundEnabled(True)
         it.setBackgroundColor(QColor(background))
@@ -302,7 +335,7 @@ def add_layout_text(layout, x, y, width, height, text, item_id=None, size=10, co
        "path": S("string", "file path, URL, or QGIS SVG name (see list_svg_icons)"), "item_id": S("string", ""),
        "fit": S("string", "zoom (keep aspect, default) | stretch | clip | zoom_resize"),
        "frame_color": S("string", "optional border colour"), "svg_fill": S("string", "fill colour for parametrised SVGs")})
-def add_layout_picture(layout, x, y, width, height, path, item_id=None, fit="zoom", frame_color=None, svg_fill=None):
+def add_layout_picture(layout, x, y, width, height, path, item_id=None, fit="zoom", frame_color=None, svg_fill=None, **kwargs):
     lay = _lay(layout)
     it = QgsLayoutItemPicture(lay)
     src = path
@@ -338,7 +371,7 @@ def add_layout_picture(layout, x, y, width, height, path, item_id=None, fit="zoo
 def add_layout_legend(layout, x, y, width=None, height=None, item_id=None, map_id=None, title="Legend", layers=None,
                       columns=1, title_size=12, item_size=9, layer_title_size=10, hide_layer_titles=False,
                       symbol_width=6, symbol_height=4, text_color="#222222", background="#ffffff", frame_color="#999999",
-                      filter_by_map=False):
+                      filter_by_map=False, **kwargs):
     lay = _lay(layout)
     lg = QgsLayoutItemLegend(lay)
     lg.setTitle(title or "")
@@ -395,7 +428,7 @@ def add_layout_legend(layout, x, y, width=None, height=None, item_id=None, map_i
        "height": S("number", "bar height mm, default 2"), "font_size": S("number", "pt, default 8"),
        "color": S("string", "bar and text colour, default '#222222'"), "background": S("string", "optional fill behind bar")})
 def add_layout_scalebar(layout, x, y, item_id=None, map_id=None, style="Line Ticks Up", units=None, segments=4,
-                        units_per_segment=None, height=2, font_size=8, color="#222222", background=None):
+                        units_per_segment=None, height=2, font_size=8, color="#222222", background=None, **kwargs):
     lay = _lay(layout)
     mp = _map(lay, map_id)
     sb = QgsLayoutItemScaleBar(lay)
@@ -432,7 +465,7 @@ def add_layout_scalebar(layout, x, y, item_id=None, map_id=None, style="Line Tic
        "item_id": S("string", ""), "map_id": S("string", "default first map"),
        "style": S("string", "'default' | 'circle' | 'simple' | path/name of an SVG arrow"),
        "color": S("string", "fill colour for parametrised arrows, default '#222222'")})
-def add_layout_north_arrow(layout, x, y, size=12, item_id=None, map_id=None, style="default", color="#222222"):
+def add_layout_north_arrow(layout, x, y, size=12, item_id=None, map_id=None, style="default", color="#222222", **kwargs):
     lay = _lay(layout)
     presets = {"default": ":/images/north_arrows/layout_default_north_arrow.svg",
                "circle": "arrows/NorthArrow_04.svg", "simple": "arrows/NorthArrow_02.svg"}
@@ -480,7 +513,7 @@ def list_layout_items(layout):
        "z": S("number", "stacking order (higher = on top)"), "scale": S("number", "map scale denominator"),
        "extent_layer": S("string", "map: fit to layer"), "bbox": S("array", "map: [xmin,ymin,xmax,ymax] project CRS", items={"type": "number"})})
 def update_layout_item(layout, item_id, x=None, y=None, width=None, height=None, text=None, size=None, color=None,
-                       background=None, visible=None, delete=False, z=None, scale=None, extent_layer=None, bbox=None):
+                       background=None, visible=None, delete=False, z=None, scale=None, extent_layer=None, bbox=None, **kwargs):
     lay = _lay(layout)
     it = lay.itemById(str(item_id)) or lay.itemByUuid(str(item_id))
     if not it:
