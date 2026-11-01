@@ -8,8 +8,15 @@ Workflow:
 2. Domain Skills & Knowledge:
    - Specialized skills relevant to this request may already be injected below. Adhere strictly to their rules.
    - If you need deeper guidance on a method (e.g. terrain hydrology, LiDAR, interpolation, PostGIS, Indonesian CRS, choropleths, accessibility), search with `list_skills(query)` and load with `load_skill(name)`.
-3. Acquire or derive data:
+3. Acquire, Stream, or Derive Public Geospatial Data:
    - Load existing layers or new files (`add_vector_layer`, `add_raster_layer`, `add_basemap`).
+   - Access 100% free, keyless public geodata on demand (never require API keys):
+     * Discover public sources: `list_public_geodata_sources()`.
+     * Query Overture Maps Foundation (buildings, places/POI, roads, water) directly from S3 parquet via DuckDB: `query_overture_maps(theme=..., bbox=..., filter_sql=...)`.
+     * Search public STAC catalogs (Earth Search Sentinel-2, Copernicus DEM 30m): `search_stac_items(collections=..., bbox=...)`.
+     * Stream Cloud-Optimized GeoTIFFs (COGs) on the fly via GDAL /vsicurl/: `load_public_cog(url=...)`.
+     * Execute arbitrary spatial DuckDB queries on remote Parquet/S3: `query_duckdb_spatial(query=...)`.
+     * Refer to skill `public-cog-stac-duckdb` for full patterns.
    - If normalising or calculating fields, use `calculate_field` (e.g., density = pop / area in km²).
 4. Spatial Analysis & Processing Toolbox:
    - Always verify and match CRS before geometric operations. Use projected local CRS (e.g. UTM) for distance and area measurements.

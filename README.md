@@ -15,16 +15,24 @@ mcp_bridge.py
      │
      ├── Local TCP Socket + Token (~/.qgis_ai_agent/endpoint.json)
      ▼
-ToolServer (QGIS Main Thread) ──▶ tools.py (37 Tools)
+ToolServer (QGIS Main Thread) ──▶ tools.py (51 Tools)
 ```
 
 ---
 
 ## Fitur Utama
 
-1. **46 Tools MCP Lengkap**:
+1. **51 Tools MCP Lengkap**:
    - **Proyek & CRS**: `get_project_state`, `set_project_crs`, `new_project`, `open_project`, `save_project`, `zoom_to`.
    - **Inspeksi Data**: `describe_layer` (vektor, raster, mesh, point cloud, vector tile), `describe_all_layers`, `get_features`, `get_selected_features`, `field_stats`, `sample_raster`.
+   - **Data Geospasial Publik Bebas Kunci (Overture, STAC, COG, DuckDB)**:
+     - `list_public_geodata_sources`: Katalog sumber geodata terbuka (Overture, Earth Search, Copernicus DEM, ESA WorldCover).
+     - `search_stac_items`: Pencarian item STAC (Earth Search Sentinel-2, Landsat, Copernicus DEM 30m) berdasarkan bounding box & waktu.
+     - `load_public_cog`: Streaming raster Cloud-Optimized GeoTIFF (COG) via HTTP/S3 (`/vsicurl/`) tanpa unduh file raksasa ke disk lokal.
+     - `query_overture_maps`: Akses Overture Maps Foundation (bangunan, tempat/POI, jalan, air) langsung dari S3 parquet via DuckDB spatial.
+     - `query_duckdb_spatial`: Eksekusi query spasial DuckDB bebas pada GeoParquet, S3, atau file tabular remote.
+   - **Basemap XYZ Bebas Kunci (100% Free & Keyless)**:
+     - `add_basemap`: Preset siap pakai tanpa akun/API key: `carto_light` (Positron), `osm` (OpenStreetMap), `esri_satellite` (citra satelit resolusi tinggi), `carto_voyager`, `esri_topo`, `carto_dark`.
    - **Processing Toolbox & Geoprocessing**:
      - `list_processing_providers`: Daftar provider aktif (native, gdal, pdal, qgis, grass, model).
      - `list_algorithms`: Pencarian 440+ algoritma berdasarkan kata kunci atau provider.
@@ -46,8 +54,9 @@ ToolServer (QGIS Main Thread) ──▶ tools.py (37 Tools)
    - **Skills Discovery & Loading**: `list_skills`, `load_skill`.
    - **Sandbox Escape Hatch**: `exec_pyqgis` (eksekusi kode PyQGIS bebas; dinonaktifkan secara default).
 
-2. **Dukungan 49 GIS Skills Berstandar `SKILL.md`**:
-   - **15 Custom Use Case Skills**:
+2. **Dukungan 50 GIS Skills Berstandar `SKILL.md`**:
+   - **16 Custom Use Case Skills**:
+     - `public-cog-stac-duckdb`: Panduan query data Overture Maps Foundation (bangunan, tempat, jalan) via DuckDB S3 GeoParquet, pencarian katalog STAC terbuka, dan streaming raster COG tanpa API key.
      - `disaster-infographic-dashboard`: Panduan arsitektur layout infografis situasi bencana (peta utama + inset detail + KDE heatmap + buffer 10 km + callout kluster + diagram batang + bar gradien).
      - `natgeo-cartography-style`: Panduan kartografi gaya National Geographic (kanvas perkamen hangat, border neatline ganda, tipografi serif klasik, palet bumi halus).
      - `swiss-relief-cartography`: Panduan relief topografi gaya Swiss / Imhof (pencahayaan NW 315°, bayangan sejuk, hierarki garis kontur, strip gradien elevasi).

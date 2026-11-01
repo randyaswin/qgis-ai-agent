@@ -230,6 +230,48 @@
       "relief",
       "topography",
       "alpine"
+    ],
+    "cog": [
+      "cog",
+      "cloud optimized geotiff",
+      "geotiff",
+      "stac",
+      "raster",
+      "streaming"
+    ],
+    "stac": [
+      "stac",
+      "catalog",
+      "earth search",
+      "sentinel",
+      "copernicus",
+      "citra"
+    ],
+    "overture": [
+      "overture",
+      "overture maps",
+      "bangunan",
+      "gedung",
+      "poi",
+      "places",
+      "jalan",
+      "duckdb"
+    ],
+    "duckdb": [
+      "duckdb",
+      "parquet",
+      "geoparquet",
+      "sql",
+      "spatial",
+      "overture"
+    ],
+    "data publik": [
+      "public",
+      "geodata",
+      "stac",
+      "cog",
+      "overture",
+      "open data"
     ]
   },
   "keywords": {
@@ -445,6 +487,30 @@
       "kemiringan",
       "lereng",
       "elevasi"
+    ],
+    "public-cog-stac-duckdb": [
+      "cog",
+      "stac",
+      "overture",
+      "duckdb",
+      "geoparquet",
+      "parquet",
+      "s3",
+      "sentinel",
+      "copernicus",
+      "dem",
+      "glo-30",
+      "earth",
+      "search",
+      "public",
+      "data",
+      "publik",
+      "bangunan",
+      "gedung",
+      "poi",
+      "places",
+      "jalan",
+      "transportation"
     ]
   }
 }

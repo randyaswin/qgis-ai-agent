@@ -47,6 +47,16 @@ def summarize_tool_result(name, result):
         return f"🌈 Bar gradien legenda horizontal '<b>{html.escape(result.get('title', ''))}</b>' ditambahkan ke layout"
     if name == "add_layout_callout_box":
         return f"🏷️ Kartu callout cluster <b>{html.escape(result.get('badge', ''))}</b> ('{html.escape(result.get('title', ''))}') ditambahkan"
+    if name == "list_public_geodata_sources":
+        return "🌐 Katalog sumber data geospasial publik (Overture, STAC, COG) dimuat"
+    if name == "search_stac_items":
+        return f"🛰️ Pencarian STAC menemukan {result.get('found_count', 0)} item citra/elevasi COG"
+    if name == "load_public_cog":
+        return f"🛰️ COG raster '<b>{html.escape(result.get('name', ''))}</b>' dimuat langsung via streaming HTTP/S3"
+    if name == "query_overture_maps":
+        return f"🏢 Overture Maps '<b>{html.escape(result.get('name', ''))}</b>' dimuat ({result.get('features', 0)} fitur)"
+    if name == "query_duckdb_spatial":
+        return f"🦆 Query spasial DuckDB '<b>{html.escape(result.get('name', ''))}</b>' selesai ({result.get('features', 0)} fitur)"
     if name == "add_vector_layer":
         return f"Layer vektor '<b>{html.escape(result.get('name', ''))}</b>' dimuat ({result.get('geometry')}, {result.get('features')} fitur, CRS: {result.get('crs')})"
     if name == "add_raster_layer":

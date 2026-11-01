@@ -1390,6 +1390,195 @@ def load_skill(name, reference=None):
     return REGISTRY.load(name, reference=reference)
 
 
+# ---------------------------------------------------------------- public geodata (COG, STAC, Overture, DuckDB)
+@tool("List curated 100% free, keyless public geospatial data sources: Overture Maps (buildings, places, roads), STAC APIs (Earth Search Sentinel-2/Landsat), Copernicus DEM GLO-30 COGs, ESA WorldCover, and WorldPop.")
+def list_public_geodata_sources():
+    return {
+        "overture_maps": {
+            "description": "Global open map features from Overture Maps Foundation (Meta, Microsoft, Amazon, TomTom) queried directly over S3 parquet with zero API keys.",
+            "themes": ["places", "buildings", "transportation", "base", "divisions"],
+            "tool": "query_overture_maps"
+        },
+        "stac_apis": [
+            {
+                "name": "Earth Search by Element84",
+                "url": "https://earth-search.aws.element84.com/v1",
+                "auth": "None (100% Free Public)",
+                "collections": ["sentinel-2-l2a", "cop-dem-glo-30", "cop-dem-glo-90", "landsat-c2-l2", "naip"]
+            },
+            {
+                "name": "Microsoft Planetary Computer",
+                "url": "https://planetarycomputer.microsoft.com/api/stac/v1",
+                "auth": "Public open search (no key required for metadata & open assets)"
+            }
+        ],
+        "public_cogs": {
+            "copernicus_dem_glo_30": {
+                "name": "Copernicus Global DEM 30m",
+                "description": "High-precision global digital surface model at 30-meter resolution.",
+                "stac_collection": "cop-dem-glo-30"
+            },
+            "sentinel_2_l2a": {
+                "name": "Sentinel-2 Level-2A (Surface Reflectance)",
+                "description": "10-meter optical imagery updated every 5 days globally with cloudless COGs.",
+                "stac_collection": "sentinel-2-l2a"
+            },
+            "esa_worldcover": {
+                "name": "ESA WorldCover 10m",
+                "description": "Global 10-meter land cover map based on Sentinel-1 and Sentinel-2.",
+                "s3_path": "s3://esa-worldcover/v200/2021/map/"
+            }
+        }
+    }
+
+
+@tool("Search public STAC catalogs (e.g. Earth Search Sentinel-2, Landsat, Copernicus DEM) for Cloud-Optimized GeoTIFFs (COGs) matching an area of interest.",
+      {"collections": S("array", "collection IDs e.g. ['sentinel-2-l2a'] or ['cop-dem-glo-30']", items={"type": "string"}),
+       "bbox": S("array", "optional [xmin, ymin, xmax, ymax] in WGS84 (default: current map canvas extent)"),
+       "datetime": S("string", "optional date/range e.g. '2026-09-01/2026-10-31' or '2026-10-15'"),
+       "limit": S("integer", "max items to return, default 3"),
+       "api_url": S("string", "STAC endpoint URL, default 'https://earth-search.aws.element84.com/v1'")})
+def search_stac_items(collections, bbox=None, datetime=None, limit=3, api_url=None):
+    from pystac_client import Client
+    endpoint = api_url or "https://earth-search.aws.element84.com/v1"
+    client = Client.open(endpoint)
+
+    if not bbox:
+        # Use current canvas extent in EPSG:4326
+        c = _canvas()
+        tr = QgsCoordinateTransform(QgsProject.instance().crs(), QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance())
+        wgs_ext = tr.transformBoundingBox(c.extent())
+        bbox = [round(wgs_ext.xMinimum(), 4), round(wgs_ext.yMinimum(), 4),
+                round(wgs_ext.xMaximum(), 4), round(wgs_ext.yMaximum(), 4)]
+
+    params = {"collections": collections, "bbox": bbox, "max_items": int(limit)}
+    if datetime:
+        params["datetime"] = datetime
+
+    search = client.search(**params)
+    results = []
+    for item in search.items():
+        assets = {}
+        for a_key, a_val in item.assets.items():
+            if a_val.href and (a_val.href.endswith((".tif", ".tiff")) or a_val.media_type in ("image/tiff", "application/x-geotiff")):
+                assets[a_key] = {"href": a_val.href, "title": a_val.title or a_key}
+        results.append({
+            "id": item.id,
+            "datetime": str(item.datetime or item.properties.get("datetime")),
+            "cloud_cover": item.properties.get("eo:cloud_cover"),
+            "bbox": item.bbox,
+            "cog_assets": assets
+        })
+    return {"endpoint": endpoint, "searched_bbox": bbox, "found_count": len(results), "items": results}
+
+
+@tool("Stream and load any public Cloud-Optimized GeoTIFF (COG) directly into QGIS over HTTP/S3 via GDAL /vsicurl/ without downloading the file to disk.",
+      {"url": S("string", "public COG URL, e.g. 'https://sentinel-cogs.s3.us-west-2.amazonaws.com/.../B04.tif' or 's3://copernicus-dem-30m/...'"),
+       "name": S("string", "optional layer name, e.g. 'Sentinel2_B04'")})
+def load_public_cog(url, name=None):
+    clean_url = url.strip()
+    if clean_url.startswith("s3://"):
+        parts = clean_url[5:].split("/", 1)
+        bucket = parts[0]
+        key = parts[1] if len(parts) > 1 else ""
+        clean_url = f"https://{bucket}.s3.amazonaws.com/{key}"
+    vsi_url = clean_url if clean_url.startswith("/vsi") else f"/vsicurl/{clean_url}"
+    layer_name = name or os.path.splitext(os.path.basename(clean_url))[0]
+    lyr = QgsRasterLayer(vsi_url, layer_name, "gdal")
+    if not lyr.isValid():
+        raise ValueError(f"Failed to load COG raster from {clean_url}. Check if the URL is accessible.")
+    QgsProject.instance().addMapLayer(lyr)
+    return _layer_info(lyr)
+
+
+@tool("Query Overture Maps Foundation open data (buildings, places/POI, transportation/roads, water) directly from S3 parquet using DuckDB and load it into QGIS.",
+      {"theme": S("string", "'places' | 'buildings' | 'transportation' | 'base' | 'divisions' (default 'places')"),
+       "type": S("string", "optional subtype: 'place', 'building', 'segment', 'water' (auto-selected if omitted)"),
+       "bbox": S("array", "optional [xmin, ymin, xmax, ymax] in WGS84 (default: current map canvas extent)"),
+       "filter_sql": S("string", "optional SQL condition, e.g. \"taxonomy.primary = 'restaurant'\" or \"names.primary ILIKE '%hotel%'\""),
+       "limit": S("integer", "max features to fetch, default 500"),
+       "output_name": S("string", "layer name in QGIS, default e.g. 'Overture_Places'")})
+def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, limit=500, output_name=None):
+    import duckdb
+    default_types = {
+        "places": "place", "buildings": "building", "transportation": "segment",
+        "base": "water", "divisions": "division"
+    }
+    t_name = theme.lower()
+    t_type = (type or default_types.get(t_name, t_name)).lower()
+
+    if not bbox:
+        c = _canvas()
+        tr = QgsCoordinateTransform(QgsProject.instance().crs(), QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance())
+        wgs_ext = tr.transformBoundingBox(c.extent())
+        bbox = [round(wgs_ext.xMinimum(), 5), round(wgs_ext.yMinimum(), 5),
+                round(wgs_ext.xMaximum(), 5), round(wgs_ext.yMaximum(), 5)]
+
+    xmin, ymin, xmax, ymax = bbox
+    # Select key attributes based on theme
+    if t_name == "places":
+        select_clause = "id, names.primary as name, taxonomy.primary as category, geometry"
+    elif t_name == "buildings":
+        select_clause = "id, names.primary as name, height, num_floors, geometry"
+    elif t_name == "transportation":
+        select_clause = "id, class, subtype, surface, geometry"
+    else:
+        select_clause = "id, subtype, geometry"
+
+    where_clauses = [
+        f"bbox.xmin >= {xmin} AND bbox.xmax <= {xmax}",
+        f"bbox.ymin >= {ymin} AND bbox.ymax <= {ymax}"
+    ]
+    if filter_sql:
+        where_clauses.append(f"({filter_sql})")
+
+    out_file = os.path.join(tempfile.gettempdir(), f"overture_{t_name}_{int(time.time())}.geojson")
+    s3_path = f"s3://overturemaps-us-west-2/release/2026-10-21.0/theme={t_name}/type={t_type}/*"
+
+    con = duckdb.connect()
+    con.execute("INSTALL spatial; LOAD spatial; INSTALL httpfs; LOAD httpfs;")
+    con.execute("SET s3_region='us-west-2';")
+    con.execute("SET geometry_always_xy=true;")
+
+    copy_query = f"""
+    COPY (
+        SELECT {select_clause}
+        FROM read_parquet('{s3_path}', hive_partitioning=1)
+        WHERE {' AND '.join(where_clauses)}
+        LIMIT {int(limit)}
+    ) TO '{out_file}' WITH (FORMAT GDAL, DRIVER 'GeoJSON');
+    """
+    con.execute(copy_query)
+
+    layer_label = output_name or f"Overture_{t_name.capitalize()}"
+    lyr = QgsVectorLayer(out_file, layer_label, "ogr")
+    if not lyr.isValid():
+        raise ValueError(f"Failed to load Overture data exported to {out_file}")
+    QgsProject.instance().addMapLayer(lyr)
+    return _layer_info(lyr)
+
+
+@tool("Execute arbitrary spatial DuckDB queries on remote Parquet, S3, GeoParquet, or local tabular files, and load the result as a QGIS vector layer.",
+      {"query": S("string", "DuckDB SQL query returning geometry and attributes"),
+       "layer_name": S("string", "name of resulting layer in QGIS")})
+def query_duckdb_spatial(query, layer_name="DuckDB_Layer"):
+    import duckdb
+    out_file = os.path.join(tempfile.gettempdir(), f"duckdb_result_{int(time.time())}.geojson")
+    con = duckdb.connect()
+    con.execute("INSTALL spatial; LOAD spatial; INSTALL httpfs; LOAD httpfs;")
+    con.execute("SET s3_region='us-west-2';")
+    con.execute("SET geometry_always_xy=true;")
+
+    copy_query = f"COPY ({query}) TO '{out_file}' WITH (FORMAT GDAL, DRIVER 'GeoJSON');"
+    con.execute(copy_query)
+
+    lyr = QgsVectorLayer(out_file, layer_name, "ogr")
+    if not lyr.isValid():
+        raise ValueError(f"Failed to load DuckDB spatial query output from {out_file}")
+    QgsProject.instance().addMapLayer(lyr)
+    return _layer_info(lyr)
+
+
 # ---------------------------------------------------------------- escape hatch
 @tool("Execute arbitrary PyQGIS code (iface, QgsProject, processing in scope). Assign to `result` to return a value. Only works if the user enabled it in the plugin panel.",
       {"code": S("string", "python source")})
