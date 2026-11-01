@@ -101,6 +101,152 @@ def summarize_tool_result(name, result):
     return html.escape(s[:250] + ("..." if len(s) > 250 else ""))
 
 
+def categorize_tool(name, args):
+    """Categorize tool and extract primary target to match Claude-style header (e.g. Second-brain [read_note] index.md)."""
+    args = args or {}
+    primary = ""
+    category = "QGIS"
+
+    if name in ("read_note", "write_note", "append_note", "search_notes", "delete_note", "list_notes"):
+        category = "Second-brain"
+        primary = args.get("path") or args.get("query") or ""
+    elif name == "query_overture_maps":
+        category = "Overture"
+        primary = f"{args.get('theme', 'places')} ({args.get('filter_sql', '')[:25] or 'canvas'})"
+    elif name in ("search_stac_items", "load_public_cog", "list_public_geodata_sources"):
+        category = "STAC / COG"
+        if name == "search_stac_items":
+            primary = ", ".join(args.get("collections", []))
+        elif name == "load_public_cog":
+            primary = args.get("name") or os.path.basename(args.get("url", ""))
+    elif name == "query_duckdb_spatial":
+        category = "DuckDB"
+        primary = args.get("layer_name") or args.get("query", "")[:30]
+    elif name in ("run_processing", "list_algorithms", "describe_algorithm", "list_processing_providers",
+                  "open_processing_toolbox", "open_processing_algorithm_dialog", "open_model_designer"):
+        category = "Processing"
+        primary = args.get("algorithm") or args.get("query") or ""
+    elif name in ("create_layout", "create_styled_layout", "edit_layout", "export_layout",
+                  "add_layout_inset_map", "add_layout_infographic_chart", "add_layout_gradient_legend", "add_layout_callout_box"):
+        category = "Layout"
+        primary = args.get("name") or args.get("style_theme") or args.get("title") or ""
+    elif name in ("style_single", "style_categorized", "style_graduated", "style_raster", "load_style", "set_labels"):
+        category = "Symbology"
+        primary = args.get("layer") or ""
+    elif name in ("describe_layer", "describe_all_layers", "get_features", "get_selected_features", "field_stats", "sample_raster"):
+        category = "Inspect"
+        primary = args.get("layer") or ""
+    elif name in ("add_vector_layer", "add_raster_layer", "add_basemap", "remove_layer", "update_layer"):
+        category = "Layer"
+        primary = args.get("name") or args.get("preset") or os.path.basename(args.get("path", ""))
+    elif name == "exec_pyqgis":
+        category = "PyQGIS"
+        primary = (args.get("code") or "").strip().split("\n")[0][:40]
+
+    return category, primary
+
+
+def format_in_args(args):
+    """Format input arguments as compact key-value pairs for the IN row."""
+    if not args:
+        return "()"
+    parts = []
+    for k, v in args.items():
+        if k in ("code",) and isinstance(v, str):
+            first_line = v.strip().split("\n")[0][:50]
+            parts.append(f"{k}={first_line!r}...")
+        elif isinstance(v, str):
+            v_str = v if len(v) <= 45 else v[:42] + "..."
+            parts.append(f"{k}={v_str!r}")
+        elif isinstance(v, (int, float, bool)):
+            parts.append(f"{k}={v}")
+        elif isinstance(v, list):
+            parts.append(f"{k}={v[:3]!r}")
+        else:
+            parts.append(f"{k}={str(v)[:30]!r}")
+    return "  ".join(parts)
+
+
+def format_out_result(name, result):
+    """Format tool execution output as clean text for the OUT block."""
+    summary = summarize_tool_result(name, result)
+    return re.sub(r"<[^>]+>", "", summary)
+
+
+def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_success=True, img_base64=None):
+    """Render a Claude-style timeline tool execution node with IN and OUT blocks."""
+    dot_color = "#22c55e" if is_success else "#ef4444"
+    status_border = "#2e3440" if is_success else "#7f1d1d"
+
+    img_html = ""
+    if img_base64:
+        img_html = (
+            f"<div style='margin-top: 6px; text-align: center;'>"
+            f"<img src='data:image/png;base64,{img_base64}' style='max-width: 96%; border: 1px solid #3b4252; border-radius: 4px; box-shadow: 0 2px 6px rgba(0,0,0,0.4);'><br>"
+            f"<span style='font-size: 10px; color: #94a3b8;'>🖼️ Map Visual Preview ({html.escape(name)})</span>"
+            f"</div>"
+        )
+
+    in_block = ""
+    if in_str:
+        in_block = (
+            f"<table style='margin-top: 3px; font-family: monospace; font-size: 11px; width: 100%; border-collapse: collapse;'>"
+            f"<tr>"
+            f"<td style='width: 32px; vertical-align: top; color: #64748b; font-weight: bold; font-size: 10px; padding-top: 2px;'>IN</td>"
+            f"<td style='color: #cbd5e1; background-color: #22222e; padding: 2px 8px; border-radius: 3px;'>{html.escape(in_str)}</td>"
+            f"</tr>"
+            f"</table>"
+        )
+
+    out_block = ""
+    if out_str:
+        out_bg = "#121218" if is_success else "#1c1418"
+        out_color = "#e2e8f0" if is_success else "#fca5a5"
+        out_block = (
+            f"<table style='margin-top: 3px; font-family: monospace; font-size: 11px; width: 100%; border-collapse: collapse;'>"
+            f"<tr>"
+            f"<td style='width: 32px; vertical-align: top; color: #64748b; font-weight: bold; font-size: 10px; padding-top: 3px;'>OUT</td>"
+            f"<td>"
+            f"<div style='color: {out_color}; background-color: {out_bg}; border: 1px solid {status_border}; padding: 4px 8px; border-radius: 4px; word-break: break-all;'>"
+            f"{html.escape(out_str)}"
+            f"</div>"
+            f"</td>"
+            f"</tr>"
+            f"</table>"
+        )
+
+    arg_display = f"<span style='color: #94a3b8; font-size: 11px; margin-left: 6px;'>{html.escape(primary_arg)}</span>" if primary_arg else ""
+
+    return (
+        f"<div style='margin: 6px 0 6px 12px; border-left: 2px solid #374151; padding: 0 0 4px 14px;'>"
+        f"<div style='margin-left: -21px; margin-bottom: 3px; line-height: 16px;'>"
+        f"<span style='color: {dot_color}; font-size: 13px; margin-right: 6px;'>●</span>"
+        f"<b style='color: #f1f5f9; font-size: 12px;'>{html.escape(category)} [{html.escape(name)}]</b>"
+        f"{arg_display}"
+        f"</div>"
+        f"{in_block}"
+        f"{out_block}"
+        f"{img_html}"
+        f"</div>"
+    )
+
+
+def render_thinking_node_html(text=""):
+    """Render a Claude-style Thinking timeline node."""
+    preview_html = ""
+    if text.strip():
+        preview_html = f"<div style='color: #71717a; font-style: italic; font-size: 11px; margin-top: 2px; padding: 2px 4px;'>{html.escape(text.strip())}</div>"
+    return (
+        f"<div style='margin: 6px 0 6px 12px; border-left: 2px solid #374151; padding: 0 0 4px 14px;'>"
+        f"<div style='margin-left: -21px; line-height: 16px;'>"
+        f"<span style='color: #94a3b8; font-size: 13px; margin-right: 6px;'>●</span>"
+        f"<span style='color: #94a3b8; font-size: 12px; font-weight: 500;'>Thinking</span>"
+        f"</div>"
+        f"{preview_html}"
+        f"</div>"
+    )
+
+
 class AgentDock(QDockWidget):
     def __init__(self, iface, server):
         super().__init__("AI Map Agent")
@@ -242,16 +388,38 @@ class AgentDock(QDockWidget):
             row5.addWidget(c)
         lay.addLayout(row5)
 
-        # Chat log display
+        # Chat log display (Claude Dark IDE Theme)
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         self.log.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.log.setStyleSheet("""
+            QTextEdit {
+                background-color: #17171e;
+                color: #e2e8f0;
+                border: 1px solid #282836;
+                border-radius: 6px;
+                padding: 8px;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+                font-size: 12px;
+                selection-background-color: #2563eb;
+            }
+        """)
         lay.addWidget(self.log, 1)
 
         # User prompt input
         self.prompt = QPlainTextEdit()
         self.prompt.setPlaceholderText("Type map request (e.g. 'Build a disaster infographic layout with inset map and bar chart' or 'Buffer roads 500m') [Ctrl+Enter]")
         self.prompt.setMaximumHeight(95)
+        self.prompt.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #1c1c26;
+                color: #f8fafc;
+                border: 1px solid #333344;
+                border-radius: 5px;
+                padding: 6px;
+                font-size: 12px;
+            }
+        """)
         lay.addWidget(self.prompt)
 
         # Action buttons
@@ -371,17 +539,17 @@ class AgentDock(QDockWidget):
                 if m.role == "user":
                     now_str = m.timestamp
                     user_html = (
-                        f"<div style='margin: 8px 0 4px 0; padding: 8px 12px; background-color: #e3f2fd; "
-                        f"border-left: 4px solid #1976d2; border-radius: 4px;'>"
-                        f"<div style='font-size: 11px; font-weight: bold; color: #1565c0; margin-bottom: 3px;'>"
-                        f"🧑 YOU ({now_str})</div>"
-                        f"<div style='font-size: 13px; color: #0d47a1; white-space: pre-wrap;'>{html.escape(m.text)}</div>"
+                        f"<div style='margin: 8px 0 6px 0; padding: 6px 12px; background-color: #1e2433; "
+                        f"border-left: 3px solid #3b82f6; border-radius: 4px;'>"
+                        f"<div style='font-size: 11px; font-weight: bold; color: #60a5fa; margin-bottom: 3px;'>"
+                        f"🧑 YOU <span style='font-weight: normal; color: #94a3b8;'>({now_str})</span></div>"
+                        f"<div style='font-size: 12px; color: #f1f5f9; white-space: pre-wrap;'>{html.escape(m.text)}</div>"
                         f"</div>"
                     )
                     self._append_html(user_html)
                 elif m.role == "assistant":
                     self._append_html(
-                        f"<div style='margin-top: 8px; margin-bottom: 2px; font-weight: bold; color: #1b5e20; font-size: 11px;'>"
+                        f"<div style='margin-top: 10px; margin-bottom: 2px; font-weight: bold; color: #10b981; font-size: 11px;'>"
                         f"🤖 AI AGENT:</div>"
                     )
                     c = self.log.textCursor()
@@ -450,6 +618,16 @@ class AgentDock(QDockWidget):
         if not clean:
             return
         self._current_assistant_text += clean
+
+        # Detect Thinking blocks from reasoning models
+        lower_clean = clean.lower()
+        if ("<thinking>" in lower_clean or "<thought>" in lower_clean or
+            clean.strip().startswith(("* Thinking", "Thinking:", "Thought:"))):
+            self._append_html(render_thinking_node_html())
+            clean = re.sub(r"<\/?(thinking|thought)>|\*+\s*Thinking[^*]*\*+|Thinking:", "", clean, flags=re.I).strip()
+            if not clean:
+                return
+
         if not self.is_agent_streaming:
             cli_label = self.cli.currentData()
             model_info = self.model_combo.currentData() or self.model_combo.currentText().strip()
@@ -462,7 +640,7 @@ class AgentDock(QDockWidget):
             header_str = " | ".join(meta)
             self._current_model_header = header_str
             self._append_html(
-                f"<div style='margin-top: 8px; margin-bottom: 2px; font-weight: bold; color: #1b5e20; font-size: 11px;'>"
+                f"<div style='margin-top: 10px; margin-bottom: 2px; font-weight: bold; color: #10b981; font-size: 11px;'>"
                 f"🤖 AI AGENT ({html.escape(header_str)}):</div>"
             )
             self.is_agent_streaming = True
@@ -475,70 +653,110 @@ class AgentDock(QDockWidget):
 
     def _on_tool_called(self, name, args):
         self.is_agent_streaming = False
-        self._last_tool_call = {"name": name, "args": args or {}}
-        args_str = html.escape(json.dumps(args or {}, ensure_ascii=False))
-        if len(args_str) > 200:
-            args_str = args_str[:200] + "..."
+        cat, prim = categorize_tool(name, args)
+        in_str = format_in_args(args)
+        self._last_tool_call = {
+            "name": name,
+            "args": args or {},
+            "category": cat,
+            "primary": prim,
+            "in_str": in_str,
+        }
+        arg_disp = f"<span style='color: #94a3b8; font-size: 11px; margin-left: 6px;'>{html.escape(prim)}</span>" if prim else ""
         card = (
-            f"<div style='margin: 4px 0 2px 8px; padding: 5px 8px; background-color: #fffde7; "
-            f"border-left: 3px solid #fbc02d; border-radius: 3px; font-size: 11px; color: #4e342e;'>"
-            f"<b>⚙️ QGIS Action:</b> <code>{html.escape(name)}</code> <span style='color: #6d4c41;'>({args_str})</span>"
+            f"<div style='margin: 6px 0 2px 12px; border-left: 2px solid #374151; padding: 0 0 2px 14px;'>"
+            f"<div style='margin-left: -21px; margin-bottom: 3px; line-height: 16px;'>"
+            f"<span style='color: #22c55e; font-size: 13px; margin-right: 6px;'>●</span>"
+            f"<b style='color: #f1f5f9; font-size: 12px;'>{html.escape(cat)} [{html.escape(name)}]</b>"
+            f"{arg_disp}"
+            f"</div>"
+            f"<table style='margin-top: 3px; font-family: monospace; font-size: 11px; width: 100%; border-collapse: collapse;'>"
+            f"<tr>"
+            f"<td style='width: 32px; vertical-align: top; color: #64748b; font-weight: bold; font-size: 10px; padding-top: 2px;'>IN</td>"
+            f"<td style='color: #cbd5e1; background-color: #22222e; padding: 2px 8px; border-radius: 3px;'>{html.escape(in_str)}</td>"
+            f"</tr>"
+            f"</table>"
             f"</div>"
         )
         self._append_html(card)
 
     def _on_tool_completed(self, name, result):
-        summary = summarize_tool_result(name, result)
+        clean_summary = format_out_result(name, result)
         img_html = ""
-        # Check for inline map rendering (canvas snapshot or layout preview)
-        has_image = False
+        img_b64 = None
         if isinstance(result, dict) and "__image__" in result:
-            b64 = result["__image__"]
+            img_b64 = result["__image__"]
             mime = result.get("mime", "image/png")
-            has_image = True
             img_html = (
-                f"<div style='margin: 6px 0 6px 8px; text-align: center;'>"
-                f"<img src='data:{mime};base64,{b64}' style='max-width: 96%; border: 1px solid #b0bec5; border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,0.15);'><br>"
-                f"<span style='font-size: 10px; color: #546e7a;'>🖼️ Map Visual Preview ({html.escape(name)})</span>"
+                f"<div style='margin-top: 6px; text-align: center;'>"
+                f"<img src='data:{mime};base64,{img_b64}' style='max-width: 96%; border: 1px solid #3b4252; border-radius: 4px; box-shadow: 0 2px 6px rgba(0,0,0,0.4);'><br>"
+                f"<span style='font-size: 10px; color: #94a3b8;'>🖼️ Map Visual Preview ({html.escape(name)})</span>"
                 f"</div>"
             )
+
         card = (
-            f"<div style='margin: 2px 0 6px 8px; padding: 5px 8px; background-color: #e8f5e9; "
-            f"border-left: 3px solid #43a047; border-radius: 3px; font-size: 11px; color: #1b5e20;'>"
-            f"<b>✅ Result:</b> {summary}"
-            f"</div>{img_html}"
+            f"<div style='margin: 0 0 6px 12px; border-left: 2px solid #374151; padding: 0 0 4px 14px;'>"
+            f"<table style='margin-top: 2px; font-family: monospace; font-size: 11px; width: 100%; border-collapse: collapse;'>"
+            f"<tr>"
+            f"<td style='width: 32px; vertical-align: top; color: #64748b; font-weight: bold; font-size: 10px; padding-top: 3px;'>OUT</td>"
+            f"<td>"
+            f"<div style='color: #e2e8f0; background-color: #121218; border: 1px solid #282836; padding: 4px 8px; border-radius: 4px; word-break: break-all;'>"
+            f"{html.escape(clean_summary)}"
+            f"</div>"
+            f"</td>"
+            f"</tr>"
+            f"</table>"
+            f"{img_html}"
+            f"</div>"
         )
         self._append_html(card)
         self.iface.mapCanvas().refresh()
 
-        # Persist tool execution into active project session
+        # Persist unified Claude timeline node into active project session
+        cat = self._last_tool_call.get("category", "QGIS")
+        prim = self._last_tool_call.get("primary", "")
+        in_str = self._last_tool_call.get("in_str", "")
+        full_node_html = render_tool_node_html(cat, name, prim, in_str, clean_summary, is_success=True, img_base64=img_b64)
+
         active_sess = self.session_manager.get_active_session()
         active_sess.add_tool_record(
             name=name,
             args=self._last_tool_call.get("args", {}),
-            summary=summary,
+            summary=clean_summary,
             success=True,
-            html_card=card,
-            image=result.get("__image__") if has_image else None
+            html_card=full_node_html,
+            image=img_b64
         )
 
     def _on_tool_failed(self, name, err_msg):
         card = (
-            f"<div style='margin: 4px 0 4px 8px; padding: 5px 8px; background-color: #ffebee; "
-            f"border-left: 3px solid #e53935; border-radius: 3px; font-size: 11px; color: #b71c1c;'>"
-            f"<b>❌ Failed to execute {html.escape(name)}:</b> {html.escape(err_msg)}"
+            f"<div style='margin: 0 0 6px 12px; border-left: 2px solid #374151; padding: 0 0 4px 14px;'>"
+            f"<table style='margin-top: 2px; font-family: monospace; font-size: 11px; width: 100%; border-collapse: collapse;'>"
+            f"<tr>"
+            f"<td style='width: 32px; vertical-align: top; color: #ef4444; font-weight: bold; font-size: 10px; padding-top: 3px;'>OUT</td>"
+            f"<td>"
+            f"<div style='color: #fca5a5; background-color: #1c1418; border: 1px solid #7f1d1d; padding: 4px 8px; border-radius: 4px; word-break: break-all;'>"
+            f"{html.escape(err_msg)}"
+            f"</div>"
+            f"</td>"
+            f"</tr>"
+            f"</table>"
             f"</div>"
         )
         self._append_html(card)
 
-        # Persist tool failure into active project session
+        cat = self._last_tool_call.get("category", "QGIS")
+        prim = self._last_tool_call.get("primary", "")
+        in_str = self._last_tool_call.get("in_str", "")
+        full_node_html = render_tool_node_html(cat, name, prim, in_str, err_msg, is_success=False)
+
         active_sess = self.session_manager.get_active_session()
         active_sess.add_tool_record(
             name=name,
             args=self._last_tool_call.get("args", {}),
             summary=err_msg,
             success=False,
-            html_card=card
+            html_card=full_node_html
         )
 
     def _register(self):
@@ -618,14 +836,14 @@ class AgentDock(QDockWidget):
         s.setValue(f"{SKEY}model_{self.cli.currentData()}", selected_model or "")
         s.setValue(SKEY + "effort", selected_effort)
 
-        # Render User Message Card
+        # Render User Message Card (Claude Dark Theme)
         now_str = time.strftime("%H:%M:%S")
         user_html = (
-            f"<div style='margin: 8px 0 4px 0; padding: 8px 12px; background-color: #e3f2fd; "
-            f"border-left: 4px solid #1976d2; border-radius: 4px;'>"
-            f"<div style='font-size: 11px; font-weight: bold; color: #1565c0; margin-bottom: 3px;'>"
-            f"🧑 YOU ({now_str})</div>"
-            f"<div style='font-size: 13px; color: #0d47a1; white-space: pre-wrap;'>{html.escape(user)}</div>"
+            f"<div style='margin: 8px 0 6px 0; padding: 6px 12px; background-color: #1e2433; "
+            f"border-left: 3px solid #3b82f6; border-radius: 4px;'>"
+            f"<div style='font-size: 11px; font-weight: bold; color: #60a5fa; margin-bottom: 3px;'>"
+            f"🧑 YOU <span style='font-weight: normal; color: #94a3b8;'>({now_str})</span></div>"
+            f"<div style='font-size: 12px; color: #f1f5f9; white-space: pre-wrap;'>{html.escape(user)}</div>"
             f"</div>"
         )
         self._append_html(user_html)
@@ -643,12 +861,16 @@ class AgentDock(QDockWidget):
 
         if meta_badges:
             badge_html = (
-                f"<div style='margin: 2px 0 4px 0; padding: 4px 8px; background-color: #f3e5f5; "
-                f"border-left: 3px solid #8e24aa; border-radius: 3px; font-size: 11px; color: #4a148c;'>"
+                f"<div style='margin: 2px 0 6px 0; padding: 3px 8px; background-color: #261f36; "
+                f"border-left: 3px solid #a855f7; border-radius: 3px; font-size: 11px; color: #d8b4fe;'>"
                 f"{' | '.join(meta_badges)}"
                 f"</div>"
             )
             self._append_html(badge_html)
+
+        # If thinking / reasoning effort is active, emit initial Thinking timeline node
+        if selected_effort and selected_effort != "default":
+            self._append_html(render_thinking_node_html())
 
         self.prompt.clear()
         self.run_btn.setEnabled(False)
@@ -663,10 +885,10 @@ class AgentDock(QDockWidget):
 
     def _done(self, code):
         elapsed = time.time() - self.start_time if self.start_time else 0
-        status_color = "#2e7d32" if code == 0 else "#c62828"
+        status_color = "#10b981" if code == 0 else "#ef4444"
         done_html = (
-            f"<div style='margin: 8px 0; padding: 4px 10px; background-color: #f5f5f5; border-radius: 4px; "
-            f"font-size: 11px; color: {status_color}; text-align: right;'>"
+            f"<div style='margin: 8px 0; padding: 4px 10px; background-color: #171c24; border: 1px solid #282f3d; "
+            f"border-radius: 4px; font-size: 11px; color: {status_color}; text-align: right;'>"
             f"🏁 <b>Finished</b> in {elapsed:.1f}s (Exit Code: {code})"
             f"</div>"
         )
