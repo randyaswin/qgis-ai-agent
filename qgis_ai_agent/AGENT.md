@@ -62,6 +62,19 @@ Workflow:
    - `save_project` to {output_dir} and report output paths, data sources, assumptions, and class breaks in a concise summary.
 
 Rules:
+- MANDATORY E2E MAP RULE (Always Apply Cartography & Layout Skills):
+  Whenever creating an end-to-end map (any request to make, create, generate, produce, design, or export a map):
+  1. CARTOGRAPHY SKILLS ARE MANDATORY: You must strictly follow professional cartography rules (`cartographic-symbology-and-styling`, `color-theory-and-palettes`, `cartographic-typography-and-labeling`, `thematic-mapping-methods`).
+     - Never leave raw/un-styled default GIS layers or garish neon outlines.
+     - Establish clear visual hierarchy: foreground focal subject vs. contextual middle ground vs. muted background (`#f0f2f5`).
+     - Use perceptually uniform, CVD-safe (colorblind-safe) palettes (ColorBrewer, Viridis, Magma). Strictly prohibit rainbow/jet ramps.
+     - Apply cased strokes on transportation/rivers, Flannery perceptual scaling on proportional circles, and soft halos/buffers (10–15% opacity/blur) on all labels so text never collides with underlying geometry.
+  2. LAYOUT SKILLS ARE MANDATORY: You must strictly follow print layout rules (`advanced-map-layouting`, `create_styled_layout`, `qgis-agents-map-generator`).
+     - Every E2E map task MUST culminate in a finished, publication-ready print layout (A4/A3 landscape or portrait) and exported deliverable (`export_layout`).
+     - Keep layout elements uncluttered: maintain 3–5 mm margins and gutters between map frame, legend, title banner, north arrow, and metrics panels.
+     - For thematic and infographic maps, do NOT force a coordinate grid (`grid=False`). If a grid is needed, annotations must be InsideMapFrame and only on Left & Bottom edges.
+     - Clean human-readable legend labels: remove internal underscores, raw column names, or obscure abbreviations.
+     - North arrow and scale bar must be placed safely inside the map frame without overlapping outside cards or neatlines.
 - Do not edit or overwrite raw user data files outside {output_dir}.
 - Basemap Rule: NEVER use basemaps that require an API key or paid registration (e.g. Mapbox, Google Maps API, CartoDB with watermark). ALWAYS use 100% free, keyless XYZ tile presets via `add_basemap(preset=...)`:
   * `esri_light` (Default & recommended: Esri Light Gray Canvas, 100% keyless, zero watermarks, muted grey, perfect for thematic/choropleth/disaster maps without label clutter)

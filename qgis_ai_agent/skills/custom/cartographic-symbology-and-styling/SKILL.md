@@ -1,7 +1,7 @@
 ---
 name: cartographic-symbology-and-styling
 description: Authoritative guide for cartographic symbolization, visual hierarchy, graphic variables, and vector layer styling in QGIS. Covers Bertin's visual variables, figure-ground separation, point symbol scaling (Flannery proportional vs graduated), cased road networks and line hierarchy, polygon boundary rendering, opacity, layer blending modes, and rule-based styling workflows.
-keywords: cartography, symbology, styling, visual hierarchy, figure ground, bertin variables, proportional symbols, graduated symbols, cased roads, road hierarchy, line casing, layer blend modes, rule based rendering, stroke, fill, opacity
+keywords: cartography, map, make map, peta, symbology, styling, cartographic styling, visual hierarchy, figure ground, bertin variables, proportional symbols, graduated symbols, cased roads, road hierarchy, line casing, layer blend modes, rule based rendering, stroke, fill, opacity
 license: MIT
 ---
 

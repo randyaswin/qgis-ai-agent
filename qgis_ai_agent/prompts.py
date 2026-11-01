@@ -15,7 +15,10 @@ def skills_block(sel, catalog_names):
     parts = []
     full = sel["pinned"] + sel["full"]
     if full:
-        parts.append("# Loaded skills (follow these; they were selected for this request)")
+        banner = "# Loaded skills (follow these; they were selected for this request)"
+        if sel.get("is_e2e"):
+            banner += "\n> [!IMPORTANT] MANDATORY E2E MAP PIPELINE:\n> This request requires end-to-end map creation. You MUST strictly apply both the loaded Cartography skill (symbology, CVD-safe color harmony, visual hierarchy, label halos) and Layout skill (print layout composition, clean gutters, scalebar, north arrow, export deliverable)."
+        parts.append(banner)
         for s in full:
             tag = "pinned by user" if s in sel["pinned"] else f"auto-selected, score {sel['scores'].get(s.name, 0):.1f}"
             refs = f"\nReferences (load with load_skill reference=...): {', '.join(s.references)}" if s.references else ""

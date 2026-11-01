@@ -91,13 +91,30 @@ class Skill:
 
 
 class Registry:
+    CARTOGRAPHY_SKILLS = (
+        "cartographic-symbology-and-styling",
+        "thematic-mapping-methods",
+        "color-theory-and-palettes",
+        "cartographic-typography-and-labeling",
+        "cartography-geoviz",
+        "natgeo-cartography-style",
+        "swiss-relief-cartography",
+    )
+
+    LAYOUT_SKILLS = (
+        "advanced-map-layouting",
+        "qgis-agents-map-generator",
+        "map-qa-and-export",
+        "qgis-impl-print-layouts",
+    )
+
     def __init__(self, dirs=None):
         self.dirs = dirs or [os.path.join(SKILLS_DIR, "vendor"), os.path.join(SKILLS_DIR, "custom"), USER_DIR]
         self.mode = "auto"          # auto | manual | off
         self.pinned = set()         # always injected in full
         self.disabled = set()       # never selected or loadable
-        self.max_inject = 3
-        self.budget_chars = 14000   # total body chars auto-injected
+        self.max_inject = 4
+        self.budget_chars = 36000   # total body chars auto-injected
         self.skills = {}
         self.extra = {"synonyms": {}, "keywords": {}}
         self._idf = {}
@@ -197,9 +214,45 @@ class Registry:
         r = self.rank(query)[:limit] if query.strip() else [(0, n) for n in sorted(self.available())][:limit]
         return [{**self.skills[n].brief(), "score": sc} for sc, n in r]
 
+    def is_e2e_map_request(self, user_prompt: str) -> bool:
+        """Detect whether user prompt requests end-to-end map creation or layout generation."""
+        if not user_prompt:
+            return False
+        low = user_prompt.lower()
+
+        # 1. Multi-language explicit keywords/phrases
+        e2e_phrases = (
+            # English
+            "make map", "create map", "generate map", "produce map", "build map", "design map",
+            "print map", "e2e map", "end-to-end map", "end to end map", "hazard map", "thematic map",
+            "density map", "choropleth", "susceptibility map", "risk map", "suitability map",
+            "make a map", "create a map", "generate a map", "export map", "map layout", "print layout",
+            "wayfinding map", "tourist map", "infographic map", "dashboard map", "cartography",
+            # Indonesian
+            "buat peta", "bikin peta", "membuat peta", "peta baru", "desain peta", "cetak peta",
+            "layout peta", "tata letak peta", "peta banjir", "peta rawan", "peta risiko", "peta sebaran",
+            "peta tematik", "peta bencana", "peta kepadatan", "peta tata ruang", "peta wisata",
+            # Japanese
+            "地図作成", "マップ作成", "地図を作", "マップを作", "ハザードマップ", "コロプレス",
+            "印刷レイアウト", "マップデザイン", "地図デザイン", "レイアウト作成", "観光マップ", "案内図"
+        )
+        if any(p in low for p in e2e_phrases):
+            return True
+
+        # 2. Regex action patterns (verbs + target map/atlas/layout)
+        if re.search(r"\b(make|create|generate|produce|build|design|export|render)\b.{0,30}\b(map|atlas|layout|dashboard)\b", low):
+            return True
+        if re.search(r"\b(buat|bikin|buatkan|bikinkan|susun|rancang|cetak)\b.{0,30}\b(peta|atlas|layout)\b", low):
+            return True
+        if re.search(r"\b(map of|peta dari|peta untuk|peta wilayah)\b", low):
+            return True
+
+        return False
+
     def select(self, user_prompt, already=()):
-        """Choose skills to inject. Returns dict(full=[Skill], hint=[Skill], pinned=[Skill], scores={name: score})."""
-        out = {"full": [], "hint": [], "pinned": [], "scores": {}}
+        """Choose skills to inject. Returns dict(full=[Skill], hint=[Skill], pinned=[Skill], scores={name: score}, is_e2e=bool)."""
+        is_e2e = self.is_e2e_map_request(user_prompt)
+        out = {"full": [], "hint": [], "pinned": [], "scores": {}, "is_e2e": is_e2e}
         if self.mode == "off":
             return out
         for n in sorted(self.pinned):
@@ -207,25 +260,84 @@ class Registry:
                 out["pinned"].append(self.skills[n])
         if self.mode == "manual":
             return out
+
         ranked = [(sc, n) for sc, n in self.rank(user_prompt) if n not in self.pinned and n not in already]
         for n, s in self.skills.items():
             if s.always and n not in self.disabled and n not in already and n not in self.pinned:
                 out["pinned"].append(s)
-        if not ranked:
+
+        # In E2E map tasks: cartography and layout skills are mandatory
+        mandatory_names = []
+        if is_e2e:
+            already_names = set(already) | {s.name for s in out["pinned"]}
+            # 1. Best cartography skill (prefer specialized if strongly matched, else foundational symbology & styling)
+            carto_candidate = None
+            specialized_carto = [n for _, n in ranked if n in self.CARTOGRAPHY_SKILLS and n != "cartographic-symbology-and-styling" and n not in already_names and n not in self.disabled]
+            if specialized_carto and dict(ranked).get(specialized_carto[0], 0) >= 15.0:
+                carto_candidate = specialized_carto[0]
+            elif "cartographic-symbology-and-styling" in self.skills and "cartographic-symbology-and-styling" not in already_names and "cartographic-symbology-and-styling" not in self.disabled:
+                carto_candidate = "cartographic-symbology-and-styling"
+            elif specialized_carto:
+                carto_candidate = specialized_carto[0]
+
+            # 2. Best layout skill (prefer advanced-map-layouting as comprehensive custom authority)
+            layout_candidate = None
+            if "advanced-map-layouting" in self.skills and "advanced-map-layouting" not in already_names and "advanced-map-layouting" not in self.disabled:
+                layout_candidate = "advanced-map-layouting"
+            else:
+                for _, n in ranked:
+                    if n in self.LAYOUT_SKILLS and n not in already_names and n not in self.disabled:
+                        layout_candidate = n
+                        break
+
+            if carto_candidate:
+                mandatory_names.append(carto_candidate)
+            if layout_candidate and layout_candidate != carto_candidate:
+                mandatory_names.append(layout_candidate)
+
+        if not ranked and not mandatory_names:
             return out
-        top = ranked[0][0]
-        floor = max(2.0, 0.4 * top)
+
+        top = ranked[0][0] if ranked else 5.0
+        floor = max(1.5, 0.3 * top) if ranked else 0.0
         budget = self.budget_chars
-        for sc, n in ranked[: self.max_inject + 2]:
-            if sc < floor:
-                break
+        max_items = self.max_inject if not is_e2e else max(self.max_inject, len(mandatory_names) + 2)
+
+        # Determine prioritized selection list
+        selection_candidates = []
+        seen = set(mandatory_names)
+
+        # Top domain skills from ranking
+        for sc, n in ranked:
+            if n in self.skills and n not in seen and sc >= floor:
+                selection_candidates.append((sc, n))
+                seen.add(n)
+
+        # Build injection queue: top domain skill first, then mandatory cartography & layout, then remaining domain skills
+        ordered_queue = []
+        if selection_candidates:
+            ordered_queue.append(selection_candidates[0])
+            cand_rest = selection_candidates[1:]
+        else:
+            cand_rest = []
+
+        for mn in mandatory_names:
+            sc = dict(ranked).get(mn, 8.0)
+            ordered_queue.append((sc, mn))
+
+        ordered_queue.extend(cand_rest)
+
+        for sc, n in ordered_queue:
+            if n not in self.skills:
+                continue
             s = self.skills[n]
             out["scores"][n] = sc
-            if len(out["full"]) < self.max_inject and s.size <= budget:
+            if len(out["full"]) < max_items and s.size <= budget:
                 out["full"].append(s)
                 budget -= s.size
             else:
                 out["hint"].append(s)
+
         return out
 
     def load(self, name, reference=None):
