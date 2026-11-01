@@ -947,6 +947,357 @@ def create_layout(name="Map", title="", subtitle="", credits="", page_size="A4",
     return {"layout": name, "page_mm": [W, H], "map_scale": mp.scale()}
 
 
+# ---------------------------------------------------------------- modern & composite layout tools
+@tool("Add an inset detail map to an existing print layout, with optional overview rectangle on the main map frame.",
+      {"layout": S("string", "name of existing layout"), "x": S("number", "x position on page in mm"),
+       "y": S("number", "y position on page in mm"), "width": S("number", "inset width in mm"),
+       "height": S("number", "inset height in mm"), "extent_layer": S("string", "layer name to zoom inset map to"),
+       "bbox": S("array", "[xmin,ymin,xmax,ymax] in project CRS"), "scale": S("number", "optional map scale denominator"),
+       "title": S("string", "optional header text, e.g. 'DETAIL KOTA DENPASAR'"),
+       "show_overview_on_main": S("boolean", "draw an overview rectangle on the main map (default true)"),
+       "grid": S("boolean", "include coordinate grid on the inset map")})
+def add_layout_inset_map(layout, x, y, width, height, extent_layer=None, bbox=None, scale=None,
+                         title="", show_overview_on_main=True, grid=False):
+    lay = QgsProject.instance().layoutManager().layoutByName(layout)
+    if not lay:
+        raise ValueError(f"No layout {layout}")
+    mm = QgsUnitTypes.LayoutUnit.LayoutMillimeters if hasattr(QgsUnitTypes, "LayoutUnit") else Qgis.LayoutUnit.Millimeters
+    p = QgsProject.instance()
+
+    # Find main map
+    main_maps = [it for it in lay.items() if isinstance(it, QgsLayoutItemMap)]
+    main_map = main_maps[0] if main_maps else None
+
+    # Title label if provided
+    top_offset = 0
+    if title:
+        top_offset = 8
+        lbl = QgsLayoutItemLabel(lay)
+        lbl.setText(title)
+        fmt = QgsTextFormat()
+        f = QFont()
+        f.setBold(True)
+        fmt.setFont(f)
+        fmt.setSize(9)
+        lbl.setTextFormat(fmt)
+        lay.addLayoutItem(lbl)
+        lbl.attemptMove(QgsLayoutPoint(float(x), float(y), mm))
+        lbl.attemptResize(QgsLayoutSize(float(width), 7, mm))
+
+    # Inset Map item
+    inset = QgsLayoutItemMap(lay)
+    inset.setRect(0, 0, 10, 10)
+    lay.addLayoutItem(inset)
+    inset.attemptMove(QgsLayoutPoint(float(x), float(y) + top_offset, mm))
+    inset.attemptResize(QgsLayoutSize(float(width), float(height) - top_offset, mm))
+
+    if bbox:
+        ext = QgsRectangle(*bbox)
+    elif extent_layer:
+        lyr = _layer(extent_layer)
+        ext = QgsCoordinateTransform(lyr.crs(), p.crs(), p).transformBoundingBox(lyr.extent())
+        ext.scale(1.05)
+    else:
+        ext = _canvas().extent()
+    inset.zoomToExtent(ext)
+    if scale:
+        inset.setScale(float(scale))
+    inset.setFrameEnabled(True)
+
+    # Overview rectangle on the main map
+    if show_overview_on_main and main_map:
+        from qgis.core import QgsLayoutItemMapOverview, QgsFillSymbol
+        ov = QgsLayoutItemMapOverview("overview", main_map)
+        ov.setLinkedMap(inset)
+        sym = QgsFillSymbol.createSimple({"color": "50,100,200,50", "outline_color": "0,80,180,255", "outline_width": "0.5"})
+        ov.setFrameSymbol(sym)
+        main_map.overviews().addOverview(ov)
+
+    # Grid on inset
+    if grid:
+        from qgis.core import QgsLayoutItemMapGrid
+        g = QgsLayoutItemMapGrid("inset_grid", inset)
+        iv = max(ext.width(), ext.height()) / 4
+        g.setIntervalX(iv)
+        g.setIntervalY(iv)
+        g.setAnnotationEnabled(True)
+        inset.grids().addGrid(g)
+
+    lay.refresh()
+    return {"inset_created": True, "map_scale": inset.scale(), "x": x, "y": y, "width": width, "height": height}
+
+
+@tool("Add an infographic horizontal bar chart card into the print layout using HTML/CSS (e.g. disaster counts per regency).",
+      {"layout": S("string", "name of existing layout"), "x": S("number", "x pos in mm"), "y": S("number", "y pos in mm"),
+       "width": S("number", "width in mm"), "height": S("number", "height in mm"),
+       "title": S("string", "chart title, e.g. 'KEJADIAN PER KABUPATEN/KOTA'"),
+       "subtitle": S("string", "subtitle, e.g. 'Oktober 2026 · total 143 kejadian'"),
+       "data": S("array", "list of dicts [{'label':'Buleleng','value':36}, ...] or key-value dict"),
+       "bar_color": S("string", "hex color, default '#2b5c8f'"),
+       "max_value": S("number", "optional axis maximum for percentage scaling")})
+def add_layout_infographic_chart(layout, x, y, width, height, title, subtitle="", data=None, bar_color="#2b5c8f", max_value=None):
+    lay = QgsProject.instance().layoutManager().layoutByName(layout)
+    if not lay:
+        raise ValueError(f"No layout {layout}")
+    mm = QgsUnitTypes.LayoutUnit.LayoutMillimeters if hasattr(QgsUnitTypes, "LayoutUnit") else Qgis.LayoutUnit.Millimeters
+
+    # Normalize data
+    items = []
+    if isinstance(data, dict):
+        items = [{"label": k, "value": v} for k, v in data.items()]
+    elif isinstance(data, list):
+        items = data or []
+
+    # Sort descending by value
+    items.sort(key=lambda d: float(d.get("value", 0)), reverse=True)
+    top_val = float(max_value or (items[0]["value"] if items else 1))
+    top_val = max(top_val, 1)
+
+    rows = []
+    for d in items[:15]:
+        lbl = html.escape(str(d.get("label", "")))
+        val = float(d.get("value", 0))
+        pct = min(100, max(2, round((val / top_val) * 100)))
+        val_str = str(int(val) if val.is_integer() else val)
+        rows.append(
+            f"<tr>"
+            f"<td style='padding: 2px 4px; font-size: 9px; color: #263238; white-space: nowrap;'>{lbl}</td>"
+            f"<td style='padding: 2px 4px; width: 60%;'>"
+            f"<div style='background: {bar_color}; height: 8px; border-radius: 2px; width: {pct}%;'></div>"
+            f"</td>"
+            f"<td align='right' style='padding: 2px 4px; font-size: 9px; font-weight: bold; color: #1a237e;'>{val_str}</td>"
+            f"</tr>"
+        )
+
+    sub_html = f"<div style='font-size: 9px; color: #546e7a; margin-bottom: 6px;'>{html.escape(subtitle)}</div>" if subtitle else ""
+    full_html = (
+        f"<div style='font-family: Arial, Helvetica, sans-serif; background: #ffffff; border: 1px solid #cfd8dc; "
+        f"border-radius: 4px; padding: 8px;'>"
+        f"<div style='font-size: 11px; font-weight: bold; color: #1a237e; letter-spacing: 0.5px;'>{html.escape(title)}</div>"
+        f"{sub_html}"
+        f"<table width='100%' style='border-collapse: collapse; margin-top: 4px;'>{''.join(rows)}</table>"
+        f"</div>"
+    )
+
+    card = QgsLayoutItemLabel(lay)
+    card.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+    card.setText(full_html)
+    lay.addLayoutItem(card)
+    card.attemptMove(QgsLayoutPoint(float(x), float(y), mm))
+    card.attemptResize(QgsLayoutSize(float(width), float(height), mm))
+    lay.refresh()
+    return {"chart_added": True, "items": len(items)}
+
+
+@tool("Add a horizontal continuous gradient color bar legend into the layout (for elevation, flood hazard, or heatmaps).",
+      {"layout": S("string", "name of existing layout"), "x": S("number", "x pos in mm"), "y": S("number", "y pos in mm"),
+       "width": S("number", "width in mm, e.g. 55"), "height": S("number", "height in mm, e.g. 18"),
+       "title": S("string", "title e.g. 'Ketinggian (m)' or 'Kepadatan kejadian'"),
+       "ramp": S("string", "color ramp name e.g. 'Spectral', 'YlOrRd', 'Blues', 'Viridis'"),
+       "min_val": S("string", "minimum label e.g. '-3' or '0 Rendah'"),
+       "max_val": S("string", "maximum label e.g. '2.945' or '1 Tinggi'"),
+       "invert_ramp": S("boolean", "invert color direction")})
+def add_layout_gradient_legend(layout, x, y, width, height, title, ramp="Spectral", min_val="0", max_val="100", invert_ramp=False):
+    lay = QgsProject.instance().layoutManager().layoutByName(layout)
+    if not lay:
+        raise ValueError(f"No layout {layout}")
+    mm = QgsUnitTypes.LayoutUnit.LayoutMillimeters if hasattr(QgsUnitTypes, "LayoutUnit") else Qgis.LayoutUnit.Millimeters
+
+    r = _ramp(ramp)
+    steps = 9
+    colors = [r.color((1.0 - (i / (steps - 1))) if invert_ramp else (i / (steps - 1))).name() for i in range(steps)]
+    css_grad = f"linear-gradient(to right, {', '.join(colors)})"
+
+    full_html = (
+        f"<div style='font-family: Arial, Helvetica, sans-serif; background: #ffffff; border: 1px solid #cfd8dc; "
+        f"border-radius: 4px; padding: 5px 7px;'>"
+        f"<div style='font-size: 9.5px; font-weight: bold; color: #263238;'>{html.escape(title)}</div>"
+        f"<div style='height: 8px; margin: 3px 0 2px 0; border-radius: 2px; border: 0.5px solid #b0bec5; background: {css_grad};'></div>"
+        f"<table width='100%' style='border-collapse: collapse; font-size: 8px; color: #455a64;'>"
+        f"<tr><td align='left'>{html.escape(str(min_val))}</td><td align='right'>{html.escape(str(max_val))}</td></tr>"
+        f"</table>"
+        f"</div>"
+    )
+
+    card = QgsLayoutItemLabel(lay)
+    card.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+    card.setText(full_html)
+    lay.addLayoutItem(card)
+    card.attemptMove(QgsLayoutPoint(float(x), float(y), mm))
+    card.attemptResize(QgsLayoutSize(float(width), float(height), mm))
+    lay.refresh()
+    return {"gradient_legend_added": True, "ramp": ramp, "title": title}
+
+
+@tool("Add a cluster callout card into the layout with optional connector pointer line to map coordinates.",
+      {"layout": S("string", "name of existing layout"), "x": S("number", "card x in mm"), "y": S("number", "card y in mm"),
+       "width": S("number", "card width in mm, e.g. 50"), "height": S("number", "card height in mm, e.g. 15"),
+       "title": S("string", "e.g. 'SAMBANGAN · BULELENG'"),
+       "subtitle": S("string", "e.g. '18 kejadian · radius 10 km'"),
+       "badge": S("string", "e.g. 'A', 'B', 'C'"),
+       "pointer_x": S("number", "optional pointer target x in layout mm"),
+       "pointer_y": S("number", "optional pointer target y in layout mm")})
+def add_layout_callout_box(layout, x, y, width, height, title, subtitle="", badge="", pointer_x=None, pointer_y=None):
+    lay = QgsProject.instance().layoutManager().layoutByName(layout)
+    if not lay:
+        raise ValueError(f"No layout {layout}")
+    mm = QgsUnitTypes.LayoutUnit.LayoutMillimeters if hasattr(QgsUnitTypes, "LayoutUnit") else Qgis.LayoutUnit.Millimeters
+
+    badge_html = (
+        f"<span style='display: inline-block; background: #1a237e; color: #ffffff; width: 13px; height: 13px; "
+        f"text-align: center; border-radius: 2px; margin-right: 4px; font-size: 9px; line-height: 13px;'>{html.escape(badge)}</span>"
+        if badge else ""
+    )
+    sub_html = f"<div style='font-size: 8px; color: #455a64; margin-top: 1px;'>{html.escape(subtitle)}</div>" if subtitle else ""
+    full_html = (
+        f"<div style='font-family: Arial, Helvetica, sans-serif; background: rgba(255, 255, 255, 0.94); border: 1.2px solid #2b5c8f; "
+        f"border-radius: 4px; padding: 4px 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.15);'>"
+        f"<div style='font-size: 9px; font-weight: bold; color: #0d47a1;'>{badge_html}{html.escape(title)}</div>"
+        f"{sub_html}"
+        f"</div>"
+    )
+
+    card = QgsLayoutItemLabel(lay)
+    card.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+    card.setText(full_html)
+    lay.addLayoutItem(card)
+    card.attemptMove(QgsLayoutPoint(float(x), float(y), mm))
+    card.attemptResize(QgsLayoutSize(float(width), float(height), mm))
+
+    # Connector line if pointer target provided
+    if pointer_x is not None and pointer_y is not None:
+        from qgis.core import QgsLayoutItemPolyline
+        from qgis.PyQt.QtCore import QPointF
+        from qgis.PyQt.QtGui import QPolygonF
+        # Connect from card center edge to target
+        start_x = float(x) + (float(width) if float(pointer_x) > float(x) else 0)
+        start_y = float(y) + float(height) / 2
+        line = QgsLayoutItemPolyline(QPolygonF([QPointF(start_x, start_y), QPointF(float(pointer_x), float(pointer_y))]), lay)
+        lay.addLayoutItem(line)
+
+    lay.refresh()
+    return {"callout_added": True, "badge": badge, "title": title}
+
+
+@tool("Create a publication-quality styled print layout with professional themes: 'infographic_bencana' (disaster dashboard with inset, chart, and multi-bar legends like BNPB), 'natgeo' (National Geographic: classic neatline borders, serif typography, warm tones), 'relief_topographic' (Swiss/Imhof alpine topo), or 'modern_clean' (executive corporate).",
+      {"name": S("string", "layout name"),
+       "style_theme": S("string", "'infographic_bencana' | 'natgeo' | 'relief_topographic' | 'modern_clean'"),
+       "title": S("string", "main map title"), "subtitle": S("string", "subtitle"),
+       "credits": S("string", "credits and data source"),
+       "extent_layer": S("string", "main study area layer name"),
+       "page_size": S("string", "A4|A3|A2, default A3"),
+       "orientation": S("string", "landscape|portrait, default landscape"),
+       "grid": S("boolean", "include coordinate grid (default true)")})
+def create_styled_layout(name="Peta", style_theme="infographic_bencana", title="", subtitle="", credits="",
+                         extent_layer=None, page_size="A3", orientation="landscape", grid=True):
+    p = QgsProject.instance()
+    mgr = p.layoutManager()
+    old = mgr.layoutByName(name)
+    if old:
+        mgr.removeLayout(old)
+
+    lay = QgsPrintLayout(p)
+    lay.initializeDefaults()
+    lay.setName(name)
+    ori = QgsLayoutItemPage.Orientation.Landscape if orientation == "landscape" else QgsLayoutItemPage.Orientation.Portrait
+    page = lay.pageCollection().page(0)
+    page.setPageSize(page_size, ori)
+    W, H = page.pageSize().width(), page.pageSize().height()
+    mm = QgsUnitTypes.LayoutUnit.LayoutMillimeters if hasattr(QgsUnitTypes, "LayoutUnit") else Qgis.LayoutUnit.Millimeters
+    m = 10
+
+    # Configure Theme Styles
+    is_natgeo = (style_theme == "natgeo")
+    is_infographic = (style_theme == "infographic_bencana")
+    is_relief = (style_theme == "relief_topographic")
+
+    font_family = "Georgia" if is_natgeo else "Arial"
+
+    # NatGeo page background tint
+    if is_natgeo:
+        page.setBackgroundColor(QColor("#fcfbf7"))
+
+    # Top Header
+    header_h = 20 if title else 0
+    if title:
+        header_card = QgsLayoutItemLabel(lay)
+        header_card.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        sub_txt = f"<div style='font-size: 11px; color: #546e7a; margin-top: 2px;'>{html.escape(subtitle)}</div>" if subtitle else ""
+        border_css = "border: 1.5px solid #263238;" if is_natgeo else "border: 1px solid #cfd8dc; border-radius: 5px;"
+        bg_css = "background: #fbf9f4;" if is_natgeo else "background: #ffffff;"
+        header_card.setText(
+            f"<div style='font-family: {font_family}, serif; text-align: center; padding: 6px; {bg_css} {border_css}'>"
+            f"<div style='font-size: 16px; font-weight: bold; color: #0d47a1; letter-spacing: 0.8px;'>{html.escape(title)}</div>"
+            f"{sub_txt}"
+            f"</div>"
+        )
+        lay.addLayoutItem(header_card)
+        header_card.attemptMove(QgsLayoutPoint(m, m, mm))
+        header_card.attemptResize(QgsLayoutSize(W - 2 * m, 18, mm))
+
+    # Main Map frame placement
+    map_top = m + (22 if title else 0)
+    bottom_h = 55 if is_infographic else 20
+    right_w = 80 if is_infographic else 0
+
+    mp = QgsLayoutItemMap(lay)
+    mp.setRect(0, 0, 10, 10)
+    lay.addLayoutItem(mp)
+    mp.attemptMove(QgsLayoutPoint(m, map_top, mm))
+    mp.attemptResize(QgsLayoutSize(W - 2 * m - right_w, H - map_top - bottom_h, mm))
+
+    if extent_layer:
+        lyr = _layer(extent_layer)
+        ext = QgsCoordinateTransform(lyr.crs(), p.crs(), p).transformBoundingBox(lyr.extent())
+        ext.scale(1.05)
+    else:
+        ext = _canvas().extent()
+    mp.zoomToExtent(ext)
+    mp.setFrameEnabled(True)
+
+    # Coordinate Grid
+    if grid:
+        from qgis.core import QgsLayoutItemMapGrid
+        g = QgsLayoutItemMapGrid("grid", mp)
+        iv = max(ext.width(), ext.height()) / 5
+        g.setIntervalX(iv)
+        g.setIntervalY(iv)
+        g.setAnnotationEnabled(True)
+        g.setAnnotationFormat(QgsLayoutItemMapGrid.AnnotationFormat.DegreeMinute if is_natgeo or is_infographic else QgsLayoutItemMapGrid.AnnotationFormat.Decimal)
+        mp.grids().addGrid(g)
+
+    # Scale bar
+    sb = QgsLayoutItemScaleBar(lay)
+    sb.setStyle("Single Box" if is_natgeo else "Line Ticks Up")
+    sb.setLinkedMap(mp)
+    sb.applyDefaultSize()
+    lay.addLayoutItem(sb)
+    sb.attemptMove(QgsLayoutPoint(m + 5, H - bottom_h - 15, mm))
+
+    # North arrow
+    na = QgsLayoutItemPicture(lay)
+    na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
+    na.setLinkedMap(mp)
+    lay.addLayoutItem(na)
+    na.attemptResize(QgsLayoutSize(14, 20, mm))
+    na.attemptMove(QgsLayoutPoint(W - 2 * m - right_w - 18, map_top + 4, mm))
+
+    # Credits footer
+    if credits:
+        lbl_cred = QgsLayoutItemLabel(lay)
+        lbl_cred.setText(f"Sumber: {credits} | Dibuat dengan QGIS {Qgis.version()}")
+        fmt = QgsTextFormat()
+        fmt.setSize(7.5)
+        lbl_cred.setTextFormat(fmt)
+        lay.addLayoutItem(lbl_cred)
+        lbl_cred.attemptMove(QgsLayoutPoint(m, H - m - 4, mm))
+        lbl_cred.attemptResize(QgsLayoutSize(W - 2 * m, 6, mm))
+
+    mgr.addLayout(lay)
+    return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale(),
+            "inset_reserved_left": is_infographic, "chart_reserved_right": is_infographic}
+
+
 @tool("Change any layout item text or the map scale/extent after creation.",
       {"name": S("string", "layout"), "map_scale": S("number", ""), "replace_text": S("object", "{old: new}")})
 def edit_layout(name, map_scale=None, replace_text=None):

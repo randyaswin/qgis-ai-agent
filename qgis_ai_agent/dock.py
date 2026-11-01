@@ -37,6 +37,16 @@ def summarize_tool_result(name, result):
         return f"Layout diekspor ke <code>{html.escape(path)}</code> ({succ})"
     if name == "create_layout":
         return f"Layout cetak '<b>{html.escape(result.get('layout', ''))}</b>' dibuat (Ukuran: {result.get('page_mm', [])} mm, Skala 1:{result.get('map_scale', 0):,.0f})"
+    if name == "create_styled_layout":
+        return f"Layout bergaya '<b>{html.escape(result.get('theme', ''))}</b>' (<b>{html.escape(result.get('layout', ''))}</b>) berhasil dibuat"
+    if name == "add_layout_inset_map":
+        return "🖼️ Peta inset detail ditambahkan ke layout (overview rectangle tersambung)"
+    if name == "add_layout_infographic_chart":
+        return f"📊 Kartu infografis diagram batang ({result.get('items', 0)} item) ditambahkan ke layout"
+    if name == "add_layout_gradient_legend":
+        return f"🌈 Bar gradien legenda horizontal '<b>{html.escape(result.get('title', ''))}</b>' ditambahkan ke layout"
+    if name == "add_layout_callout_box":
+        return f"🏷️ Kartu callout cluster <b>{html.escape(result.get('badge', ''))}</b> ('{html.escape(result.get('title', ''))}') ditambahkan"
     if name == "add_vector_layer":
         return f"Layer vektor '<b>{html.escape(result.get('name', ''))}</b>' dimuat ({result.get('geometry')}, {result.get('features')} fitur, CRS: {result.get('crs')})"
     if name == "add_raster_layer":

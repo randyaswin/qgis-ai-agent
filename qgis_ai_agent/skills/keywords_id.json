@@ -197,6 +197,39 @@
       "toolbox",
       "geoprocessing",
       "algoritma"
+    ],
+    "natgeo": [
+      "natgeo",
+      "national",
+      "geographic",
+      "classic",
+      "parchment",
+      "serif"
+    ],
+    "infografis": [
+      "infographic",
+      "dashboard",
+      "bencana",
+      "disaster",
+      "chart",
+      "callout",
+      "inset"
+    ],
+    "dashboard": [
+      "infographic",
+      "dashboard",
+      "bencana",
+      "chart",
+      "callout",
+      "inset"
+    ],
+    "swiss": [
+      "swiss",
+      "imhof",
+      "swisstopo",
+      "relief",
+      "topography",
+      "alpine"
     ]
   },
   "keywords": {
@@ -360,6 +393,58 @@
       "raster",
       "calculator",
       "modeler"
+    ],
+    "disaster-infographic-dashboard": [
+      "disaster",
+      "bencana",
+      "infografis",
+      "dashboard",
+      "bnpb",
+      "bpbd",
+      "bali",
+      "kejadian",
+      "callout",
+      "cluster",
+      "inset",
+      "denpasar",
+      "diagram",
+      "batang",
+      "bar",
+      "chart",
+      "heatmap",
+      "komposit"
+    ],
+    "natgeo-cartography-style": [
+      "natgeo",
+      "national",
+      "geographic",
+      "classic",
+      "antique",
+      "parchment",
+      "serif",
+      "elegant",
+      "neatline",
+      "kartografi",
+      "klasik",
+      "indah",
+      "buku",
+      "majalah"
+    ],
+    "swiss-relief-cartography": [
+      "swiss",
+      "imhof",
+      "swisstopo",
+      "relief",
+      "alpine",
+      "topography",
+      "topografi",
+      "pegunungan",
+      "kontur",
+      "bayangan",
+      "gunung",
+      "kemiringan",
+      "lereng",
+      "elevasi"
     ]
   }
 }

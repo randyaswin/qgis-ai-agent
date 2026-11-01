@@ -22,7 +22,7 @@ ToolServer (QGIS Main Thread) ──▶ tools.py (37 Tools)
 
 ## Fitur Utama
 
-1. **41 Tools MCP Lengkap**:
+1. **46 Tools MCP Lengkap**:
    - **Proyek & CRS**: `get_project_state`, `set_project_crs`, `new_project`, `open_project`, `save_project`, `zoom_to`.
    - **Inspeksi Data**: `describe_layer` (vektor, raster, mesh, point cloud, vector tile), `describe_all_layers`, `get_features`, `get_selected_features`, `field_stats`, `sample_raster`.
    - **Processing Toolbox & Geoprocessing**:
@@ -35,12 +35,22 @@ ToolServer (QGIS Main Thread) ──▶ tools.py (37 Tools)
      - `open_model_designer`: Membuka Graphical Model Designer untuk alur kerja visual.
    - **Kartografi & Simbologi**: `style_single`, `style_categorized`, `style_graduated`, `style_raster`, `load_style`, `list_color_ramps`, `set_labels`.
    - **Verifikasi Visual (Loop)**: `snapshot_canvas` (render PNG dikirim langsung ke agent untuk self-correction).
-   - **Tata Letak & Ekspor**: `create_layout` (judul, legenda, skala, arah utara, grid, kredit sumber), `edit_layout`, `export_layout` (PDF/PNG/SVG + preview), `open_layout_designer`.
+   - **Tata Letak & Desain Modern (Komposit / NatGeo / Relief / Infografis)**:
+     - `create_layout`: Layout standar satu kanvas.
+     - `create_styled_layout`: Layout tematik profesional (`infographic_bencana`, `natgeo`, `relief_topographic`, `modern_clean`).
+     - `add_layout_inset_map`: Peta inset detail (zoom perkotaan) dengan kotak penunjuk lokasi (*overview rectangle*) di peta utama.
+     - `add_layout_infographic_chart`: Kartu infografis diagram batang horizontal (HTML/CSS resolusi tinggi).
+     - `add_layout_gradient_legend`: Bar gradien legenda horizontal kontinu (ketinggian, bahaya, heatmap).
+     - `add_layout_callout_box`: Kartu callout cluster (A, B, C, D, E) dengan garis penunjuk ke titik peta.
+     - `edit_layout`, `export_layout` (PDF/PNG/SVG + preview), `open_layout_designer`.
    - **Skills Discovery & Loading**: `list_skills`, `load_skill`.
    - **Sandbox Escape Hatch**: `exec_pyqgis` (eksekusi kode PyQGIS bebas; dinonaktifkan secara default).
 
-2. **Dukungan 46 GIS Skills Berstandar `SKILL.md`**:
-   - **12 Custom Use Case Skills**:
+2. **Dukungan 49 GIS Skills Berstandar `SKILL.md`**:
+   - **15 Custom Use Case Skills**:
+     - `disaster-infographic-dashboard`: Panduan arsitektur layout infografis situasi bencana (peta utama + inset detail + KDE heatmap + buffer 10 km + callout kluster + diagram batang + bar gradien).
+     - `natgeo-cartography-style`: Panduan kartografi gaya National Geographic (kanvas perkamen hangat, border neatline ganda, tipografi serif klasik, palet bumi halus).
+     - `swiss-relief-cartography`: Panduan relief topografi gaya Swiss / Imhof (pencahayaan NW 315°, bayangan sejuk, hierarki garis kontur, strip gradien elevasi).
      - `qgis-processing-toolbox`: Panduan komprehensif penemuan & otomatisasi 440+ algoritma geoprocessing QGIS, pemanggilan dialog GUI, dan modeler visual.
      - `choropleth-density-map`: Peta tematik rasio/kepadatan & normalisasi data.
      - `indonesia-geodata-crs`: Database CRS lokal Indonesia (UTM 46–54, SRGI2013, DGN95), kaidah kode wilayah BPS/Kemendagri.

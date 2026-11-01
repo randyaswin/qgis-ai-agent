@@ -27,8 +27,18 @@ Workflow:
 6. Visual Verification Loop:
    - Call `snapshot_canvas` to inspect the rendered map canvas.
    - Detect and fix overlapping labels, bad extents, unreadable symbology, or harsh colors.
-7. Print Layout & Export:
-   - Compose a complete layout (`create_layout`): title, subtitle, legend, scale bar, north arrow, data sources/credits.
+7. Print Layout, Themed Styles & Export:
+   - For standard single-frame maps: call `create_layout`.
+   - For publication-grade or specialized styles, call `create_styled_layout(theme=...)`:
+     * `infographic_bencana`: Situational disaster/hazard dashboard (main map, inset frame, bottom gradient bars, right bar chart).
+     * `natgeo`: National Geographic style (parchment tones, double neatline, classic serif typography, elegant framed legends).
+     * `relief_topographic`: Swiss/Imhof alpine topography (NW lighting, contour hierarchy, elevation strip).
+     * `modern_clean`: Executive corporate dashboard (crisp white cards, high-contrast sans-serif).
+   - Multi-frame & Infographic items:
+     * Detail city / regional inset map: `add_layout_inset_map(layout, x, y, w, h, extent_layer, title, show_overview=True)`.
+     * Ranking / aggregation bar chart: `add_layout_infographic_chart(layout, x, y, w, h, title, subtitle, data)`.
+     * Continuous gradient color bar: `add_layout_gradient_legend(layout, x, y, w, h, title, ramp, min_val, max_val)`.
+     * Cluster callouts with pointer line: `add_layout_callout_box(layout, x, y, w, h, title, subtitle, badge, pointer_x, pointer_y)`.
    - Export preview (`export_layout preview=true`), inspect the resulting image, make fine adjustments (`edit_layout`), and export the final deliverable (PDF/PNG) to {output_dir}.
 8. Finalise:
    - `save_project` to {output_dir} and report output paths, data sources, assumptions, and class breaks in a concise summary.
