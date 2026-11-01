@@ -1,0 +1,732 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openmapstack/schemas/project-v1.schema.json",
+  "title": "OpenMapStack project manifest v1",
+  "type": "object",
+  "required": [
+    "schema", "project", "interpretation", "sources", "overrides",
+    "processing", "outputs", "validation", "presentation", "runtime", "runs"
+  ],
+  "allOf": [{
+    "if": {"required": ["delivery"], "properties": {
+      "presentation": {"required": ["primary_view"], "properties": {"primary_view": {"const": "report"}}}
+    }},
+    "then": {},
+    "else": {"properties": {"presentation": {"properties": {"map": {"required": ["basemap"]}}}}}
+  }],
+  "$defs": {
+    "control_effect": {"enum": ["exploratory", "published"]},
+    "control": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "effect": {"$ref": "#/$defs/control_effect"}
+      }
+    },
+
+    "assumption": {
+      "type": "object",
+      "required": ["id", "statement", "rationale"],
+      "additionalProperties": true,
+      "description": "An explicit analytical assumption. Additional fields are project-specific metadata with no built-in execution or validation semantics.",
+      "properties": {
+        "id": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "statement": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "rationale": {"type": "string", "minLength": 1, "pattern": "\\S"}
+      }
+    },
+
+    "integrations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "bindings",
+        "evidence"
+      ],
+      "properties": {
+        "schema": {
+          "const": "openmapstack-integrations/v1"
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 1
+        },
+        "run_evidence": {
+          "type": "string",
+          "minLength": 1
+        },
+        "bindings": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "owner",
+              "role",
+              "definition",
+              "sha256",
+              "steps",
+              "steps_sha256"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "owner": {
+                "type": "string",
+                "minLength": 1
+              },
+              "role": {
+                "type": "string",
+                "minLength": 1
+              },
+              "definition": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              },
+              "steps": {
+                "type": "array",
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "steps_sha256": {
+                "type": "string",
+                "pattern": "^sha256:[0-9a-f]{64}$"
+              }
+            }
+          }
+        },
+        "bundles": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "target",
+              "path"
+            ],
+            "properties": {
+              "target": {
+                "type": "string",
+                "minLength": 1
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "delivery": {
+      "type": "object",
+      "required": ["schema", "targets"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "openmapstack-delivery/v1"},
+        "targets": {
+          "type": "array", "minItems": 1,
+          "items": {"$ref": "#/$defs/deliveryTarget"}
+        }
+      }
+    },
+    "deliveryTarget": {
+      "type": "object",
+      "required": ["id", "kind", "output", "inputs", "evidence"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"},
+        "kind": {"enum": ["dashboard", "qgis", "observable"]},
+        "output": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "inputs": {"type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "pattern": "\\S"}},
+        "evidence": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "mode": {"enum": ["local", "hosted"], "default": "local"},
+        "url": {"type": "string", "pattern": "^https://[^\\s]+$"},
+        "retrieved_at": {"type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"},
+        "build": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {"if": {"properties": {"mode": {"const": "hosted"}}, "required": ["mode"]},
+         "then": {"required": ["url", "retrieved_at", "build"],
+                  "properties": {"kind": {"const": "observable"}}},
+         "else": {"not": {"anyOf": [
+           {"required": ["url"]}, {"required": ["retrieved_at"]}, {"required": ["build"]}
+         ]}}}
+      ]
+    },
+    "table_column": {
+      "oneOf": [
+        {"type": "string", "minLength": 1},
+        {
+          "type": "object",
+          "required": ["name"],
+          "properties": {
+            "name": {"type": "string", "minLength": 1},
+            "type": {"enum": ["string", "integer", "number", "boolean", "date", "datetime"]},
+            "unit": {"type": "string"},
+            "label": {"type": "string"},
+            "description": {"type": "string"}
+          }
+        }
+      ]
+    },
+    "table_downloads": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"enum": ["csv", "xlsx", "json", "parquet"]}
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^(sha256:)?[0-9a-fA-F]{64}$"
+    },
+    "fieldIdentifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "safeProjectPath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+"
+    },
+    "jsonScalar": {
+      "type": ["string", "number", "boolean", "null"]
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"
+    },
+    "runtimeParameter": {
+      "type": "object",
+      "required": ["id", "type", "canonical", "binding"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"$ref": "#/$defs/identifier"},
+        "type": {"enum": ["integer", "number", "string"]},
+        "canonical": {"type": ["integer", "number", "string"]},
+        "binding": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "argument": {"type": "string", "pattern": "^--[a-z][a-z0-9]*(?:-[a-z0-9]+)*$"},
+            "environment": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"}
+          }
+        },
+        "step": {"type": "string", "minLength": 1},
+        "field": {"$ref": "#/$defs/identifier"},
+        "role": {"enum": ["sample_area", "sample_rows", "sample_fraction"]},
+        "sample": {"type": ["integer", "number", "string"]},
+        "description": {"type": "string"}
+      },
+      "dependentRequired": {"step": ["field"], "field": ["step"], "sample": ["role"]}
+    },
+    "metamorphicRelation": {
+      "type": "object",
+      "required": ["id", "relation", "outputs", "key"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "relation": {
+          "enum": ["input_permutation_invariance", "duplicate_resistance", "positive_buffer_monotonicity"]
+        },
+        "outputs": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "key": {"$ref": "#/$defs/identifier"},
+        "source": {
+          "type": "object",
+          "required": ["path"],
+          "additionalProperties": false,
+          "properties": {"path": {"$ref": "#/$defs/safeProjectPath"}}
+        },
+        "parameter": {"$ref": "#/$defs/identifier"},
+        "variant": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "additionalProperties": false,
+          "properties": {
+            "multiply": {"type": "number", "exclusiveMinimum": 1},
+            "add": {"type": "number", "exclusiveMinimum": 0}
+          }
+        },
+        "preconditions": {"type": "object"},
+        "tolerance": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "ignored_fields": {"type": "array", "items": {"type": "string", "minLength": 1}},
+            "round_numbers": {"type": "integer", "minimum": 0}
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "timeout_s": {"type": "number", "exclusiveMinimum": 0},
+            "max_source_bytes": {"type": "integer", "minimum": 1}
+          }
+        },
+        "seed": {"type": "integer"},
+        "description": {"type": "string"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"relation": {"const": "positive_buffer_monotonicity"}}},
+          "then": {"required": ["parameter", "variant", "preconditions"], "not": {"required": ["source"]}},
+          "else": {
+            "required": ["source"],
+            "not": {"anyOf": [{"required": ["parameter"]}, {"required": ["variant"]}]}
+          }
+        }
+      ]
+    },
+    "sourcePin": {
+      "type": "object",
+      "required": ["class", "captured_at"],
+      "properties": {
+        "class": {"enum": ["local_snapshot", "backend_snapshot"]},
+        "captured_at": {"type": "string", "minLength": 1},
+        "path": {"$ref": "#/$defs/safeProjectPath"},
+        "sha256": {"$ref": "#/$defs/digest"},
+        "identifier": {"type": "string", "minLength": 1},
+        "retention_until": {"type": "string", "minLength": 1},
+        "verification": {
+          "type": "object",
+          "required": ["at", "status"],
+          "properties": {
+            "at": {"type": "string", "minLength": 1},
+            "status": {"enum": ["accessible", "inaccessible"]}
+          }
+        },
+        "note": {"type": "string"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"class": {"const": "local_snapshot"}}},
+          "then": {"required": ["path", "sha256"]},
+          "else": {"required": ["identifier", "retention_until"]}
+        }
+      ]
+    },
+    "connectionReference": {
+      "description": "A credential reference (env:, file:, service:, keyring:). The shape is open here so that an embedded DSN is rejected by the semantic credential check with a useful message rather than by a regex.",
+      "type": ["string", "object"]
+    },
+    "warehouseSource": {
+      "type": "object",
+      "required": ["backend"],
+      "properties": {
+        "backend": {"type": "string", "minLength": 1},
+        "account": {"type": "string"},
+        "database": {"type": "string"},
+        "schema": {"type": "string"},
+        "table": {"type": "string"},
+        "query_sha256": {"$ref": "#/$defs/digest"},
+        "schema_sha256": {"$ref": "#/$defs/digest"},
+        "snapshot_capability": {"type": "string"}
+      }
+    },
+    "expectationAttestation": {
+      "type": "object",
+      "required": ["status"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"enum": ["unverified", "verified"]},
+        "reason": {"type": "string", "minLength": 1},
+        "verified_by": {"type": "string", "minLength": 1},
+        "verified_against": {"type": "string", "minLength": 1},
+        "verified_at": {"type": "string", "format": "date-time"},
+        "evidence_path": {"$ref": "#/$defs/safeProjectPath"},
+        "evidence_sha256": {"$ref": "#/$defs/digest"},
+        "expectation_sha256": {"$ref": "#/$defs/digest"},
+        "inputs_hash": {"$ref": "#/$defs/digest"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "verified"}}},
+          "then": {
+            "required": [
+              "verified_by", "verified_against", "verified_at",
+              "evidence_sha256", "expectation_sha256", "inputs_hash"
+            ]
+          }
+        }
+      ]
+    },
+    "expectation": {
+      "type": "object",
+      "required": ["id", "check", "args", "attestation"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+        },
+        "check": {
+          "enum": [
+            "geodata.row_count",
+            "geodata.feature_present",
+            "geodata.feature_absent",
+            "geodata.feature_field_equals",
+            "geodata.field_range"
+          ]
+        },
+        "args": {"type": "object"},
+        "attestation": {"$ref": "#/$defs/expectationAttestation"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"check": {"const": "geodata.row_count"}}},
+          "then": {
+            "properties": {
+              "args": {
+                "type": "object",
+                "required": ["path"],
+                "additionalProperties": false,
+                "properties": {
+                  "path": {"$ref": "#/$defs/safeProjectPath"},
+                  "equals": {"type": "integer", "minimum": 0},
+                  "at_least": {"type": "integer", "minimum": 0},
+                  "at_most": {"type": "integer", "minimum": 0}
+                },
+                "anyOf": [
+                  {"required": ["equals"]},
+                  {"required": ["at_least"]},
+                  {"required": ["at_most"]}
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "check": {"enum": ["geodata.feature_present", "geodata.feature_absent"]}
+            }
+          },
+          "then": {
+            "properties": {
+              "args": {
+                "type": "object",
+                "required": ["path", "id_field", "id"],
+                "additionalProperties": false,
+                "properties": {
+                  "path": {"$ref": "#/$defs/safeProjectPath"},
+                  "id_field": {"$ref": "#/$defs/fieldIdentifier"},
+                  "id": {"$ref": "#/$defs/jsonScalar"}
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"check": {"const": "geodata.feature_field_equals"}}},
+          "then": {
+            "properties": {
+              "args": {
+                "type": "object",
+                "required": ["path", "id_field", "id", "field", "equals"],
+                "additionalProperties": false,
+                "properties": {
+                  "path": {"$ref": "#/$defs/safeProjectPath"},
+                  "id_field": {"$ref": "#/$defs/fieldIdentifier"},
+                  "id": {"$ref": "#/$defs/jsonScalar"},
+                  "field": {"$ref": "#/$defs/fieldIdentifier"},
+                  "equals": {"$ref": "#/$defs/jsonScalar"}
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"check": {"const": "geodata.field_range"}}},
+          "then": {
+            "properties": {
+              "args": {
+                "type": "object",
+                "required": ["path", "field"],
+                "additionalProperties": false,
+                "properties": {
+                  "path": {"$ref": "#/$defs/safeProjectPath"},
+                  "field": {"$ref": "#/$defs/fieldIdentifier"},
+                  "min": {"type": "number"},
+                  "max": {"type": "number"}
+                },
+                "anyOf": [
+                  {"required": ["min"]},
+                  {"required": ["max"]}
+                ]
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "properties": {
+    "integrations": {"$ref": "#/$defs/integrations"},
+    "delivery": {"$ref": "#/$defs/delivery"},
+    "schema": {"const": "openmapstack-project/v1"},
+    "project": {
+      "type": "object",
+      "required": ["id", "title", "question", "created_at", "updated_at", "status"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "title": {"type": "string", "minLength": 1},
+        "question": {"type": "string", "minLength": 1},
+        "created_at": {"type": "string", "minLength": 1},
+        "updated_at": {"type": "string", "minLength": 1},
+        "author": {
+          "type": "object", "required": ["name", "email"],
+          "properties": {
+            "name": {"type": "string", "minLength": 1, "pattern": "\\S"},
+            "email": {"type": "string", "minLength": 1},
+            "url": {"type": "string", "minLength": 1}
+          }
+        },
+        "generated_with": {
+          "type": "object", "required": ["tool", "url"],
+          "properties": {
+            "tool": {"const": "OpenMapStack"},
+            "url": {"type": "string", "minLength": 1}
+          }
+        },
+        "status": {"enum": ["draft", "in_progress", "validated", "warning", "failed"]},
+        "aoi": {
+          "type": "object",
+          "description": "Area of interest. bbox is [minx, miny, maxx, maxy] in the crs's x/y order (lon/lat or easting/northing); min < max is checked beyond JSON Schema. Local geodata outputs are compared against it.",
+          "required": ["bbox", "crs"],
+          "properties": {
+            "bbox": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "number"}},
+            "crs": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "interpretation": {
+      "type": "object",
+      "required": ["objective", "assumptions"],
+      "properties": {
+        "objective": {"type": "string", "minLength": 1},
+        "assumptions": {
+          "type": "array",
+          "description": "Assumption IDs must be unique within the project (checked beyond JSON Schema). An empty array is valid but produces a no-assumptions warning.",
+          "items": {"$ref": "#/$defs/assumption"}
+        }
+      }
+    },
+    "sources": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "pin": {"$ref": "#/$defs/sourcePin"},
+          "warehouse": {"$ref": "#/$defs/warehouseSource"},
+          "access": {
+            "type": "object",
+            "properties": {"connection": {"$ref": "#/$defs/connectionReference"}}
+          }
+        }
+      }
+    },
+    "overrides": {"type": "array"},
+    "processing": {
+      "type": "object",
+      "required": ["analysis_crs", "steps"],
+      "properties": {
+        "analysis_crs": {"type": "string", "minLength": 1},
+        "storage_crs": {"type": "string", "minLength": 1},
+        "steps": {"type": "array", "minItems": 1}
+      }
+    },
+    "findings": {
+      "type": "object", "required": ["schema", "output"], "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "openmapstack-findings/v1"},
+        "output": {"type": "string", "minLength": 1}
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "kind": {"enum": ["geodata", "table", "document"]},
+          "extent": {
+            "enum": ["local", "global"],
+            "description": "local (default) geodata must lie near project.aoi; global layers are exempt from that check."
+          },
+          "table": {
+            "type": "object",
+            "properties": {
+              "columns": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/table_column"}},
+              "key": {
+                "oneOf": [
+                  {"type": "string", "minLength": 1},
+                  {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+                ]
+              }
+            }
+          },
+          "downloads": {"$ref": "#/$defs/table_downloads"}
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "required": ["required", "domain_checks"],
+      "properties": {
+        "required": {"type": "array"},
+        "domain_checks": {"type": "array"},
+        "expectations": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/expectation"}
+        },
+        "metamorphic": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/metamorphicRelation"}
+        }
+      }
+    },
+    "presentation": {
+      "type": "object",
+      "properties": {
+        "design_language": {"enum": ["openmapstack-views/0.1"]},
+        "tables": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["output"],
+            "properties": {
+              "output": {"type": "string", "minLength": 1},
+              "title": {"type": "string"},
+              "downloads": {"$ref": "#/$defs/table_downloads"},
+              "default_sort": {"type": "string"},
+              "max_height": {"type": "string"}
+            }
+          }
+        },
+        "controls": {
+          "type": "object",
+          "properties": {
+            "filters": {"type": "array", "items": {"$ref": "#/$defs/control"}},
+            "scenarios": {"type": "array", "items": {"$ref": "#/$defs/control"}},
+            "variants": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["id", "options", "canonical"],
+                "properties": {
+                  "id": {"type": "string", "minLength": 1},
+                  "label": {"type": "string"},
+                  "options": {"type": "array", "minItems": 1},
+                  "output": {"type": "string", "minLength": 1},
+                  "fields": {"type": "object"},
+                  "effect": {"$ref": "#/$defs/control_effect"}
+                }
+              }
+            }
+          }
+        },
+        "map": {
+          "type": "object",
+          "properties": {
+            "basemap": {
+              "type": "object",
+              "required": ["id", "kind", "attribution"],
+              "properties": {
+                "id": {"type": "string", "minLength": 1},
+                "kind": {"enum": ["raster-xyz", "raster-wms", "vector-style"]},
+                "tiles": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+                "url": {"type": "string", "minLength": 1},
+                "dark_url": {"type": "string", "minLength": 1},
+                "tilejson": {"type": "string", "minLength": 1},
+                "attribution": {"type": "string", "minLength": 1},
+                "default_visible": {"type": "boolean"}
+              },
+              "anyOf": [{"required": ["tiles"]}, {"required": ["url"]}],
+              "if": {"properties": {"kind": {"const": "vector-style"}}, "required": ["kind"]},
+              "then": {"required": ["url"]}
+            }
+          }
+        }
+      }
+    },
+    "views": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "output"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "output": {"type": "string", "minLength": 1},
+          "archetype": {"type": "string", "minLength": 1},
+          "scope": {"type": "string", "minLength": 1},
+          "entry": {"type": "boolean"},
+          "presentation": {"$ref": "#/properties/presentation"}
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "required": ["implementation"],
+      "properties": {
+        "environment": {
+          "type": "object",
+          "properties": {
+            "packages": {
+              "type": "array",
+              "items": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "implementation": {
+          "type": "object",
+          "properties": {
+            "parameters": {
+              "type": "array",
+              "items": {"$ref": "#/$defs/runtimeParameter"}
+            }
+          },
+          "anyOf": [
+            {"required": ["pipeline"]},
+            {"required": ["command"]}
+          ]
+        }
+      }
+    },
+    "runs": {
+      "type": "object",
+      "required": ["latest"],
+      "properties": {
+        "latest": {
+          "type": "object",
+          "required": [
+            "id", "started_at", "completed_at", "status",
+            "inputs_hash", "outputs_hash", "validation_report"
+          ],
+          "properties": {
+            "status": {"enum": ["passed", "warning", "failed"]}
+          }
+        }
+      }
+    }
+  }
+}

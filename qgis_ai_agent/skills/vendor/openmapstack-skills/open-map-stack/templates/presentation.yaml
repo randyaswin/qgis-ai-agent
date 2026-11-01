@@ -1,0 +1,162 @@
+# =============================================================================
+# OpenMapStack semantic presentation template
+# -----------------------------------------------------------------------------
+# Declares WHAT to show and its hierarchy, not the exact rendering. A renderer
+# (MapLibre, MapLibre + deck.gl, kepler.gl, or QGIS) decides spacing, fonts,
+# colors, and controls.
+# See project-spec.md section 3.
+# =============================================================================
+
+presentation:
+  intent: analytical_workspace      # analytical_workspace | discovery | report
+  primary_view: map
+  # design_language: openmapstack-views/0.1   # opts the view into that version's
+  #                                            # checks; see design-language.md
+
+  layout:
+    type: map_with_sidebar         # map | map_with_sidebar | full_map | report
+    sidebar:
+      position: left
+      width: medium
+      organization: tabs           # tabs | stacked
+      section_state: collapsible   # collapsible | static
+      tabs:                        # sections: summary | metrics | criteria |
+        - id: analysis             #   assumptions | warnings | filters |
+          title: Analysis          #   scenario_controls | layer_controls |
+          sections: [summary, metrics, criteria, assumptions, warnings]
+        - id: map                  #   basemap | credits | provenance |
+          title: Map               #   overrides | validation | outputs | run_record
+          sections: [scenario_controls, filters, layer_controls, basemap]
+        - id: edit
+          title: Edit
+          sections: [selected_feature, draw_geometry, draft_overrides, export_bundle]
+        - id: provenance
+          title: Provenance
+          sections: [credits, provenance, overrides, validation, outputs, run_record]
+    footer_panel: table            # full_map | table | details | timeline | none
+
+  # What the reader may reconfigure. `canonical` is the value the pipeline
+  # actually ran: the view opens there, and any departure must be labelled as
+  # exploratory with a one-click reset. See project-spec.md section 3.
+  controls:
+    reconfigurable: true
+    canonical_reset: true
+    off_canonical_labelling: required
+    filters:
+      # - id: min_area
+      #   label: Minimum parcel area
+      #   type: range              # range | choice | multi_select | toggle
+      #   field: area_m2
+      #   unit: m2
+      #   canonical: 20000
+      #   step: 5000
+      # - id: threshold
+      #   type: choice             # snap to radii the pipeline materialised,
+      #   fields: [dist_a_m, dist_b_m]   # never a browser-side buffer
+      #   canonical: 2000
+      #   options: [1000, 2000, 3000]
+      #   redraws: catchment_variants_geojson
+    scenarios:
+      # - id: scenario_outage
+      #   override: OVERRIDE-001   # the override this switch turns on and off
+      #   canonical: true
+      #   effect: exploratory      # default; `published` only when every state
+      #                            # is a result the run published
+      #   baseline_fields: [dist_b_baseline_m]   # measured without the override
+    variants:
+      # A switch between precomputed variants that is not an override
+      # (travel mode, analysis year). See project-spec.md s.3.
+      # - id: travel_mode
+      #   label: Travel mode
+      #   options: [walk, bike]
+      #   canonical: walk
+      #   output: scenario_summary # a kind: table output
+      #   fields: {walk: [walk_time_saved_h], bike: [bike_time_saved_h]}
+
+  tables:
+    # Non-spatial (kind: table) outputs rendered as scrollable tables with a
+    # sticky header, sorting, row count and links to the pipeline-written
+    # download files. See project-spec.md s.2.5 and s.3 Tabular results.
+    # - output: scenario_summary
+    #   title: Scenario comparison
+    #   downloads: [csv, xlsx]
+    #   default_sort: time_saved_h_year
+
+  map:
+    engine_preference: maplibre    # maplibre | deck | kepler; see project-spec.md s.2.7
+    interaction:
+      feature_select: true
+      hover_tooltip: true
+      zoom_to_selection: true
+    basemap:
+      # Required whenever a map is presented (project-spec.md s. 3): the
+      # dashboard must really request these tiles and really show this
+      # attribution. Honor user choices and prefer an appropriate local/regional basemap.
+      # Otherwise use this global fallback; see references/web-delivery.md.
+      # Verify these maintained defaults live before delivery; pin any
+      # verified replacements explicitly in the project manifest.
+      id: goplex-protomaps
+      kind: vector-style             # raster-xyz | raster-wms | vector-style
+      url: https://tiles.goplex.ee/styles/5.7.2/white.json
+      dark_url: https://tiles.goplex.ee/styles/5.7.2/dark.json
+      tilejson: https://tiles.goplex.ee/planet-20261006.json
+      attribution: "© OpenStreetMap contributors, Protomaps tiles by goplex.ee"
+      default_visible: true
+    layer_groups:
+      - id: analysis
+        title: Analysis
+        default_open: true
+      - id: constraints
+        title: Constraints
+        default_open: false
+      - id: user_overrides
+        title: Manual additions and corrections
+        default_open: true
+      - id: sources
+        title: Source data
+        default_open: false
+      - id: context
+        title: Reference / context
+        default_open: false
+    layers:
+      # One entry per rendered dataset. semantic_role is a closed vocabulary:
+      # primary_result | secondary_result | source | context | constraint |
+      # excluded_area | warning | user_override | planned | hypothetical |
+      # selected_feature. Source, result, override and hypothetical data must
+      # stay visually distinguishable, so do not give them all one role.
+      # - source: candidate_parcels
+      #   group: analysis
+      #   semantic_role: primary_result
+      #   geometry: polygon        # point | line | polygon | raster
+      #   style:
+      #     visual_priority: primary
+      #     opacity: 0.65
+
+  legend:
+    visible: true
+    mode: semantic                  # semantic roles, not arbitrary colors
+
+  provenance_ui:
+    feature_source_on_click: true   # show source/dataset/version/timestamp per feature
+    show_source_timestamp: true
+    show_override_badge: true
+    show_assumptions: true
+    show_warnings: true
+    credits:                        # first block of the provenance tab: toolkit link,
+      generated_with: true          # analysis time with UTC offset and author
+      analysis_timestamp: runs.latest.completed_at   # (project-spec.md s.3, Credits header)
+      author: true
+
+  editing:
+    allow_draw_geometry: true
+    allow_attribute_override: true
+    allow_hide_source_feature: true
+    allow_add_annotation: true
+    draft_persistence: local_storage       # browser draft, scoped to project + run
+    export_format: openmapstack-override-bundle/v1
+    canonical_application: pipeline_required  # preview never changes validated status
+    targets: {}                            # rendered collection -> source/id/field mappings
+
+  warnings_panel:
+    visible: true
+    position: header                # header | sidebar | banner

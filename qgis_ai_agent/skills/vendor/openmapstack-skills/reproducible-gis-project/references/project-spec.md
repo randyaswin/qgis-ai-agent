@@ -1,0 +1,1636 @@
+# Reproducible GIS Project Specification — `openmapstack-project/v1`
+
+The canonical, runnable unit of OpenMapStack analysis. For any **material multi-stage GIS analysis**, the delivered output is a *project artifact*, not just a map, dashboard, or narrative answer. This file defines that artifact.
+
+Read this before compiling any non-trivial OpenMapStack analysis. Ready scaffolds live in `../templates/`; a fully-worked example matching the acceptance scenario lives in `../examples/tartu-development/`.
+
+**Core principle:** reasoning may be exploratory; the delivered analysis must be deterministic, inspectable, and reproducible.
+
+---
+
+## 1. Project layout
+
+```text
+my-analysis/
+├── project.yaml          # canonical manifest (openmapstack-project/v1)
+├── pipeline.py           # deterministic, readable execution
+├── README.md             # human audit/intro
+│
+├── data/
+│   ├── source/           # immutable downloads/copies of external sources
+│   ├── overrides/        # manual corrections, additions, scenario geometry
+│   └── derived/          # pipeline outputs (GeoParquet, COG, GeoPackage…)
+│
+├── validation/
+│   └── latest-report.json          # machine-readable result of the last run
+│
+├── runs/
+│   └── run-20260825-081503.json    # per-run metadata + hashes
+│
+├── dashboard.html        # generated web view over the project
+└── project.qgz           # optional selected QGIS view — see sections 2.0 and 5
+```
+
+`validation.required` / `domain_checks` and the `presentation` block live **inside `project.yaml`** by default, so one file stays the canonical manifest. Split them out only when they grow unwieldy, as `validation/validation.yaml` and `styles/presentation.yaml`; a `styles/` directory is also the right home for `maplibre-style.json` and `.qml` snippets when styling is reused across projects.
+
+Run records are named `run-<YYYYMMDD>-<HHMMSS>.json` (UTC) so the run id in `project.yaml`, the validation report, and the file name are the same string.
+
+Not every simple task needs every file, but `project.yaml` is the canonical manifest and should always exist for material work. The **chat transcript is not part of the analytical dependency graph.**
+
+---
+
+## 2. `project.yaml` schema (`openmapstack-project/v1`)
+
+The manifest describes *what* the analysis is and *why*, the pipeline describes *how* to run it. Keep this file documented and human-reviewable.
+
+**Normative sources.** Structure — required keys, types, and top-level enums — is
+machine-checked by [`schemas/project-v1.schema.json`](../schemas/project-v1.schema.json),
+reported as the `manifest.json_schema` check. That file is normative where it and
+this document disagree on *shape*. This document is normative for *semantics*: what
+each field means, the rules that have no structural form (source pinning, override
+provenance, label honesty, hash construction), and the cross-file invariants
+`openmapstack validate` enforces beyond the schema. The YAML below is illustrative — a
+worked example of the shape, not a second field registry to keep in sync by hand.
+
+**Project-specific extensions.** v1 allows additive metadata wherever the schema
+permits additional properties; objects marked `additionalProperties: false` are
+closed and cannot be extended. Extra keys do not become OpenMapStack features:
+the built-in tools do not execute them or validate their project-specific meaning.
+They must not replace required fields or change the meaning of standard fields.
+Prefer namespaced keys for custom metadata to avoid collisions with future fields;
+document their meaning and any consumer in the project README. If custom metadata
+affects analytical results, implement its behavior in the declared pipeline and
+provide appropriate validation evidence.
+
+### 2.0 Selectable delivery — `openmapstack-delivery/v1`
+
+New projects record delivery explicitly. The built-in dashboard is the default;
+a user's explicit selection replaces that default. QGIS-only, Observable-only,
+and combinations are supported. The analytical project remains mandatory for
+material analysis, with the same source pins, provenance, assumptions, CRS,
+overrides, validation/run records and clean reruns for every selection.
+
+```yaml
+delivery:
+  schema: openmapstack-delivery/v1
+  targets:
+    - id: dashboard
+      kind: dashboard
+      mode: local
+      output: dashboard
+      inputs: [candidate_parcels, scenario_summary]
+      evidence: dashboard_evidence
+# Both bindings above must name outputs with kind: document. The pipeline
+# generates dashboard.html plus delivery/dashboard-evidence.json.
+```
+
+`targets` is a nonempty list. IDs are unique ASCII identifiers beginning with a
+letter. Supported `kind` values are `dashboard`, `qgis`, `observable`; unknown
+kinds/schema versions are rejected. A target's `output` and `evidence` bind
+existing, distinct document outputs with distinct paths. Evidence is JSON; web
+outputs are HTML; QGIS outputs are QGZ archives. `inputs` is a nonempty, unique
+list of analytical output keys (`geodata` or `table`), including the datasets its
+shared map/table presentation uses. Format-variant layer keys and explicit
+immutable override geometry are resolved statically. Persistent map-layer
+sources must name an output/format variant or override geometry, never an
+unexported source-table name. This rule is checked without PyQGIS or a browser.
+
+Selection is separate from the compute engine, scheduler, and
+`presentation.map.engine_preference`. Unselected integrations require no
+artifacts or runtime. Selecting QGIS retains desktop static/load/render
+obligations. A selected missing artifact fails; an unavailable runtime is
+`not_testable`, never a pass. All declared analytical outputs are still checked,
+even if no selected view uses them. Incidental files do not select targets.
+
+Shared `presentation` declares analytical meaning (layers, scenarios, metrics,
+canonical values, warnings). `layout`, `provenance_ui` and browser editing are
+view implementation choices. The built-in dashboard requires its layout and
+provenance UI; external-only views do not require dashboard tabs, sliders or
+reset controls. Shared controls, when declared, still must agree with the
+pipeline. Every view exposes the source provenance and limitations appropriate
+to its surface. A report may carry map-layer metadata without a basemap;
+map-primary views retain the basemap requirement. Legacy manifests retain the
+old requirement for every declared map block.
+
+#### Evidence and target mappings
+
+The pipeline embeds one `openmapstack-view/v1` JSON record in every view:
+
+- HTML: `<script id="openmapstack-view" type="application/json">…</script>`.
+  Escape `<` in the JSON as `\u003c` to prevent script termination. Web views also
+  expose one visible `data-openmapstack-provenance` element with source providers
+  and display all declared warning statements, independently of their layout.
+- QGIS: native project variable `openmapstack_delivery`, set with
+  `QgsExpressionContextUtils.setProjectVariable`, or a serialized custom property
+  `openmapstack.delivery` retained by the integration. Use PyQGIS to save the
+  project, preserving its other properties. Native `projectMetadata` exposes
+  source providers, assumption statements and rationales, and declared warning
+  statements in the desktop interface (for example, in its abstract).
+  `delivery.evidence_matches` checks these fields without PyQGIS; hidden binding
+  metadata alone cannot pass. The verifier reads serialized property/Option or project-variable
+  representations without requiring PyQGIS.
+
+Use `openmapstack.delivery.metadata_json(root, project, target)` to build this
+record. It binds target ID/kind, analytical output byte hashes, and shared
+semantics: project ID, interpretation, sources, overrides, processing,
+presentation meaning, analytical output definitions (including table units),
+and warnings. Layout/web-engine details and transient run
+pointers are excluded. Different targets bind the same shared semantics.
+This is machine-readable evidence, not a substitute for visible provenance.
+
+After creating the views, call `openmapstack.delivery.write_evidence(root,
+project)` before computing the run's output inventory/hash. Each target's
+`evidence` output contains `openmapstack-delivery-evidence/v1`, the embedded
+metadata and the view's SHA-256. Verification reads back actual artifacts,
+compares metadata to canonical semantics and input hashes, and checks the
+receipt's view hash. Rewriting a receipt cannot certify stale embedded metadata.
+QGIS static/native checks and web smoke checks remain independent. These bindings
+prove declared identity/consistency, not arbitrary analytical truth or every
+rendered pixel. Existing dashboard visual checks also apply to a selected
+map-primary built-in dashboard; generic external web checks impose no dashboard
+DOM/tab structure.
+
+`mode` defaults to `local`. `hosted` is supported for Observable exports and
+additionally requires `url` (HTTPS), `retrieved_at` (timestamp with UTC offset),
+and `build` (a distinct document output containing inspectable build/export
+configuration). The pipeline retains an HTML export/snapshot and the receipt
+binds its bytes, configuration hash, URL and retrieval timestamp. A URL alone is
+insufficient. Checks inspect retained local evidence and do not query or certify
+current remote state. Publication and authenticated service operation are
+separate, explicitly requested actions. Tool-specific adapters/examples belong
+to integration work; a supported export contract does not imply a hosted adapter.
+
+#### Compatibility and explicit migration
+
+This is a versioned extension within `openmapstack-project/v1`. A manifest
+**without `delivery` retains legacy v1 behavior**, including its QGIS companion
+obligations. Do not treat omission as a new-project dashboard-only default.
+New templates record the default; unsupported explicit declarations fail rather
+than reverting to legacy. Inspect reports `delivery.mode` as `explicit` or
+`legacy` and lists declared targets.
+
+To migrate, choose targets, add the declaration, bind their document/evidence
+outputs and analytical inputs, then update the canonical pipeline to rebuild only
+the selected deliverables and embed/write their evidence. Keep still-required
+analytical outputs, remove obsolete target-specific generation/dependencies/check
+IDs deliberately, and regenerate validation/run inventories. Preserve old
+artifacts/evidence in an archive if needed; the CLI never deletes them or changes
+the selection implicitly. Run validate, canonical execution and verify --rerun.
+A rerun that changes delivery selection fails. Use a CLI whose check catalog
+includes `delivery.declaration_valid` and `delivery.evidence_matches`; older
+versions that ignore the extension cannot certify a migrated project.
+
+The offline [delivery profile example](../examples/delivery-profiles/README.md)
+demonstrates default, external-only, combined and hosted-export contract paths.
+The Tartu example retains its legacy combined delivery until explicitly migrated.
+
+### 2.1 Head and interpretation
+
+```yaml
+schema: openmapstack-project/v1
+
+project:
+  id: tartu-development-access
+  title: Potential development areas near main roads
+  question: >               # the original / ethical restated user question
+    Identify potentially developable parcels meeting the specified
+    accessibility and land-use criteria.
+  created_at: 2026-08-25T08:15:03+03:00
+  updated_at: 2026-08-25T08:42:11+03:00
+  status: validated        # draft | in_progress | validated | warning | failed
+  aoi:                     # optional area of interest; local outputs must lie near it
+    bbox: [640000, 6455000, 685000, 6500000]   # minx, miny, maxx, maxy in crs x/y order
+    crs: EPSG:3301
+  author:                  # who the analysis is made for and by; shown in the credits header
+    name: Mari Maasikas
+    email: mari.maasikas@example.org
+    url: https://example.org/mari     # optional author link
+  generated_with:          # constant for this toolkit; shown in the credits header
+    tool: OpenMapStack
+    url: https://jaakla.github.io/openmapstack-skills/
+
+interpretation:
+  objective: >             # analyst interpretation of the objective
+  assumptions:
+    - id: A1
+      statement: >-
+        "Near a main road" means <= 2000 m planar distance.
+      rationale: >-
+        User did not specify travel time or road-network accessibility.
+    - id: A2
+      statement: >-
+        Parcel area measured in EPSG:3301.
+      rationale: Metric area calculation is required.
+```
+
+`interpretation` is where "what the user actually wanted" is pinned, including any
+rephrasing you did. Each assumption must be an object with `id`, `statement`, and
+`rationale`, all nonblank strings. The schema enforces this shape; `openmapstack
+validate` and `project.assumptions_have_rationale` also reject duplicate assumption
+IDs. An empty assumptions array is schema-valid but produces a warning. The audit
+additionally rejects unresolved placeholder text.
+
+Additional assumption fields are allowed as project-specific metadata. For example,
+`scope: accessibility` and a project-specific scope glossary can describe where an
+assumption applies, but OpenMapStack does not resolve scope references, check that
+glossary, or restrict an assumption's effect based on `scope`. Put applicability
+needed to understand the analysis in `statement` or `rationale`, so consumers of
+the standard contract can still interpret it correctly.
+
+The schema requires `project.id`, `title`, `question`, `created_at`, `updated_at`,
+and `status`, plus `interpretation.objective` and `assumptions`, and closes
+`project.status` to the five listed values. `author` and `generated_with` are delivery requirements: the
+credits header (section 3) renders them. Fill `author` from the requesting user or
+their version-control identity (`git config user.name` / `user.email`) and ask when
+neither is known; never invent an author or leave a placeholder in a delivered view.
+A manifest can be schema-valid and still fail the semantic audit.
+
+Declare `project.aoi` whenever the question has a bounded place: a city, county,
+country or study area. `bbox` is `[minx, miny, maxx, maxy]` in the x/y order of
+`crs` (longitude/latitude or easting/northing), whatever a service's own bbox
+order is. Both `openmapstack validate` and `verify` reject non-finite, inverted,
+or zero-width/height bounds independently of the outputs. `openmapstack verify`
+then runs `geodata.layer_extent_within_aoi` on every local geodata output: the AOI is grown by half its width and height on each side,
+transformed into the layer's own CRS, and compared with every feature. A layer
+entirely outside fails (`axis_swap_suspected` when flipping x/y would put a strict
+majority of the outside features inside, otherwise `extent_outside_aoi`); some
+features outside is a warning. Invalid AOI CRS declarations or coordinates fail
+as `aoi_invalid`; unavailable transformation capabilities remain `not_testable`.
+These checks catch what CRS labels and coordinate ranges cannot: near Tartu, `(26.7, 58.4)` and
+`(58.4, 26.7)` are both legal lon/lat. A suspected swap is a diagnosis to explain,
+not permission to swap without source evidence (`formats-and-crs.md`).
+
+### 2.2 Sources
+
+Each source records how it was found, retrieved, selected, and licensed — enough to re-fetch exactly.
+
+```yaml
+sources:
+  cadastral_parcels:
+    role: authoritative_input     # authoritative_input | context | reference
+    provider: Maa- ja Ruumiamet
+    dataset: cadastral parcels
+    source_url: https://...
+    access:
+      method: WFS                # WFS | WMS | STAC | http(s) | api | s3 | local
+      retrieved_at: 2026-08-25T08:18:12+03:00
+      downloaded_at: 2026-08-25T08:18:12+03:00   # when the bytes were pulled
+      file:                      # what actually landed on disk
+        name: cadastral.gpkg     # or archive_name + extracted_file
+        table_name: "Tartu maakond"   # layer/table bound inside the file
+        format: GeoPackage (GPKG/SQLite)
+        size_bytes: 55746560
+        row_count: 79056
+        column_count: 32
+      request_spec: >-           # the exact query / bbox / params used
+    version:
+      published_at: 2026-08-24
+      identifier: "..."          # STAC item id, release tag, table/layer id
+      etag: "..."                # when the service publishes one
+    selection:
+      bbox: [25.4, 58.3, 26.9, 58.9]
+      filter: "..."
+      semantic_predicates:       # decision-critical coded fields
+        - field: ownership_code
+          domain_value: 1 = municipal
+      completeness:              # required for bounded APIs
+        matched: 1444            # service-declared total
+        returned: 1444           # rows materialized after pagination
+        page_size: 1000
+        pages: 2
+    license:
+      name: "..."
+      url: "..."
+    schema:                      # the shape you received, not the one you hoped for
+      crs: EPSG:3301 (L-EST97)
+      key: cadastral_id          # stable feature identifier
+      area_field: area_m2        # name the roles the analysis depends on
+      columns:
+        - cadastral_id
+        - area_m2
+        - geometry
+    rationale: >-
+      Selected as the authoritative cadastral geometry source instead of
+      OSM/Overture.
+```
+
+**Rules:**
+
+- **No hallucination of coordinates or mock geodata:** Fabricating coordinates or inventing synthetic baseline geometries is strictly forbidden without explicit user consent. Always fetch and process real, authoritative data from official endpoints (e.g. Maa- ja Ruumiamet S3/WFS, OSM Overpass, STAC). Record exact file names, table/layer names, and download timestamps.
+- Pin `version.identifier`/`published_at` (Overture release, STAC item ID, OSM extract date, portal download date). **Pinning to "latest" is not reproducible.**
+- Record `access.retrieved_at` and `access.downloaded_at` (when you actually pulled it). It answers "which version/date was the source?"
+- Always give a `rationale` for choosing one source over another — especially when you *rejected* an obvious candidate.
+- Preserve `license` metadata through every transformation.
+- If the question depends on a semantic predicate such as municipal ownership, public access, or active status, document the authoritative field/domain and exact selection expression. Do not turn missing or ambiguous values into the desired category.
+- For bounded APIs, record the service total (`numberMatched`, `resultCount`, or equivalent), page size, pages fetched, and final returned count under `selection.completeness`. A page filled to its limit is not proof of completeness. `openmapstack validate` also accepts `completeness` at the top level of the source for backward compatibility, but `selection.completeness` is canonical: the counts describe that selection.
+- Describe the data you received in `schema` — its CRS, the key, the field roles the analysis depends on, and the columns. Earlier drafts used a bare `expected_fields` list; `schema.columns` supersedes it.
+- `access.retrieved_at` and `access.downloaded_at` are interchangeable to the validator, which needs one of the two. Record both when they differ (a cached extract retrieved later than it was published).
+
+#### Pin classes — warehouse and mutable sources
+
+`version.identifier` pins a published release, a STAC item, or a dated
+extract. It does not pin a warehouse table: "the parcels table on
+2026-08-30" names a moving target unless something froze it. A source whose
+bytes come from a query declares **which of two pin classes** froze them:
+
+```yaml
+sources:
+  parcels:
+    access:
+      method: postgis
+      connection: {ref: "env:PARCELS_DSN"}    # a reference, never a DSN
+    warehouse:
+      backend: postgis                        # duckdb | postgis | bigquery | motherduck
+      account: geo-prod                       # host / project identity, no secrets
+      database: gis
+      schema: cadastre
+      table: parcels
+      query_sha256: "sha256:..."              # digest of the exact SELECT used
+      schema_sha256: "sha256:..."             # digest of the discovered column list
+    pin:
+      class: local_snapshot                   # (1) user-approved local copy
+      path: data/source/parcels.parquet
+      sha256: "sha256:..."                    # real content hash of that file
+      captured_at: "2026-08-30T10:00:00Z"
+    # -- or --
+    pin:
+      class: backend_snapshot                 # (2) backend time travel / snapshot id
+      identifier: "pg_export_snapshot:00000003-000001A8-1"
+      captured_at: "2026-08-30T10:00:00Z"
+      retention_until: "2026-12-31T00:00:00Z" # when the backend may drop it
+      verification: {at: "2026-08-30T10:05:00Z", status: accessible}
+```
+
+| Pin | Reproducible when | Reported as |
+|---|---|---|
+| `local_snapshot` | the file exists under `data/source/` and matches `sha256` | `pinned`; a missing or edited file is `not_reproducible` |
+| `backend_snapshot` | `identifier` names a real snapshot, `retention_until` is in the future, and the last `verification` did not find it inaccessible | `pinned`; expired or inaccessible is `not_reproducible` |
+| none | `version.identifier` / `published_at` is present and not a mutable alias (`latest`, `current`, `head`, …) | `pinned` by version identity |
+
+`provenance.every_source_pinned` and `validate`'s `source.pin` check apply
+this table. A backend snapshot id plus a timestamp is **not** a pin once the
+retention has lapsed; the honest result is `not_reproducible`, never `pinned`
+because a string is present. A mutable alias in `version.identifier` is
+unpinned whatever else is declared.
+
+**Secrets never enter `project.yaml`.** `access.connection` is a reference —
+`env:NAME`, `service:NAME` (a `pg_service.conf` entry), `keyring:NAME`, or
+`file:/absolute/path/outside/the/project` — and the manifest is scanned for
+password fragments, credentialed URLs, and well-known key shapes
+(`source.credentials`, `provenance.no_inline_credentials`). Connector
+discovery is read-only, and materialising warehouse data locally requires an
+explicit approval; see `references/user-data-sources.md`.
+
+### 2.3 Overrides — analyst knowledge as data
+
+**Everything that is not a fact of an external dataset belongs in `overrides`.** Sources are immutable:
+
+```text
+immutable source + project override layer = effective analysis input
+```
+
+```yaml
+overrides:
+  - id: OVERRIDE-001
+    action: modify_attribute          # add_feature | edit_geometry | replace_geometry
+    target:                           # | modify_attribute | hide_source_feature
+      source: pois                    #   | merge_features | split_feature
+      feature_id: "12345"             #   | add_annotation | add_aoi | add_scenario
+    change:
+      field: status
+      from: active
+      to: closed
+    rationale: "Source dataset is stale; the facility has closed."
+    evidence: [{type: url, value: "https://..."}]
+    created_at: 2026-08-25T08:26:00+03:00
+    created_by: user         # user | analyst | agent | scenario
+
+  - id: OVERRIDE-002
+    action: add_feature
+    layer: planned_roads
+    properties:
+      name: Proposed connector
+      status: planned
+    geometry_file:
+      path: data/overrides/planned-road.geojson
+    geometry_origin: user_drawn   # user_drawn | copied | scenario | photo_traced
+    rationale: "Planned road absent from machine-readable geodata but relevant."
+    evidence: [{type: planning_document, title: "...", page: 37}]
+```
+
+**Never silently mutate downloaded source data.** Overrides are first-class and carry provenance, rationale, evidence, author, and timestamp. They answer audit questions: *"Was this geometry imported or manually added?"* and *"Why was this record removed?"*
+
+Before applying an override, validate that its target exists and that any asserted `from` value matches the immutable source. Reject placeholder evidence. The run report records each override as `applied`, `rejected`, or `not_testable`. Hypothetical scenario features do not require an external factual claim, but must use `geometry_origin: scenario`, say that they are hypothetical, and remain separate from authoritative presentation layers.
+
+Every override requires a nonempty evidence list. Each entry identifies evidence
+through `value`, `source`, or `title` (in that precedence order, using the first
+nonempty field), or a plain reference string. A planning-document title and page
+are valid without a `value` field. Declaration checks reject placeholders; they
+do not establish that the cited document exists or proves the claim.
+
+### 2.4 Processing steps
+
+```yaml
+processing:
+  analysis_crs: EPSG:3301     # CRS used for metric operations
+  storage_crs: EPSG:4326      # CRS used for storage/interchange
+  steps:
+    - id: load_parcels
+      operation: read
+      source: cadastral_parcels
+      output: parcels_raw
+    - id: calculate_area
+      operation: calculate_area
+      input: parcels_raw
+      crs: EPSG:3301          # explicit CRS per metric step
+      output_field: area_m2
+    - id: select_large
+      operation: filter
+      input: calculate_area
+      expression: "area_m2 >= 20000"
+      output: large_parcels
+    - id: road_distance
+      operation: distance_filter
+      input: large_parcels
+      target: roads
+      max_distance_m: 2000
+      output: candidate_parcels
+```
+
+- Steps are **ordered and deterministic**.
+- Every step declares `operation`, explicit `input`/`output` and any `crs`, parameters, and thresholds. Think: a GIS engineer can rerun each step from the list alone.
+- Use symbolic names (`candidate_parcels`) that match `outputs.*`.
+- **The step graph must resolve.** Every `input`/`inputs`/`source` symbol is either a key in `sources` or the `output` of an earlier step, and every `outputs.*.generated_by` names a real step. Dangling symbols (a step consuming `all_roads` that nothing produces, or a consumer using a different name than the producer declared) make the manifest unrunnable while still looking complete. Validate this as `manifest_graph_resolves` — it is cheap and catches manifest/pipeline drift that no data check will.
+
+**Labels must match the operation, and the measurement basis must be stated.** A Euclidean buffer is never a "walking catchment"; call it a `2 km straight-line proxy` unless a routable network or isochrone was actually computed, and name derived columns for what they measure (`straightline_time_school_min`, not `walk_time_school_min`). Distance thresholds also need their *reference geometry* recorded as an assumption: `ST_Distance(polygon, point)` measures from the nearest parcel edge, so a 100 ha parcel qualifies when one corner is in range, while a centroid rule would reject it. State which one you used — the two produce materially different result sets on large rural parcels.
+
+### 2.5 Outputs
+
+```yaml
+outputs:
+  candidate_parcels:
+    path: data/derived/candidate-parcels.parquet
+    format: GeoParquet
+    generated_by: road_distance
+  catchment_variants:
+    path: data/derived/catchment-variants.json
+    format: GeoJSON
+    generated_by: buffer_catchments
+    role: exploratory_companion    # optional; anything that is NOT the result
+    note: >-                       # optional; say what it is and is not
+      Precomputed buffers for every radius the view offers. Never the
+      accepted result — education_catchments is.
+```
+
+Output dataset are defined as first-class, with generated-by traces back to a step.
+
+Geodata outputs are `extent: local` by default and must lie near `project.aoi`.
+Mark an intentionally wider layer, such as a world locator frame or a global
+reference grid, `extent: global` to exempt it from that check.
+
+An output that exists to feed a control rather than to answer the question must
+say so. Mark it `role: exploratory_companion` and name the accepted result in
+`note`, so no reader mistakes a what-if artifact for the finding.
+
+#### Non-spatial table outputs
+
+Many answers are tables, not geodata: a scenario comparison, a cost-benefit
+summary, a ranked list of sites. Declare them as first-class outputs with
+`kind: table`, the columns the reader depends on, and the formats people can
+download:
+
+```yaml
+outputs:
+  scenario_summary:
+    path: data/derived/scenario-summary.csv
+    format: CSV
+    kind: table                     # geodata (default) | table | document
+    generated_by: compare_scenarios
+    table:
+      key: [scenario]               # columns that identify a row
+      columns:
+        - {name: scenario, type: string, label: Scenario}
+        - {name: time_saved_h_year, type: number, unit: h/year, label: Time saved}
+        - {name: daily_crossings, type: integer, unit: trips/day}
+    downloads: [csv, xlsx]          # sibling files: scenario-summary.csv, scenario-summary.xlsx
+  dashboard:
+    path: dashboard.html
+    format: HTML
+    kind: document                  # a view, not data: no data checks apply
+    generated_by: render_dashboard
+```
+
+- **Only a declared `kind` changes how an output is checked.** An output without
+  one is geodata; an unreadable format stays visible as `not_testable`. A table
+  declared as geodata fails geometry checks, and a table left undeclared is an
+  `outputs.undeclared_derived_files` warning, so declare it.
+- **Write machine-readable values.** Plain numbers with a point decimal and no
+  thousands separators, ISO 8601 dates, one header row, UTF-8. Locale formatting
+  (`1 234,5`) and units belong in the view and in `table.columns[].unit`, never in
+  the cells. `tables.columns_declared` fails a numeric column that holds formatted text.
+- **Downloads are files the pipeline writes.** Each format in `downloads` is the
+  output path with that format's suffix, written by the canonical pipeline in the
+  same step from the same rows: CSV (RFC 4180, comma-separated, UTF-8) for tools,
+  XLSX (one sheet, typed numeric cells, header row) for spreadsheet users. They are
+  declared outputs, hashed in the run record, and `tables.downloads_consistent`
+  verifies that every format holds the same columns and values. Never generate a
+  download in the browser from data embedded in the page: what a reader downloads
+  must be what the run produced.
+- A table may be the primary output in Parquet or JSON records (an array of
+  objects) as well; `downloads` then lists the human formats beside it.
+
+### 2.6 Validation
+
+```yaml
+validation:
+  required:
+    - geometry_valid
+    - crs_known
+    - row_count_gt_zero
+    - no_duplicate_cadastral_id      # <check>_<field>, one flat identifier
+    - no_null_cadastral_id
+    - source_semantics_verified
+    - source_result_complete
+    - overrides_applied
+    - manifest_graph_resolves
+    - view_controls_match_pipeline   # section 3: the view still matches the run
+    - qgis_project_static_valid
+    - manifest_report_parity
+  domain_checks:
+    - name: parcel_area_range
+      expression: "area_m2 > 0 AND area_m2 < 100000000"
+  expectations: []                  # optional independently attested answers
+```
+
+**Check names are flat identifiers**, not mappings: write `no_duplicate_cadastral_id`, not `no_duplicate: cadastral_id`. Every name in `required` and every `domain_checks[].name` must appear verbatim as a `checks[].id` in the report, so parity is a literal string comparison with no flattening rule to implement.
+
+The `required` list gates "done". Rarely a complete list of what validation that run evaluated is captured in the run *report* (below).
+
+Every required and domain check must appear exactly once in the report. `warning` or `not_testable` checks make the overall run/project status `warning`; only an all-passed report may set `project.status: validated`. The report run ID and hashes must match a real `runs/*.json` record.
+
+Project-specific answers that generic checks cannot know belong in
+`validation.expectations[]`, not in assistant prose and not in an assertion the
+pipeline silently derives from its own output. Supported checks are
+`geodata.row_count`, `geodata.feature_present`, `geodata.feature_absent`,
+`geodata.feature_field_equals`, and `geodata.field_range`.
+
+Start with an unverified proposal:
+
+```yaml
+validation:
+  expectations:
+    - id: accepted-parcel-count
+      check: geodata.row_count
+      args: {path: data/derived/parcels.parquet, equals: 1242}
+      attestation:
+        status: unverified
+        reason: "Awaiting comparison with the cadastral register"
+```
+
+`openmapstack verify --json` reports the canonical
+`expected_expectation_sha256`. After independently checking the answer, the
+reviewer binds the exact check/arguments, current project inputs, and retained
+evidence:
+
+```yaml
+      attestation:
+        status: verified
+        verified_by: "reviewer or authority"
+        verified_against: "stable source or review-record locator"
+        verified_at: "2026-08-30T00:00:00Z"
+        evidence_path: validation/evidence/cadastral-count.json  # optional
+        evidence_sha256: "sha256:<64 hex characters>"
+        expectation_sha256: "sha256:<digest reported by verify>"
+        inputs_hash: "sha256:<current runs.latest.inputs_hash>"
+```
+
+The verifier uses a fixed check allowlist, rejects unsafe project paths and SQL
+identifiers, and does not execute unverified expected values. Editing the check
+or arguments, changing `runs.latest.inputs_hash`, or changing a retained local
+evidence file makes the attestation stale and produces a warning. Attestation
+records reviewer evidence; it is not relabelled as an independently
+reproducible oracle in reports.
+
+#### Metamorphic relations — invariants without a golden answer
+
+`validation.metamorphic[]` declares relations that must hold when an input or
+parameter is perturbed in a controlled way. They need no frozen answer, so
+they transfer to data nobody has an oracle for — and they are **conditional**:
+each relation is valid only under preconditions the declaration must state,
+and `openmapstack verify --metamorphic` reports `not_testable` with the reason
+when a precondition does not hold on the actual data rather than guessing.
+
+```yaml
+validation:
+  metamorphic:
+    - id: parcel-order
+      relation: input_permutation_invariance
+      source: {path: data/source/parcels.geojson}
+      outputs: [candidate_parcels]
+      key: cadastral_id
+      preconditions:
+        tie_break: "candidates are keyed by cadastral_id; no selection depends on input order"
+    - id: parcel-duplicates
+      relation: duplicate_resistance
+      source: {path: data/source/parcels.geojson}
+      outputs: [candidate_parcels]
+      key: cadastral_id
+      preconditions: {dedup_key: cadastral_id, measure: set}
+    - id: road-distance-monotonic
+      relation: positive_buffer_monotonicity
+      parameter: road_distance_m        # declared under runtime.implementation.parameters
+      variant: {multiply: 3}
+      outputs: [candidate_parcels]
+      key: cadastral_id
+      preconditions: {predicate: within_distance, expected: superset}
+      limits: {timeout_s: 600, max_source_bytes: 67108864}
+```
+
+| Relation | Transformation | Expected | Valid only when |
+|---|---|---|---|
+| `input_permutation_invariance` | source features shuffled (deterministic `seed`) | outputs semantically equal | a deterministic `tie_break` rule is declared and `key` is unique in the output |
+| `duplicate_resistance` | every source feature appended once more | outputs equal | the analysis deduplicates on `dedup_key` (unique in the source) and the output is a keyed *set*; counts and sums are rejected |
+| `positive_buffer_monotonicity` | a declared numeric parameter increased (`multiply` > 1 or `add` > 0) | every baseline key survives (`superset`) | the parameter drives an inclusion `predicate` (`within_distance`, `intersects_buffer`, `within_buffer`) |
+
+Each relation reruns the canonical entrypoint in an isolated copy prepared like
+a clean rerun, perturbs only that copy, compares against the produced outputs,
+and deletes the copy. The project's own `data/source/` and `data/overrides/`
+are hashed before and after; a variant that mutates them fails. Unknown
+relation names, `source` paths outside the immutable trees, non-growing
+variants, and `duplicate_resistance` declared for a count or sum are
+declaration failures, not skipped checks.
+
+**Counterexamples — do not enable a relation mechanically:**
+
+- a nearest-neighbour join with ties has no order invariance until the tie
+  rule is fixed in the pipeline; declare `tie_break` only once it is;
+- a facility *count* per parcel is not duplicate-resistant — duplicating a
+  facility legitimately changes the count; only a keyed set of facilities is;
+- an *exclusion* buffer (parcels farther than N m) is monotonic the other way;
+  `positive_buffer_monotonicity` only establishes `superset` for inclusion
+  predicates and refuses any other `predicate`;
+- a threshold that also changes a classification (`tier1` below 1 km, `tier2`
+  below 2 km) keeps the key set but changes attributes; the relation only
+  compares keys, so declare it knowing that.
+
+### 2.7 Presentation semantics
+
+The full example below illustrates a built-in map dashboard. Its layout, tabs,
+browser editing and web-engine choices apply only to that selected surface.
+External views map the shared analytical meaning onto their own interfaces;
+see section 2.0.
+
+```yaml
+presentation:
+  intent: analytical_workspace
+  primary_view: map
+  layout:
+    type: map_with_sidebar            # map | map_with_sidebar | full_map | report
+    sidebar:
+      position: left
+      width: medium
+      organization: tabs              # tabs | stacked
+      section_state: collapsible      # collapsible | static
+      tabs:
+        - id: analysis
+          title: Analysis
+          sections: [summary, metrics, criteria, assumptions, warnings]
+        - id: map
+          title: Map
+          sections: [scenario_controls, filters, layer_controls, basemap]
+        - id: edit
+          title: Edit
+          sections: [selected_feature, draw_geometry, draft_overrides, export_bundle]
+        - id: provenance
+          title: Provenance
+          sections: [credits, provenance, overrides, validation, outputs, run_record]
+  tables:                             # non-spatial outputs shown as scrollable tables
+    - output: scenario_summary        # a kind: table output
+      title: Scenario comparison
+      downloads: [csv, xlsx]          # subset of the output's declared downloads
+      default_sort: time_saved_h_year
+  controls:                           # what the reader may reconfigure, and from where
+    reconfigurable: true
+    canonical_reset: true
+    off_canonical_labelling: required
+    filters:
+      - id: min_area
+        label: Minimum parcel area
+        type: range                   # range | choice | multi_select | toggle
+        field: area_m2
+        unit: m2
+        canonical: 20000              # the accepted value the pipeline ran
+        step: 5000
+      - id: education_threshold
+        type: choice
+        fields: [dist_school_m, dist_kg_m]
+        canonical: 2000
+        options: [1000, 1500, 2000, 2500, 3000]
+        redraws: education_catchment_variants_geojson
+    scenarios:
+      - id: scenario_outage
+        override: OVERRIDE-001        # the override this switch turns on and off
+        canonical: true
+        baseline_fields: [dist_school_baseline_m, dist_kg_baseline_m]
+  map:
+    engine_preference: maplibre       # maplibre | deck | kepler
+    interaction:
+      feature_select: true
+      hover_tooltip: true
+      zoom_to_selection: true
+    basemap:
+      # Required whenever a map is presented. Analysis geometry floating on
+      # blank canvas is unreadable: the reader cannot tell which town, which
+      # side of the river, or whether the CRS is displaced. Declaring the
+      # basemap here is what makes "there is a background map" checkable
+      # against the built product rather than a matter of trust.
+      # Copy the configured fallback from templates/presentation.yaml and
+      # verify its endpoints live; these placeholders describe the fields.
+      id: goplex-protomaps
+      kind: vector-style             # raster-xyz | raster-wms | vector-style
+      url: "<verified light MapLibre style URL>"
+      dark_url: "<verified matching dark MapLibre style URL>"
+      tilejson: "<verified TileJSON snapshot URL>"
+      attribution: "© OpenStreetMap contributors, Protomaps tiles by goplex.ee"
+      default_visible: true
+      note: "Reference/background map; not an analysis input."
+    layer_groups:
+      - id: analysis
+        title: Analysis
+        default_open: true
+      - id: user_overrides
+        title: Manual additions and corrections
+        default_open: true
+    layers:
+      # semantic_role is the closed vocabulary in section 3. One entry per
+      # rendered dataset; the group must be a declared layer_groups id.
+      # ORDER IS BOTTOM-TO-TOP: the first entry is painted first, later
+      # entries paint over it, and the basemap sits beneath all of them.
+      # See section 5.3 for what this means in a QGIS layer tree, which
+      # stacks the opposite way.
+      - source: candidate_parcels
+        group: analysis
+        semantic_role: primary_result
+        geometry: polygon           # point | line | polygon | raster
+        style:
+          visual_priority: primary
+          opacity: 0.65
+      # A layer holding browser-local draft state declares `persistence`
+      # matching editing.draft_persistence. It is in the manifest so the
+      # legend is complete, not as a claim about a delivered dataset: no file
+      # backs it and no QGIS project can carry it, so the checks that hold the
+      # product to the manifest (qgis.layers_match_manifest,
+      # qgis.every_declared_layer_renders) skip it instead of failing it.
+      - source: draft_overrides
+        group: user_overrides
+        semantic_role: user_override
+        geometry: mixed
+        persistence: local_storage
+  legend:
+    visible: true
+    mode: semantic
+  provenance_ui:
+    feature_source_on_click: true
+    show_source_timestamp: true
+    show_override_badge: true
+    show_assumptions: true
+    credits:                          # first block of the provenance tab
+      generated_with: true            # project.generated_with, linked
+      analysis_timestamp: runs.latest.completed_at
+      author: true                    # project.author name, mailto: email, optional url
+  editing:
+    allow_draw_geometry: true
+    allow_attribute_override: true
+    allow_hide_source_feature: true
+    allow_add_annotation: true
+    draft_persistence: local_storage
+    export_format: openmapstack-override-bundle/v1
+    canonical_application: pipeline_required
+    targets:
+      candidate_parcels:                  # rendered collection key
+        label: Cadastral parcel
+        source: cadastral_parcels         # immutable project source
+        id_field: cadastral_id            # stable id in the rendered collection
+        label_field: address
+        fields:
+          - view_field: land_use          # rendered/output alias
+            source_field: siht1           # asserted source field in the override
+            label: Land use
+            type: choice                  # text | number | boolean | choice
+            options: [ARIMAA, MAATULUNDUSMAA, TOOTMISMAA]
+```
+
+**`presentation.map.basemap` is required for map-primary views, and for every legacy v1 map block**, and its `tiles`/`url` and `attribution` are load-bearing rather than decorative. The dashboard must really request tiles from the declared endpoint and really display the declared attribution. Every party it credits must be visible; wording and order are free, so the map engine's own attribution control is enough and needs no second copy; `visual.dashboard_loads_in_browser` fails with `basemap_absent` when the manifest omits the basemap, when no tile request to the declared URL is ever issued, or when the attribution is not visible in the rendered product. Honor an explicit user choice, then prefer an appropriate local or official regional basemap (Estonia: Maa- ja Ruumiamet WMS). Otherwise use the preconfigured goplex.ee Protomaps vector fallback described in `web-delivery.md`. For `kind: vector-style`, `url` names the light MapLibre style; optional `dark_url` preserves automatic/manual theme switching, and optional `tilejson` pins its vector source. A style/TileJSON fetch alone is not tile evidence: the browser check resolves the observed metadata to actual tile templates. The dashboard may supply the manifest attribution itself.
+
+Every basemap must declare `kind`: `raster-xyz`, `raster-wms`, or `vector-style`. A vector style requires `url`; `tiles` or `tilejson` alone cannot replace a style document. Raster kinds require `tiles` or `url`. **Migration:** older v1 manifests that omitted `kind` must add the actual kind before validation or regeneration. Read the provider metadata to identify it; do not infer it from a URL suffix or default an unknown kind to raster. Templates and worked examples already declare it explicitly.
+
+`presentation.map.engine_preference` is a closed enum:
+
+| Value | Meaning |
+|---|---|
+| `maplibre` | Default. Generate the reproducible delivered web map with MapLibre, normally reading PMTiles. |
+| `deck` | Generate a MapLibre basemap plus a deterministic deck.gl overlay for density, flows, 3D magnitude, or very large rendered feature sets. |
+| `kepler` | Generate an exploration-first kepler.gl view when UI-driven filtering, time playback, rapid aggregation, or interactive 3D is the primary need. |
+
+Use the literal values above: `deck`, not `deck.gl`; `kepler`, not `kepler.gl`. QGIS is an optional selected companion for explicit delivery projects (required under legacy v1 material-analysis guidance) and is not a value in this web-renderer enum.
+
+This enum is an authoring rule with no automated gate today: the JSON schema accepts
+`presentation` as any object, and `openmapstack validate` does not check the value. The
+contract is this section, not what the tooling happens to let through.
+
+The preference selects an implementation; it does not move canonical state out of the manifest. `presentation` remains the reviewable source of layer, interaction, filter, view, and provenance semantics. Renderer-specific styles or configs are generated artifacts. For `deck`, pin every overlay parameter and validate that each declared layer renders. For `kepler`, pin the package/config version and assert after load that every expected dataset and layer ID is present; a schema mismatch that silently drops a layer fails validation. See `web-delivery.md` for the three renderer lanes and examples.
+
+**Separate analysis semantics from rendering implementation.** The project declares *what* to show and its hierarchy (map/summary/metric/filter/legend/layer control/feature details/table/chart/timeline/provenance/warning). A renderer decides spacing, fonts, colors, controls. Prefer **stable semantic roles** (`primary result`, `source/context`, `constraint`, `excluded`, `warning`, `user_override`, `planned`) over arbitrary agent-chosen hex colors.
+
+#### Dashboard edit mode and draft override bundles
+
+When `presentation.editing` enables an operation, the dashboard may record it as
+a browser-local draft. Edit mode never rewrites embedded source data and never
+changes `project.status`, the validation report, or a run record. The dashboard
+renders the effective preview as immutable base data plus active draft operations.
+
+Drafts are scoped to the project id and base run id. A source refresh therefore
+opens a different draft rather than silently applying edits to a new snapshot.
+Undo/redo is represented by an event history; the exported bundle contains the
+currently active operations and may also retain that history for audit.
+
+`openmapstack-override-bundle/v1` is JSON with this minimum contract:
+
+```json
+{
+  "schema": "openmapstack-override-bundle/v1",
+  "status": "draft_unvalidated",
+  "project": {
+    "id": "tartu-development-access",
+    "base_run_id": "run-20260825-145400",
+    "inputs_hash": "sha256:..."
+  },
+  "exported_at": "2026-08-25T15:30:00Z",
+  "operations": []
+}
+```
+
+Each operation uses the override fields from section 2.3 and additionally records
+the base run, target source version/hash, asserted prior value where applicable,
+and `status: draft_unvalidated`. User-drawn coordinates are permitted because
+they are explicit user geometry; mark them `geometry_origin: user_drawn` and keep
+scenario/annotation/AOI semantics distinct.
+
+The UI must distinguish preview capability:
+
+- `analysis_rules_reapplied`: existing browser rules were re-applied to values the
+  canonical pipeline already measured (for example hiding a candidate or changing
+  an exported land-use value).
+- `map_only`: the map changed, but downstream spatial measurements were not
+  recomputed (for example moving a facility or drawing a new road in a phase-1
+  editor).
+
+An exported bundle becomes canonical only after a trusted pipeline importer
+checks the project/run identity, verifies every source precondition, writes or
+references real override geodata, reruns affected processing steps, reports every
+override `applied`, `rejected`, or `not_testable`, and emits a new run record.
+
+#### Pages and the design language
+
+A project whose result needs more than one page — a citywide screening app and a
+report on one district, say — lists them in a top-level `views:` block. Without it
+the project has one page, its dashboard.
+
+```yaml
+views:
+  - id: screening
+    output: screening_view        # a declared output whose path is an HTML page
+    archetype: workspace          # from the declared design language
+    scope: citywide               # what this page's numbers describe
+    entry: true                   # exactly one page opens first
+  - id: detail
+    output: dashboard
+    archetype: report
+    scope: north_west
+    presentation:                 # overrides top-level presentation keys for this page
+      controls:
+        variants:
+          - id: scenario
+            options: [T, M, TM]
+            canonical: T
+            effect: published     # every option is a result the run published
+```
+
+`presentation.design_language` names the version of the design language the pages
+follow (`openmapstack-views/0.1`; see `design-language.md`). Declaring it opts the
+pages into that version's checks: every declared control is found and operated
+through the version's state protocol, on whichever tab it sits. A project that does
+not declare it keeps the checks that predate the language.
+
+Every control in `filters`, `scenarios` and `variants` has an `effect`. The default,
+`exploratory`, means that leaving the canonical position must show the exploratory
+label and offer a reset. `published` is for a control that only switches between
+results the run itself published, such as the scenarios a report compares side by
+side; it needs no exploratory label. A sensitivity variant, a re-applied rule or a
+reader's filter is never `published`.
+
+### 2.8 Runtime, runs, warnings
+
+```yaml
+runtime:
+  implementation:
+    preferred_engine: duckdb-spatial
+    pipeline: pipeline.py
+    dependencies:                  # project-local files needed in a clean run
+      - requirements.lock
+      - config/analysis.toml
+    parameters:                    # optional; how a variant run turns one knob
+      - id: road_distance_m
+        type: number               # integer | number | string
+        canonical: 2000
+        binding: {argument: "--road-distance-m"}   # or {environment: OMS_ROAD_DISTANCE_M}
+        step: road_distance        # optional pair: the step that consumes it
+        field: max_distance_m      # ... whose value must equal `canonical`
+      - id: sample_area            # optional; the knob a sampled run turns
+        type: string
+        canonical: ""              # a canonical run samples nothing
+        role: sample_area          # sample_area | sample_rows | sample_fraction
+        sample: "26.68,58.35,26.76,58.39"   # what bare `--sample` binds
+        binding: {argument: "--sample-area"}
+  environment:
+    python: "3.13"
+    duckdb: "1.5.3"
+    gdal: "3.9.x"
+    proj: "9.4.x"
+
+runs:
+  latest:                       # the CANONICAL run; never a sampled one
+    id: run-20260825-081503
+    started_at: "..."
+    completed_at: "..."
+    status: passed              # passed | warning | failed
+    inputs_hash: "sha256:..."   # hash of sources+overrides+pipeline
+    outputs_hash: "sha256:..."
+    record:                     # optional; the run record is also resolved
+      path: runs/run-20260825-081503.json   # by convention from the run id
+    validation_report:
+      path: validation/latest-report.json
+
+warnings:                        # known, unresolved data-quality limits
+  - id: DATA-001
+    severity: medium
+    layer: pois
+    issue: completeness_unknown
+    statement: >-
+      This dataset may omit recently opened or closed locations.
+    mitigation: >-
+      Verify material POIs against authoritative local sources before
+      consequential decisions.
+```
+
+`runtime.implementation.parameters` is the versioned parameter-addressing
+contract (`openmapstack-parameters/v1`). The canonical run passes nothing and
+must produce the accepted result; a binding exists so a metamorphic relation or
+a benchmark can run *the same pipeline with one knob turned* without editing
+it. When `step`/`field` are given, `openmapstack verify` fails
+`project.parameters_match_steps` if the step's declared value drifts from
+`canonical` — the same honesty rule as `presentation.controls`.
+
+#### Sampled runs
+
+A wide-area, high-resolution analysis can run for hours before a late step
+fails. A **sampled run** executes the same pipeline over a deliberately smaller
+slice so that failure arrives in minutes. A parameter opts into this by
+declaring a `role`, which is how `openmapstack run --sample`,
+`--sample-area`, `--sample-rows`, and `--sample-fraction` address it. (Note
+that `--dry-run` is a different thing entirely: it prints the command and
+executes nothing.)
+
+Sampling rules on top of the parameter contract above:
+
+- at most one parameter may claim each role;
+- `canonical` must be the role's *no sampling* value (`""` for a string, `0`
+  for a number) — a canonical run passes nothing, so it must process the
+  full inputs;
+- `sample` is optional, must differ from `canonical`, and is what bare
+  `--sample` binds; without it the role needs an explicit value on the
+  command line;
+- an explicit flag value equal to `canonical` is refused rather than run:
+  `--sample-rows 0` samples nothing, so accepting it would label a full run
+  `sampled`;
+- a sampling parameter must **not** pair `step`/`field`: it selects *input*,
+  not a processing threshold, so there is no step value to agree with.
+
+**A sampled run proves the pipeline executes. It never establishes the
+result.** Clipping to a test AOI breaks every neighbourhood operation at the
+cut; row sampling destroys the spatial coherence a join depends on;
+downsampling a raster changes areas and slopes non-linearly. Sampled counts and
+aggregates are therefore not answers and must not be surfaced as such or bound
+into `validation.expectations`.
+
+That is enforced structurally rather than by convention. A sampled run
+legitimately produces a different `inputs_hash` — clipped inputs are different
+bytes — so it cannot share the canonical hash chain. On top of that:
+
+- its `runs/<id>.json` record MUST declare `mode: sampled` (a record with no
+  `mode` is canonical) and a `sample` object carrying `requested` and
+  **`realized`**, plus an optional `scale_factor` in `(0, 1]`. Recording only
+  what was requested is a failure: `TABLESAMPLE` and its equivalents
+  approximate, so the realized rows, AOI, or resolution are the measurement;
+- a canonical record MUST NOT carry a `sample` object;
+- `runs.latest` MUST NOT reference a sampled record. It is what `verify`, the
+  clean-rerun protocol, and every expectation attestation bind to, so a sampled
+  record reaching it would launder a smoke test into a result.
+
+`openmapstack validate` reports this as `runs.sample_isolation`; the same
+invariant is exposed to external harnesses as the
+`validation.sample_run_not_promoted` check.
+
+`openmapstack run --sample*` additionally re-inspects the tree afterwards and
+fails the command if the pipeline promoted its own sampled run by any route:
+
+- moving `runs.latest.id` to the sampled record;
+- rewriting or deleting the record `runs.latest` already resolves to. The id
+  never changes in this case, so comparing ids alone would report success while
+  the run of record has quietly become sampled evidence;
+- writing no run record marked `mode: sampled` at all. A pipeline that ignored
+  the sampling arguments leaves nothing recording that this run sampled, or
+  what it realized, and an unmarked run reads as a canonical one.
+
+It also reports any declared output the sampled run overwrote **or removed** —
+those files no longer hash to what the canonical run recorded, so the project
+is correctly no longer `validated` until it is re-run in full. Under `--strict`
+that report is a failure.
+
+**Warnings** give the explicit confidence/incompleteness handling. The rendered UX surfaces them (don't imply autoconfirmed geodata is current/complete). **Runs** capture what changed between executions and let a new engineer `rerun` tomorrow.
+
+The corresponding `runs/<id>.json` record MUST contain `inputs` and `outputs`
+file inventories. Each entry has a project-relative `path` and a SHA-256 of
+the real file. Inputs MUST include every file under `data/source/` and
+`data/overrides/`, the canonical pipeline or project-local command files, and
+every declared runtime dependency. Outputs MUST include every declared
+`outputs.*.path`; presentation artifacts may also participate.
+
+The canonical pipeline writes the run record and updates `runs.latest` and
+`project.status` in `project.yaml` itself, as `templates/pipeline.py` does.
+Never patch them by hand: a clean rerun writes a new timestamped record, so a
+hand-edited pointer names a record that does not exist.
+
+`inputs_hash` and `outputs_hash` are canonical file-set hashes, not hashes of
+manifest prose. Sort the unique inventory paths lexicographically. For each
+path, feed SHA-256 an unsigned eight-byte big-endian length of its UTF-8 path,
+then the UTF-8 path, then the complete file bytes. The same aggregate MUST be
+recorded in the manifest, validation report, and run record. Validators MUST
+recompute per-file and aggregate hashes and reject matching-but-invented,
+missing, stale, duplicate, or incomplete inventories.
+
+---
+
+## 3. Semantic presentation primitives
+
+The semantic roles and provenance apply to every selected surface. The dashboard
+layout, tabs, browser controls and table interactions below describe the built-in
+dashboard (and legacy web delivery); they are not requirements for external-only
+QGIS or Observable interfaces. Those interfaces expose the same analytical
+meaning and limitations through their own controls and metadata, as in section 2.0.
+
+Agents should **not** freely reinvent dashboard UX. The `presentation` block declares the semantics; a renderer implements them. Standard primitives: `map`, `summary`, `metric`, `filter`, `legend`, `layer_control`, `feature_details`, `table`, `chart`, `timeline`, `provenance_panel`, `warning_panel`, `validation_status`.
+
+**Stable semantic roles** (use these; avoid random hex) — eleven discrete
+values, not slash-joined pairs:
+`primary_result`, `secondary_result`, `source`, `context`, `constraint`, `excluded_area`, `warning`, `user_override`, `planned`, `hypothetical`, `selected_feature`.
+
+Declare one `presentation.map.layers` entry per rendered dataset and give each
+a role. Source data, derived results, human corrections and scenario geometry
+must not collapse onto a single role — that is the distinction the reader needs
+most, and the eval suite fails a view whose layers are all one role.
+
+### Standard GIS UX defaults
+
+For analytical GIS applications prefer this opinionated layout:
+
+```
+┌─────────────────────────────────────────────┐
+│ Header / project title / status             │
+├───────────────┬─────────────────────────────┤
+│               │                             │
+│ Summary       │                             │
+│ Filters       │            MAP              │
+│ Layers        │                             │
+│               │                             │
+├───────────────┴─────────────────────────────┤
+│ selection / table / details when needed     │
+└─────────────────────────────────────────────┘
+```
+
+Recommended layer hierarchy (top to bottom in table, but top = most prominent in the panel):
+```
+Results
+Constraints
+Project overrides
+Source datasets
+Reference/context
+Basemap
+```
+The user must be able to visually distinguish: external source data, derived results, human corrections, and assumption/scenario geometry.
+
+### Reconfigurable views
+
+A static screenshot answers one question; the reader almost always has the next one
+(*what if the threshold were 3 km? what does that scenario override actually cost?*).
+Offer that as controls — a sidebar organised into tabs of collapsible sections, an
+on/off control per layer group, and a live control for each parameter the analysis
+turns on. Keep the interactivity small and legible: reconfiguring the published rule,
+not a second analysis engine in the browser.
+
+Four rules keep a reconfigurable view honest:
+
+* **The canonical position is the accepted run.** Every control opens at the value
+  `project.yaml` declares, and returning to those values must reproduce the published
+  numbers exactly. Declare them in `presentation.controls` so the renderer reads the
+  analysis rather than restating it, and validate that the declaration still matches
+  the thresholds the pipeline ran — a `presentation` block that drifts from the
+  pipeline turns the whole view into a confident lie.
+* **Off-canonical states must say so.** The moment any control leaves its canonical
+  position, label the view as exploratory and offer a one-click reset. A what-if that
+  looks identical to the accepted result is worse than no control at all. The one
+  exception is a control declared `effect: published`, which only switches between
+  results the run published (s. 2.7, Pages and the design language).
+* **Re-apply rules; never re-measure geometry.** The browser may re-evaluate a
+  published rule against values the pipeline measured in the analysis CRS. It must not
+  compute distances, areas, buffers or reprojections of its own — those belong to the
+  pipeline, in a projected CRS, in the run record. If a control changes a shape on the
+  map (a different buffer radius), materialise that shape in the pipeline and switch
+  between precomputed variants.
+* **Scenarios switch between measured states.** To make an override reversible in the
+  view, export the baseline measurement beside the effective one
+  (`dist_kg_m` / `dist_kg_baseline_m`) and let the control choose. Never approximate
+  the counterfactual, and never let switching an override off imply the source data
+  changed.
+* **Variants switch between precomputed results.** A switch that only chooses which
+  measured columns to show (travel mode, analysis year, a second metric) is not an
+  override. Declare it under `presentation.controls.variants` with its `options`, the
+  `canonical` option the view opens at, and, when it addresses a table output, the
+  columns each option shows:
+
+  ```yaml
+  controls:
+    variants:
+      - id: travel_mode
+        label: Travel mode
+        options: [walk, bike]
+        canonical: walk
+        output: scenario_summary
+        fields: {walk: [walk_time_saved_h], bike: [bike_time_saved_h]}
+  ```
+
+  `presentation.controls_match_pipeline` checks that the canonical option exists and
+  that every listed column is a declared column of that output.
+
+### Findings
+
+New material projects generate `findings.md` from accepted pipeline results,
+independently of the selected delivery target. Existing projects without a
+`findings` declaration retain their previous checks. Bind it as a normal hashed
+output:
+
+```yaml
+findings:
+  schema: openmapstack-findings/v1
+  output: findings
+outputs:
+  findings:
+    path: findings.md
+    kind: document
+    format: Markdown
+    generated_by: render_findings   # a real declared processing step
+```
+
+`openmapstack.findings.write_findings(root, project, report=report, scope=scope,
+findings=items)` writes Markdown with YAML frontmatter, using the current
+execution's run ID and report before final output hashing. Each item has a unique
+`id`, a pipeline-authored `statement`, `evidence` (analytical output keys), and
+optional `limitations` (strings). Statements and numbers must come from the
+pipeline's results, not an independent calculation or an invented narrative.
+An empty result is a finding supported by the empty output, not a missing answer.
+The optional `validation_report` argument selects a different project-relative
+report path; the default is `validation/latest-report.json`.
+
+The frontmatter follows the packaged `findings-v1.schema.json`: question,
+project/run identity, scope, validation statuses, assumptions/warnings, structured
+findings, and cited output definitions (including declared column units and
+meaning) with file hashes. Each evidence entry contains its `definition` and a
+`files` inventory of project-relative `path`/`sha256` pairs. This inventory must
+cover the primary output and every declared table download, exactly once:
+
+```yaml
+evidence:
+  areas:
+    definition: {path: data/derived/areas.csv, kind: table, downloads: [csv, xlsx]}
+    files:
+      - {path: data/derived/areas.csv, sha256: 'sha256:…'}
+      - {path: data/derived/areas.xlsx, sha256: 'sha256:…'}
+```
+
+The writer expands downloads using the same paths as the run inventory and
+rejects missing or unsafe evidence files. Validation rejects changed/missing
+download files and omitted, duplicated or extra inventory paths. Markdown links
+to every inventoried file. Findings bind analytical context through a SHA-256 of the
+shared delivery semantics. The generated body links to the same evidence,
+`project.yaml` and the validation report relative to the Markdown file.
+Keep substantive method/uncertainty qualifications in the findings and supporting
+result definitions; a short dashboard is not a reason to discard them.
+
+`openmapstack validate` and `verify` check a declared artifact against the current
+run, report, analytical context, output definitions/hashes and rendered body.
+`findings.artifact_matches` exposes the same check to evals. This proves consistency
+and provenance, not the truth of a statement: domain checks or independent oracles
+must still establish analytical correctness. The run inventory includes the whole
+Markdown file. Do not hash the run record/report into the findings: that creates
+a circular dependency. Generate again on every canonical execution.
+
+Selected delivery surfaces link to the findings artifact and its underlying
+results. For QGIS delivery, expose the findings in project metadata links and
+record the project-relative location in the abstract, so a moved project folder
+retains the reference. Do not embed an absolute local path or a findings hash in
+the view metadata; the view is generated before findings and final output hashes.
+Embedded chat is optional future work, not a requirement of this format.
+
+### Tabular results
+
+A table output shown in the view is a working table, not a picture of one:
+
+* **Scrollable, with the header in view.** Put it in its own scroll container with a
+  sticky header row and a sticky first column when it is wide; the page itself must
+  not scroll sideways. Show the row count. Above roughly 50 rows add a text filter
+  and keep scrolling inside the table; do not paginate a table that fits in memory.
+* **Sortable and honest about units.** Sorting by any column header; `table.columns`
+  supplies the labels and units for the header. Numbers are right-aligned with
+  tabular figures and formatted in the reader's locale; the underlying value is
+  unchanged.
+* **Downloads next to the table.** A link per format in `downloads`, pointing at the
+  file the pipeline wrote, relative to the dashboard (`data/derived/x.csv`), and
+  shipped with it when the view is published. `presentation.table_downloads_linked`
+  checks that the delivered dashboard links every declared download.
+* **One source of truth.** The table the view renders is read from the same output the
+  downloads come from, never a separately computed copy.
+
+### Provenance UX
+
+Make provenance inspectable in the UI, not hidden in a README. Selecting a feature should be able to show:
+
+`Source`, `Dataset`, `Dataset version`, `Retrieved timestamp`, `Original feature ID`, `Transformation chain`, `Manual overrides`, `Override author`, `Override rationale`, `Evidence`, `Validation status`.
+
+At the project level offer: `Sources`, `Assumptions`, `Manual edits`, `Processing steps`, `Validation results`, `Run history`.
+
+#### Credits header
+
+The provenance tab of a dashboard, or the provenance section of a report, opens with a credits block before any other provenance content. Write it in the view's language and render all three lines:
+
+1. **Generated with:** a statement that the analysis was made with AI using the free OpenMapStack toolkit, linked to `project.generated_with.url` (https://jaakla.github.io/openmapstack-skills/).
+2. **Analysis made:** the date and time of `runs.latest.completed_at`, shown with its UTC offset. Fall back to `project.updated_at` only for a view of a project that has no canonical run yet, and label it as such.
+3. **Author:** `project.author.name`, with `project.author.email` as a `mailto:` link and `project.author.url`, when present, as a link.
+
+Labels and surrounding prose may be translated. Keep the visible timestamp in
+ISO 8601 with its offset, e.g. `2026-08-25T08:42:00+03:00`, also in a `<time
+datetime="…" data-oms-credit="analysis" data-oms-clock-source="runs.latest.completed_at">`
+element (`project.updated_at` as the source for the pre-run fallback). Preserve
+these field identifiers when translating labels. The values come from the
+manifest and run record, never from chat or a separate rendering clock.
+
+**Renderer contract.** `openmapstack.credits.credit_payload(project,
+completed_at=completed_at)` prepares the identity and time;
+`html_credits(payload)` returns a static `data-openmapstack-credits` section with
+linked `toolkit`, `author` and optional `author-url` fields identified by
+`data-oms-credit`. Put it first in provenance, including in a labeled tab that
+the reader can open. Do not put the only copy in JSON, a script, a template or
+an invisible element. A hidden `role="tabpanel"` only qualifies when it has a
+unique ID and a visible, enabled, named `role="tab"` with a unique ID, reciprocal
+`aria-controls` / `aria-labelledby` and an inactive selection state
+(`aria-selected="false"` when declared). Controls hidden
+inside their own panel, disabled/inert controls and ambiguous IDs do not establish
+access. Hidden descendants cannot supply an implicit tab label. These associations do not prove that a click handler works; browser QA
+must actually open the panel. Dynamic controls must preserve the block. For QGIS,
+`write_qgis_credits(qgz_path, payload)` adds desktop-visible author, abstract and
+metadata links while retaining findings/provenance and other archive members.
+Its abstract starts with three logical credit lines: toolkit identity
+(`OpenMapStack`), the offset-bearing ISO analysis time, and author. The time line
+includes `[clock:runs.latest.completed_at]` or `[clock:project.updated_at]` to bind
+the source without depending on a translated label. Keep that marker when
+translating; both the author metadata field and the third abstract line must
+contain the exact `name (email)` author value (the abstract may add a translated
+label followed by a colon and a final period). Link URLs remain bound to the
+manifest. Source provenance, including other timestamps, follows these lines.
+Earlier canonical helper headers without a marker remain supported; the old
+English pre-run fallback label is also accepted for compatibility.
+
+Capture one completion instant after analytical work and use it for every view,
+`runs.latest.completed_at` and the run record. Render declared view outputs before
+final output hashing. Legacy HTML snapshots that embed finalized aggregate run
+hashes are rendered afterward and remain outside their own hash set; do not add
+such a snapshot to the hash it embeds. Never embed a view's own final hash in it.
+A canonical rerun refreshes credits; QGIS archives containing that run time may
+change bytes even when their analytical layers reproduce.
+
+**Checks and legacy compatibility.** Both fields are optional in the v1 schema
+for compatibility, but their declared shapes are validated. A project with
+neither field gets warning `credits_legacy_missing`, not a new hard failure or
+an implicit pass. Declaring either opts into the complete pair: non-placeholder
+name, email and safe absolute HTTP(S) URLs. New projects and updated deliveries
+must declare both; the legacy warning is not an authoring exemption.
+`credits.declaration_valid` checks identity and an offset-bearing canonical time
+(or the explicitly labeled `project.updated_at` fallback only when no run exists).
+`credits.rendered_matches` checks every selected HTML/QGIS surface and declared
+report page, or known legacy view paths, against those values. Partial metadata, missing/hidden credits,
+stale times and mismatched links fail. Preflight checks declarations; full
+`validate` and `verify` also inspect artifacts. Geodata-only projects have no
+rendered surface to inspect. These offline checks establish field/link
+consistency, not remote URL availability or CSS/JS pixel visibility. In particular,
+**the checker does not certify the meaning of attribution prose in any language**:
+a toolkit anchor alone can pass its field/link predicate, even though omitting
+the required AI/free-toolkit statement violates the delivery requirement above.
+Renderers must emit that statement and a labeled pre-run fallback, if applicable;
+reviewers must inspect their meaning in the view's language. The shared helpers
+emit the required prose; static field checks are not a complete credits review.
+Static HTML visibility recognizes only structural hidden markers and simple inline
+lists with one declaration per property. Comments, strings, custom properties,
+functions, repeated properties and unsupported visibility values return
+`not_testable`, pointing to `visual.credits_visible_in_browser`; they never count
+as a visibility pass. Run that browser assertion through explicit visual execution
+(e.g. eval case 031 with `--mode visual`); ordinary `verify` does not schedule it
+or add a browser capability gap for it. It opens the credits panel on desktop
+and mobile and checks computed-visible block/field text against the manifest.
+Stylesheets and CSS cascade/inheritance belong to this visual check, not the
+static checker. Inspect attribution meaning in browser/native QA as well.
+
+---
+
+## 4. Pipeline generation — the boring, inspectable script
+
+For each project, generate a deterministic, readable pipeline where practical: `pipeline.py`, or equivalent `SQL`/`DuckDB SQL`/`GDAL`/`PDAL`/QGIS Processing model/`Makefile`/mixed. It should be **deliberately boring**: leading comments per step documenting source, retrieval timestamp, rationale, and CRS warnings.
+
+```python
+# STEP 1
+# Load parcels.
+#  Source: Layer3 / MaaTee WFS
+#  Retrieved: 2026-08-25T08:18:12+03:00
+#  Rationale: authoritative cadastral geometry.
+parcels = load_parcels(...)
+
+# STEP 2
+# Reproject to L-EST97 before metric calcs.
+# EPSG:4326 MUST NOT be used for area calculations.
+parcels = reproject(parcels, "EPSG:3301")
+
+# STEP 3
+# Apply project-specific overrides.
+# Corrections live in data/overrides and are logged in project.yaml.
+parcels = apply_overrides(parcels, "data/overrides/parcels.geojson")
+```
+
+Do not leave important analytical logic only in transient LLM reasoning. The pipeline is the executable record of the `processing.steps`.
+
+**One canonical implementation creates every declared output.** Convenience or end-to-end entrypoints (`run_e2e.py`, a Makefile target, a notebook) may *wrap* `pipeline.py`, but must never duplicate its processing, QGIS generation, or report writing — duplicated logic drifts, and then two commands documented as equivalent quietly produce different analyses:
+
+```python
+# run_e2e.py — thin wrapper, no logic of its own
+from pipeline import main
+
+if __name__ == "__main__":
+    main()
+```
+
+A clean-room run must show that every path in `outputs.*`, every selected QGIS datasource, and `validation/latest-report.json` were produced by that one canonical path.
+
+---
+
+## 5. QGIS project output (`project.qgz`)
+
+When QGIS is selected (or legacy v1 material-analysis obligations apply), generate a first-class QGIS project whose declared output is a **layer- and style-perfect view** of shared presentation semantics. Match the web view when it is also selected; desktop-only delivery requires no dashboard.
+
+### 5.1 Architecture & File Relationships
+A `.qgz` file is literally a zip archive containing the `project.qgs` XML document. It must **reference the exact derived datasets and override files** produced by the pipeline — never an independent or disconnected analytical state:
+
+```text
+project.yaml
+       │
+       ├── pipeline.py
+       │
+       ├── data/
+       │   ├── overrides/planned-road.geojson
+       │   └── derived/
+       │       ├── final-candidates.gpkg
+       │       ├── education_catchments.json
+       │       └── education_pois.json
+       │
+       ├── dashboard.html (MapLibre web view)
+       └── project.qgz    (QGIS desktop view)
+```
+
+### 5.2 Critical QGIS Datasource Rules (Avoiding Non-Spatial Tables)
+1. **GeoPackage vector layers:** The datasource string MUST include `layername=`:
+   ```xml
+   <datasource>./data/derived/final-candidates.gpkg|layername=final-candidates</datasource>
+   <provider encoding="UTF-8">ogr</provider>
+   ```
+   *Warning:* If you omit `|layername=...`, GDAL opens the SQLite file without binding the geometry table, causing QGIS to load it as a non-spatial attribute table.
+2. **GeoJSON vector layers:** Use relative paths:
+   ```xml
+   <datasource>./data/derived/education_catchments.json</datasource>
+   <provider encoding="UTF-8">ogr</provider>
+   ```
+   **Use formats every QGIS build reads:** GeoPackage, GeoJSON or FlatGeobuf. GDAL's Parquet and Arrow drivers are optional build components that Debian/Ubuntu QGIS packages omit, so a layer on GeoParquet opens invalid there and the map draws nothing while every static check passes. Keep GeoParquet for analysis and export a QGIS-facing copy. `openmapstack validate` warns as `qgis.datasource_formats`.
+3. **Tiled Raster Basemaps:** For map-primary delivery (and legacy projects), include an official tiled basemap matching the project region, and prefer one that answers unauthenticated requests. CARTO's raster XYZ tiles (`basemaps.cartocdn.com/rastertiles/…`) now return an *API KEY REQUIRED* watermark, so a project that ships them draws that watermark across every view. A dashboard using the global Protomaps vector fallback and its QGIS companion may legitimately carry different backgrounds; preserve the appropriate regional QGIS basemap rather than passing a MapLibre style to a raster provider. Every basemap layer must declare its own **complete** `<srs>` — see rule 4.
+   - **Maa- ja Ruumiamet Baaskaart (WMS, EPSG:3301):**
+     ```xml
+     <datasource>contextualWMSLegend=0&amp;crs=EPSG:3301&amp;dpiMode=7&amp;featureCount=10&amp;format=image/png&amp;layers=BAASKAART&amp;styles=&amp;url=https://kaart.maaamet.ee/wms/alus</datasource>
+     <provider>wms</provider>
+     ```
+   - **OpenStreetMap XYZ Tile Layer** (XYZ tiles are always Web Mercator, whatever the project CRS):
+     ```xml
+     <datasource>type=xyz&amp;url=https://tile.openstreetmap.org/{z}/{x}/{y}.png&amp;zmax=19&amp;zmin=0</datasource>
+     <provider>wms</provider>
+     ```
+4. **Every layer needs a complete `<srs>`, and the project needs `ProjectionsEnabled`.** These are two halves of one requirement: without both, QGIS cannot reproject, and a project whose layers are in more than one CRS shows only the layers that happen to match the map's CRS.
+   - **The declared CRS must also be the data's.** QGIS trusts the `<srs>` you write. GeoJSON without a `crs` member is WGS84 (EPSG:4326, RFC 7946), so a WGS84 export declared as EPSG:3301 draws a few metres from the grid's origin, far from the analysis. Declare EPSG:4326 for such files, or export them in the project CRS. `openmapstack validate` fails it as `qgis.layer_crs_data`.
+   - A `<maplayer>` with **no** `<srs>` is assumed to be in the **project** CRS and is never reprojected. Omit it on a Web Mercator basemap in an EPSG:3301 project and QGIS reads the projected metres as Web Mercator metres: an extent around Tartu (`x=660900 y=6469325`) resolves to 50.13°N 5.94°E and the background map is drawn from the Belgian Ardennes, ~1500 km away, under correctly placed analysis layers. `openmapstack validate` fails it as `qgis.layer_crs`.
+   - An **incomplete** `<srs>` is the quieter version of the same fault. `<spatialrefsys>` carrying only `<srid>`/`<authid>` reads back as an *invalid* CRS — `layer.crs().authid()` still answers `EPSG:3301`, so every static check passes, but QGIS can build no transform from it and silently paints nothing for that layer. Write the full element, with `<wkt>` (or at minimum `<proj4>`) alongside the identifiers:
+     ```xml
+     <srs>
+       <spatialrefsys nativeFormat="Wkt">
+         <wkt>PROJCRS["Estonian Coordinate System of 1997",…,ID["EPSG",3301]]</wkt>
+         <proj4>+proj=lcc +lat_0=57.5175539305556 +lon_0=24 … +units=m +no_defs</proj4>
+         <srsid>1259</srsid><srid>3301</srid><authid>EPSG:3301</authid>
+         <description>Estonian Coordinate System of 1997</description>
+         <projectionacronym>lcc</projectionacronym>
+         <ellipsoidacronym>EPSG:7019</ellipsoidacronym>
+         <geographicflag>false</geographicflag>
+       </spatialrefsys>
+     </srs>
+     ```
+   - A hand-written `.qgs` must also carry the project property that turns reprojection on. Without it the `<projectCrs>` element is discarded on read however complete it is, and the project opens in whatever CRS the reader's defaults supply:
+     ```xml
+     <properties>
+       <SpatialRefSys><ProjectionsEnabled type="int">1</ProjectionsEnabled></SpatialRefSys>
+     </properties>
+     ```
+
+   All three traps are specific to hand-written `.qgs` XML. Building through the PyQGIS API (`QgsRasterLayer("type=xyz&url=…", name, "wms")`, `QgsProject.setCrs`, `QgsProject.write`) avoids them: the providers resolve their own CRS and QGIS serialises everything it needs on save. Nothing about a project with these faults looks broken — layers are valid, datasources resolve, the render is not blank — which makes them **confidently wrong maps**, the worst failure mode in the catalogue.
+
+### 5.3 Layer Tree Groups & Semantic Styling
+The layer tree groups in `<layer-tree-group>` and map layers in `<projectlayers>` must mirror the shared presentation hierarchy (and the web view when selected):
+- **Analysis Results:** Categorized symbols (`Tier 1 Prime: #2e7d32`, `Tier 2 Good: #f57f17`, `Tier 3: #455a64`) with fill opacity and distinct border colors.
+- **Constraints / Catchments:** Semi-transparent buffer fills (alpha 25–35) with dashed outline strokes.
+- **POIs:** Circle marker symbols with distinct category fills and white borders.
+- **Transportation & Overrides:** Styled solid lines for existing infrastructure and dashed gold lines for scenario overrides (`#ffd54f`).
+- **Basemaps:** Official grey WMS basemap checked by default, alternative XYZ tiles unchecked.
+
+**The two renderers stack in opposite directions.** `presentation.map.layers` is ordered **bottom-to-top** (a web map paints later layers over earlier ones), while a QGIS layer tree paints its **first** entry on top. Writing the manifest order straight into the tree therefore inverts the visual hierarchy: it puts the analysis fill above the point layer that belongs on top of it, and an opaque fill then hides those points completely — in a project where every layer still loads valid, every datasource resolves, and the render is not blank. **Build the layer tree in reverse manifest order, with the basemap group last (bottom).** `qgis.every_declared_layer_renders` enforces the consequence rather than the form: each declared layer is removed from an otherwise identical render, and the result must differ, so a layer that paints nothing fails no matter why.
+
+**Mirroring is checkable.** Every group declared in `presentation.map.layer_groups` must appear as a `<layer-tree-group>`, named by either the group's `id` or its `title` — matched case-insensitively, with spaces, underscores and hyphens treated as equivalent. So a group declared `{id: user_overrides, title: Manual additions}` may be named `user_overrides`, `Manual additions`, or `Manual-Additions` in the tree, but not `Extras`. A manifest group with no corresponding tree group means the QGIS project shows less than the dashboard claims, and fails `qgis.groups_match_manifest`.
+
+Deliberate edits made in QGIS editable layers can be exported back into `data/overrides/` to update the pipeline inputs cleanly.
+
+---
+
+## 6. Validation is a pipeline stage
+
+Validation is executable, not prose. `openmapstack-project/v1` runs it and emits a machine-readable report such as `validation/latest-report.json`:
+
+```json
+{
+  "run_id": "run-20260825-081503",
+  "status": "passed",
+  "checks": [
+    {"id": "geometry_valid", "status": "passed", "features_checked": 12458},
+    {"id": "no_duplicate_cadastral_id", "status": "passed", "duplicates": 0},
+    {"id": "poi_completeness", "status": "warning",
+     "reason": "No authoritative completeness baseline available"},
+    {"id": "pipeline_rerun", "status": "not_testable",
+     "reason": "Sources unavailable from this environment"}
+  ]
+}
+```
+
+Agent **MUST distinguish four statuses** and never turn "not tested" into an implicit pass:
+
+| Status | Meaning |
+|---|---|
+| `passed` | Actually checked, green |
+| `failed` | Actually checked, red → blocks "validated" status |
+| `warning` | Known limit / soft miss, surfaced in UX |
+| `not_testable` | Could not run — **explicit**, not "passed by default" |
+
+Rerun contract: `openmapstack run project.yaml` executes the canonical pipeline and
+then validates the resulting artifact. A fresh environment with the documented
+sources reproduces the project even without the original LLM conversation.
+
+For an independent clean-room check, copy only the manifest, `README.md`, immutable
+source data, override data, the declared pipeline/command files, and project-relative
+`runtime.implementation.dependencies`. Do not carry derived outputs, validation
+reports, run records, caches, rendered presentation artifacts, prompts, or chat
+state into the second workspace. Execute the declared canonical entrypoint,
+rerun full artifact validation, and compare normalized semantic outputs and
+validation evidence. A missing dependency must fail explicitly; undeclared
+access back into an eval harness or conversation is not reproducibility.
+
+### 6.1 Project CLI
+
+Install the repository's Python package and use the project manifest or its
+directory as the command target:
+
+```bash
+openmapstack validate project.yaml
+openmapstack verify project.yaml
+openmapstack run project.yaml
+openmapstack inspect project.yaml
+```
+
+- `validate` performs a full artifact audit: schema and metadata, assumptions,
+  source URL/retrieval/version/selection/licensing, bounded-API completeness,
+  projected analysis CRS, processing graph, override provenance and referenced
+  geodata, declared outputs, report parity and status propagation, override
+  application results, and run-record identity/hashes. `--preflight` limits the
+  check to inputs and declarations before the first run. A missing
+  `local_snapshot` file is `not_testable` in preflight, since generated source
+  data may be absent in a clean checkout; a present file with the wrong hash
+  fails, and full validation still fails when the file is missing. `--json` emits
+  `openmapstack-validation-result/v1`; `--strict` treats warnings as a failing exit.
+- `verify` derives an applicable check plan from the manifest and inspects the
+  produced artifacts without requiring a repository-owned golden answer. It
+  reports partial execution as warning, evaluates only allowlisted and current
+  attestations, optionally performs the independent clean rerun with
+  `--rerun`, and optionally executes every declared metamorphic relation with
+  `--metamorphic`; `--json` includes applicability coverage and evidence class.
+- `run` first performs preflight validation, invokes exactly the pipeline or
+  shell-free command in `runtime.implementation`, and then performs the full
+  artifact validation. For Python pipelines, it installs the Python dependencies
+  in `runtime.environment` into a reusable `.openmapstack/venvs/` environment
+  using the CLI's Python version. Flat package versions accept exact pins,
+  `x` wildcards, and version constraints; `environment.packages` accepts a list
+  of PEP 508 requirements (including extras and markers). PyYAML is included for
+  manifest support. Setup uses `uv` when available, otherwise `venv` and `pip`;
+  failures stop execution and report JSON `phase: environment`. The `python`,
+  `gdal`, `proj`, `qgis`, `postgis`, and `postgresql` (alias `postgres`) fields
+  describe external runtimes and are not passed to a Python package installer.
+  Declare Python bindings explicitly under their distribution names (for example,
+  `packages: ["pyproj>=3.7,<4"]`). With no Python dependencies, execution uses
+  the CLI interpreter. Projects needing Conda, containers, SQL engines, another
+  Python version, or another launcher can declare `runtime.implementation.command`
+  as a string or argument list; explicit commands own their environment and bypass
+  automatic setup. Use `--dry-run` to inspect setup and execution without installing
+  anything. Exclude `.openmapstack/venvs/` from version control and run inventories.
+  Runtime advisories appear on stderr or in JSON `warnings`, including on dry runs;
+  they do not change artifact-validation status or `--strict` behavior. A Python
+  mismatch warns without blocking: a major/minor pin accepts any patch release,
+  while an exact patch pin or a version constraint is compared as declared. An
+  explicit command's Python is not inferred from the CLI interpreter. Native
+  requirements receive installation and verification guidance, with availability
+  explicitly unverified. Install GDAL and required drivers/bindings in the actual
+  pipeline runtime; a system Python binding is not automatically visible in a
+  virtualenv. Install PostGIS on the target PostgreSQL server and enable it in the
+  target database; a Python client does not provide the server extension. The
+  exact declaration `gdal: DuckDB spatial extension` requests no separate system
+  GDAL installation; the canonical pipeline must install/load `spatial` itself.
+- `inspect` is read-only. It summarizes identity, CRS, pinned sources,
+  overrides, ordered steps, outputs, latest run, and current validation issues;
+  `--json` emits `openmapstack-inspection/v1`.
+
+`validate` does not claim to recalculate project-specific domain answers; it
+verifies that every declared pipeline check occurs exactly once with an
+explicit result. `verify` independently recomputes the bounded artifact
+predicates it can address. Exact project answers run only through current,
+allowlisted attestations, and semantic fitness still requires authoritative
+domain evidence rather than a generic CLI claim.
+
+---
+
+## 7. Iteration into the manifest
+
+Agent exploration is allowed and encouraged to be ad-hoc, but every *decision* it makes must land in the artifact:
+
+```
+Run 1 → duplicate OSM features → prefer national dataset → update project.yaml rationale → rerun
+Run 2 → missing planned road     → add override layer        → rerun
+Run 3 → validation passes       → render final dashboard
+```
+
+If you discover a problem mid-run, update `project.yaml`, add the override, and rerun — don't patch the chat. The chat transcript is not part of the dependency graph.
+
+---
+
+## 8. Templates & examples
+
+Grab a scaffold from `../templates/` and copy/adapt:
+
+- `templates/project.yaml` — full sparsely commented skeleton
+- `templates/pipeline.py` — boring, commented pipeline skeleton
+- `templates/presentation.yaml` — semantic presentation defaults
+- `templates/validation.yaml` — validation rules + report starters
+
+A worked example implementing the acceptance (Tartu) scenario in `../examples/tartu-development/` contains a complete `project.yaml`, pipeline, overrides, validation, and a QGIS project pass.
+
+## Optional established-stack bindings
+
+`integrations.schema: openmapstack-integrations/v1` binds authoritative tool
+files and the derived execution summary without replacing the processing or
+provenance contract. See [established-stack.md](established-stack.md) for the
+integration boundary and examples; the packaged project JSON schema and
+`integration.bindings_valid` / `integration.evidence_matches` own its shape and
+checks. Absent integrations preserve existing v1 behavior. A clean rerun must
+retain declared ownership and delivery selection, and rebuild selected outputs.

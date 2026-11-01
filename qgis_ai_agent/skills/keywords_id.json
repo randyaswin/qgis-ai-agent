@@ -1,0 +1,43 @@
+{
+  "synonyms": {
+    "kepadatan": ["density", "choropleth", "penduduk", "population"],
+    "penduduk": ["population", "demographic", "density", "choropleth"],
+    "banjir": ["flood", "inundation", "hydrology", "susceptibility", "hazard"],
+    "longsor": ["landslide", "slope", "susceptibility", "hazard", "terrain"],
+    "lereng": ["slope", "terrain", "relief", "elevation"],
+    "kontur": ["contour", "elevation", "relief", "dem"],
+    "ketinggian": ["elevation", "dem", "relief", "topography", "altitude"],
+    "tutupan lahan": ["landcover", "landuse", "classification", "polygon"],
+    "penggunaan lahan": ["landuse", "landcover", "zoning", "rtrw"],
+    "jalan": ["road", "network", "routing", "accessibility", "transport"],
+    "jangkauan": ["buffer", "service", "area", "accessibility", "distance", "coverage"],
+    "fasilitas": ["facility", "poi", "point", "amenity", "accessibility"],
+    "titik panas": ["heatmap", "hotspot", "kernel", "density", "cluster"],
+    "sebaran": ["distribution", "density", "spatial", "pattern", "scatter"],
+    "indonesia": ["indonesia", "utm", "srgi", "dgn95", "kemendagri", "bps"],
+    "jawa": ["indonesia", "utm", "32748", "32749"],
+    "sumatera": ["indonesia", "utm", "32747", "32647", "32746"],
+    "kalimantan": ["indonesia", "utm", "32748", "32749", "32750"],
+    "sulawesi": ["indonesia", "utm", "32750", "32751"],
+    "papua": ["indonesia", "utm", "32752", "32753", "32754"],
+    "citra": ["satellite", "remote", "sensing", "sentinel", "landsat", "ndvi", "raster"],
+    "vegetasi": ["vegetation", "ndvi", "index", "satellite", "raster"],
+    "tata letak": ["layout", "print", "composer", "cartography", "export"],
+    "cetak": ["layout", "print", "export", "pdf", "dpi"],
+    "audit": ["audit", "inspect", "check", "clean", "quality", "validate"],
+    "periksa": ["audit", "inspect", "describe", "validate"]
+  },
+  "keywords": {
+    "indonesia-geodata-crs": ["indonesia", "utm", "srgi2013", "dgn95", "bps", "kemendagri", "proyeksi", "koordinat", "jawa", "sumatera", "kalimantan", "sulawesi", "papua", "bali"],
+    "choropleth-density-map": ["kepadatan", "penduduk", "choropleth", "tematik", "kecamatan", "kabupaten", "provinsi", "desa", "rasio", "persentase", "rate", "density"],
+    "terrain-relief-map": ["elevasi", "ketinggian", "dem", "demnas", "kontur", "lereng", "kemiringan", "hillshade", "bayangan", "topografi", "relief"],
+    "flood-susceptibility-map": ["banjir", "rawan", "kerawanan", "genangan", "susceptibility", "curah", "hujan", "longsor", "overlay", "mcda"],
+    "proximity-service-coverage-map": ["jangkauan", "fasilitas", "buffer", "puskesmas", "sekolah", "rumah", "sakit", "aksesibilitas", "radius", "layanan", "coverage"],
+    "point-density-heatmap": ["titik", "panas", "heatmap", "hotspot", "sebaran", "kriminalitas", "kejadian", "kecelakaan", "kasus", "cluster"],
+    "landcover-area-statistics": ["tutupan", "lahan", "penggunaan", "hutan", "sawah", "permukiman", "luas", "hektar", "deforestasi", "perubahan", "rtrw"],
+    "satellite-index-map": ["ndvi", "ndwi", "citra", "satelit", "sentinel", "landsat", "vegetasi", "remote", "sensing", "band"],
+    "existing-project-audit": ["audit", "periksa", "cek", "rapikan", "kualitas", "bersihkan", "perbaiki", "validasi"],
+    "map-qa-and-export": ["ekspor", "cetak", "pdf", "png", "layout", "legenda", "skala", "arah", "utara", "a4", "a3", "dpi"],
+    "peta-bahasa-indonesia": ["bahasa", "indonesia", "istilah", "judul", "keterangan", "teks"]
+  }
+}
