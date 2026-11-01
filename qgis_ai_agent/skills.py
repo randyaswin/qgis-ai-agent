@@ -23,7 +23,8 @@ USER_DIR = os.path.expanduser("~/.qgis_ai_agent/skills")
 
 STOP = set("""a an the and or of to in on for with from by is are be this that it as at into per use using make
 create build buat bikin dan atau yang untuk dengan dari di ke pada ini itu saya aku tolong mohon agar supaya
-sebuah dalam oleh jadi lalu kemudian juga serta buatkan tampilkan lakukan data layer lapisan""".split())
+sebuah dalam oleh jadi lalu kemudian juga serta buatkan tampilkan lakukan data layer lapisan
+ください 作成 作って 表示 追加 お願い おねがい したい して です ます だった こと もの よう""".split())
 
 
 def parse_frontmatter(text):
@@ -56,7 +57,18 @@ def parse_frontmatter(text):
 
 
 def tokens(text):
-    return [t for t in re.findall(r"[a-z0-9\u00c0-\uffff]+", text.lower()) if t not in STOP and len(t) > 1]
+    low = text.lower()
+    latin = re.findall(r"[a-z0-9_]+", low)
+    katakana = re.findall(r"[\u30a0-\u30ff]{2,}", low)
+    kanji = re.findall(r"[\u4e00-\u9fff]+", low)
+    kanji_ngrams = []
+    for kw in kanji:
+        if len(kw) > 2:
+            for i in range(len(kw) - 1):
+                kanji_ngrams.append(kw[i:i+2])
+    other = re.findall(r"[\u00c0-\u024f\u0400-\u04ff]+", low)
+    all_toks = latin + katakana + kanji + kanji_ngrams + other
+    return [t for t in all_toks if t not in STOP and len(t) > 1]
 
 
 class Skill:
