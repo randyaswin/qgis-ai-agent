@@ -51,11 +51,13 @@ ToolServer (QGIS Main Thread) ──▶ tools.py (51 Tools)
      - `add_layout_gradient_legend`: Horizontal continuous gradient color bar (elevation, hazard, heatmap).
      - `add_layout_callout_box`: Cluster callout cards (A, B, C, D, E) with pointer lines to map coordinates.
      - `edit_layout`, `export_layout` (PDF/PNG/SVG + preview), `open_layout_designer`.
+   - **Digitization & Georeferencing**: `georeference_raster` (warp unreferenced scans/photos with GCPs), `create_vector_layer` (scaffold GeoPackage/Shapefile layers), `digitize_features` (programmatic vector feature creation with auto-geometry repair).
    - **Skills Discovery & Loading**: `list_skills`, `load_skill`.
    - **Sandbox Escape Hatch**: `exec_pyqgis` (arbitrary PyQGIS execution; disabled by default).
 
-2. **Support for 55 Standard `SKILL.md` GIS & Cartography Skills**:
-   - **21 Custom Specialized Skills**:
+2. **Support for 56 Standard `SKILL.md` GIS & Cartography Skills**:
+   - **22 Custom Specialized Skills**:
+     - `digitizing-and-georeferencing`: Raster georeferencing via GCPs (Helmert, Affine, Polynomial 2/3, Thin Plate Spline), snapping environment configuration, topological editing (avoid overlap, gap detection), programmatic vector digitization, automated raster-to-vector polygonization, and geometry repair.
      - `cartographic-symbology-and-styling`: Visual hierarchy, Bertin's graphic variables, point scaling (Flannery proportional vs graduated), cased roads, line hierarchy, polygon boundary rendering, opacity, and layer blending modes (Multiply/Overlay).
      - `cartographic-typography-and-labeling`: Map lettering conventions, typography hierarchy, QGIS PAL placement engine, text halos/buffers, curved hydrographic lettering, tracking, callouts, and collision avoidance.
      - `color-theory-and-palettes`: Perceptual color harmony, sequential/diverging/qualitative ColorBrewer schemes, CVD (colorblind) accessibility, avoiding rainbow/jet artifacts, and print CMYK total ink limits.

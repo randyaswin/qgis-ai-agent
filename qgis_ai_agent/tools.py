@@ -169,6 +169,246 @@ def add_raster_layer(path, name=None, provider="gdal"):
     return _layer_info(lyr)
 
 
+# ---------------------------------------------------------------- digitizing & georeferencing
+@tool("Georeference an unreferenced raster image (scanned map, drone aerial photo, PNG/JPG/TIF) using Ground Control Points (GCPs). Warps the image to the specified CRS using GDAL and optionally adds it to the QGIS canvas.",
+      {"image_path": S("string", "absolute path to unreferenced raster image"),
+       "gcps": S("array", "list of GCPs as [[pixel_x, pixel_y, map_x, map_y], ...] or [{'pixel_x':..., 'pixel_y':..., 'map_x':..., 'map_y':...}]"),
+       "output_path": S("string", "output GeoTIFF path (defaults to same folder with _georef.tif)"),
+       "crs": S("string", "target CRS, default 'EPSG:4326'"),
+       "transform": S("string", "'polynomial1' (Affine, 3+ GCPs, default) | 'polynomial2' (6+ GCPs) | 'polynomial3' (10+ GCPs) | 'tps' (Thin Plate Spline, 4+ GCPs)"),
+       "resample": S("string", "'bilinear' (default) | 'nearest' | 'cubic' | 'cubicspline'"),
+       "load_to_canvas": S("boolean", "automatically add resulting layer to QGIS project (default true)")})
+def georeference_raster(image_path, gcps, output_path=None, crs="EPSG:4326", transform="polynomial1", resample="bilinear", load_to_canvas=True):
+    from osgeo import gdal, osr
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Input image not found: {image_path}")
+
+    min_gcps = {"polynomial1": 3, "affine": 3, "polynomial2": 6, "polynomial3": 10, "tps": 4, "helmert": 2}
+    req = min_gcps.get(transform.lower(), 3)
+    if len(gcps) < req:
+        raise ValueError(f"Transformation '{transform}' requires at least {req} GCPs, but {len(gcps)} provided.")
+
+    gdal_gcps = []
+    for item in gcps:
+        if isinstance(item, dict):
+            px, py = float(item["pixel_x"]), float(item["pixel_y"])
+            mx, my = float(item["map_x"]), float(item["map_y"])
+        else:
+            px, py, mx, my = float(item[0]), float(item[1]), float(item[2]), float(item[3])
+        gdal_gcps.append(gdal.GCP(mx, my, 0, px, py))
+
+    srs = osr.SpatialReference()
+    srs.SetFromUserInput(crs)
+
+    vrt_path = f"/vsimem/gcp_warp_{os.getpid()}_{len(gcps)}.vrt"
+    temp_ds = gdal.Translate(vrt_path, image_path, GCPs=gdal_gcps, outputSRS=srs)
+    if not temp_ds:
+        raise RuntimeError("Failed to attach GCPs to image.")
+
+    resample_map = {
+        "nearest": gdal.GRA_NearestNeighbour,
+        "bilinear": gdal.GRA_Bilinear,
+        "cubic": gdal.GRA_Cubic,
+        "cubicspline": gdal.GRA_CubicSpline,
+    }
+    alg = resample_map.get(resample.lower(), gdal.GRA_Bilinear)
+
+    poly_order = None
+    use_tps = False
+    t_low = transform.lower()
+    if t_low in ("polynomial1", "affine"):
+        poly_order = 1
+    elif t_low == "polynomial2":
+        poly_order = 2
+    elif t_low == "polynomial3":
+        poly_order = 3
+    elif t_low == "tps":
+        use_tps = True
+
+    warp_options = gdal.WarpOptions(
+        format="GTiff",
+        dstSRS=crs,
+        resampleAlg=alg,
+        polynomialOrder=poly_order,
+        tps=use_tps
+    )
+
+    if not output_path:
+        base, _ = os.path.splitext(image_path)
+        output_path = f"{base}_georef.tif"
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    out_ds = gdal.Warp(output_path, temp_ds, options=warp_options)
+    temp_ds = None
+    gdal.Unlink(vrt_path)
+
+    if not out_ds:
+        raise RuntimeError(f"GDAL warping failed for {output_path}")
+
+    gt = out_ds.GetGeoTransform()
+    width, height = out_ds.RasterXSize, out_ds.RasterYSize
+    out_ds = None
+
+    layer_info = None
+    if load_to_canvas:
+        layer_info = add_raster_layer(output_path, name=os.path.splitext(os.path.basename(output_path))[0])
+
+    return {
+        "output_path": output_path,
+        "crs": crs,
+        "transform": transform,
+        "extent": [gt[0], gt[3] + gt[5] * height, gt[0] + gt[1] * width, gt[3]],
+        "resolution": [abs(gt[1]), abs(gt[5])],
+        "gcp_count": len(gcps),
+        "layer": layer_info
+    }
+
+
+@tool("Create a new empty vector layer (GeoPackage, Shapefile, or memory scratch) with specified geometry type, CRS, and attribute fields.",
+      {"layer_name": S("string", "name for the new layer"),
+       "geometry_type": S("string", "'Point' | 'LineString' | 'Polygon' | 'MultiPoint' | 'MultiLineString' | 'MultiPolygon' (default 'Polygon')"),
+       "crs": S("string", "layer CRS, default 'EPSG:4326'"),
+       "fields": S("array", "field definitions e.g. [{'name': 'id', 'type': 'integer'}, {'name': 'name', 'type': 'string'}, {'name': 'area_m2', 'type': 'double'}]"),
+       "output_path": S("string", "optional path to save as .gpkg or .shp (creates memory scratch layer if omitted)"),
+       "load_to_canvas": S("boolean", "add layer to active QGIS project (default true)")})
+def create_vector_layer(layer_name, geometry_type="Polygon", crs="EPSG:4326", fields=None, output_path=None, load_to_canvas=True):
+    from qgis.PyQt.QtCore import QVariant
+    geom_str = geometry_type.strip()
+    c_auth = crs or "EPSG:4326"
+
+    if output_path:
+        ext = os.path.splitext(output_path)[1].lower()
+        driver = "GPKG" if ext in (".gpkg", ".geopackage") else "ESRI Shapefile"
+        from osgeo import ogr, osr
+        srs = osr.SpatialReference()
+        srs.SetFromUserInput(c_auth)
+        ogr_drv = ogr.GetDriverByName(driver)
+        if os.path.exists(output_path) and driver == "GPKG":
+            ds = ogr_drv.Open(output_path, 1)
+        else:
+            ds = ogr_drv.CreateDataSource(output_path)
+
+        wkb_map = {
+            "point": ogr.wkbPoint,
+            "linestring": ogr.wkbLineString,
+            "polygon": ogr.wkbPolygon,
+            "multipoint": ogr.wkbMultiPoint,
+            "multilinestring": ogr.wkbMultiLineString,
+            "multipolygon": ogr.wkbMultiPolygon
+        }
+        wkb = wkb_map.get(geom_str.lower(), ogr.wkbPolygon)
+        ogr_layer = ds.CreateLayer(layer_name, srs, wkb)
+        if fields:
+            for f in fields:
+                f_name = f.get("name", "field")
+                f_type = f.get("type", "string").lower()
+                ogr_type = ogr.OFTInteger if f_type in ("int", "integer") else (ogr.OFTReal if f_type in ("double", "float", "real") else ogr.OFTString)
+                ogr_layer.CreateField(ogr.FieldDefn(f_name, ogr_type))
+        ds.FlushCache()
+        ds = None
+
+        lyr = QgsVectorLayer(output_path, layer_name, "ogr")
+    else:
+        uri = f"{geom_str}?crs={c_auth}"
+        lyr = QgsVectorLayer(uri, layer_name, "memory")
+        if fields:
+            type_map = {
+                "int": QVariant.Int, "integer": QVariant.Int,
+                "double": QVariant.Double, "float": QVariant.Double, "real": QVariant.Double,
+                "string": QVariant.String, "text": QVariant.String
+            }
+            qfields = [QgsField(f.get("name", "f"), type_map.get(f.get("type", "string").lower(), QVariant.String)) for f in fields]
+            lyr.dataProvider().addAttributes(qfields)
+            lyr.updateFields()
+
+    if not lyr.isValid():
+        raise RuntimeError(f"Failed to create valid vector layer '{layer_name}'")
+
+    if load_to_canvas:
+        QgsProject.instance().addMapLayer(lyr)
+
+    return _layer_info(lyr)
+
+
+@tool("Add digitized vector features (points, lines, or polygons) to an existing vector layer with automatic geometry validation and attribute assignment.",
+      {"layer": S("string", "target layer name or id"),
+       "features": S("array", "list of feature objects: [{'geometry': coordinates or WKT or GeoJSON geometry, 'attributes': {'field': val, ...}}, ...]"),
+       "auto_fix_geometry": S("boolean", "automatically repair self-intersections or unclosed rings using makeValid (default true)")})
+def digitize_features(layer, features, auto_fix_geometry=True):
+    import json as _json
+    lyr = _layer(layer)
+    if not isinstance(lyr, QgsVectorLayer):
+        raise ValueError(f"Layer '{layer}' is not a vector layer.")
+
+    if not lyr.isEditable():
+        lyr.startEditing()
+
+    fields = lyr.fields()
+    added_count = 0
+    errors = []
+
+    for idx, f_item in enumerate(features):
+        geom_raw = f_item.get("geometry")
+        attrs = f_item.get("attributes", {})
+        geom = None
+
+        if isinstance(geom_raw, str):
+            g_str = geom_raw.strip()
+            if g_str.startswith("{"):
+                geom = QgsGeometry.fromGeoJson(g_str)
+            else:
+                geom = QgsGeometry.fromWkt(g_str)
+        elif isinstance(geom_raw, dict):
+            geom = QgsGeometry.fromGeoJson(_json.dumps(geom_raw))
+        elif isinstance(geom_raw, list):
+            wkb = lyr.wkbType()
+            base_type = QgsWkbTypes.geometryType(wkb)
+            if base_type == Qgis.GeometryType.Point:
+                geom = QgsGeometry.fromPointXY(QgsPointXY(float(geom_raw[0]), float(geom_raw[1])))
+            elif base_type == Qgis.GeometryType.Line:
+                pts = [QgsPointXY(float(pt[0]), float(pt[1])) for pt in geom_raw]
+                geom = QgsGeometry.fromPolylineXY(pts)
+            elif base_type == Qgis.GeometryType.Polygon:
+                if len(geom_raw) > 0 and isinstance(geom_raw[0], list) and len(geom_raw[0]) > 0 and isinstance(geom_raw[0][0], list):
+                    rings = [[QgsPointXY(float(p[0]), float(p[1])) for p in ring] for ring in geom_raw]
+                    geom = QgsGeometry.fromPolygonXY(rings)
+                else:
+                    ring = [QgsPointXY(float(p[0]), float(p[1])) for p in geom_raw]
+                    if ring and (ring[0].x() != ring[-1].x() or ring[0].y() != ring[-1].y()):
+                        ring.append(ring[0])
+                    geom = QgsGeometry.fromPolygonXY([ring])
+
+        if not geom or geom.isEmpty():
+            errors.append(f"Feature #{idx}: invalid or empty geometry")
+            continue
+
+        if auto_fix_geometry and not geom.isGeosValid():
+            fixed = geom.makeValid()
+            if fixed and not fixed.isEmpty():
+                geom = fixed
+
+        feat = QgsFeature(fields)
+        feat.setGeometry(geom)
+        for k, v in attrs.items():
+            if fields.indexFromName(k) != -1:
+                feat.setAttribute(k, v)
+
+        if lyr.addFeature(feat):
+            added_count += 1
+        else:
+            errors.append(f"Feature #{idx}: failed to add to layer")
+
+    lyr.commitChanges()
+    _refresh()
+
+    return {
+        "layer": lyr.name(),
+        "features_added": added_count,
+        "total_features": lyr.featureCount(),
+        "errors": errors if errors else None
+    }
+
+
 BASEMAP_PRESETS = {
     "carto_light": ("https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png", "CartoDB Positron (No Key)", 20),
     "osm": ("https://tile.openstreetmap.org/{z}/{x}/{y}.png", "OpenStreetMap (No Key)", 19),

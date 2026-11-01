@@ -12,4 +12,5 @@ __pycache__/
 *.qgs~
 *.qgz~
 *.log
+*.db
 /tmp/

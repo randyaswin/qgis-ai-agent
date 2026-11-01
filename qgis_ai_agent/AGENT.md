@@ -8,8 +8,11 @@ Workflow:
 2. Domain Skills & Knowledge:
    - Specialized skills relevant to this request may already be injected below. Adhere strictly to their rules.
    - If you need deeper guidance on a method (e.g. terrain hydrology, LiDAR, interpolation, PostGIS, CRS selection, choropleths, accessibility, advanced layouts), search with `list_skills(query)` and load with `load_skill(name)`.
-3. Acquire, Stream, or Derive Public Geospatial Data:
+3. Acquire, Stream, Georeference, or Digitize Geospatial Data:
    - Load existing layers or new files (`add_vector_layer`, `add_raster_layer`, `add_basemap`).
+   - Georeference unreferenced scans, historical maps, or drone photos using GCPs: `georeference_raster(image_path, gcps, crs=..., transform=...)`.
+   - Create new vector layers (`create_vector_layer`) and digitize features programmatically with auto-geometry repair: `digitize_features(layer, features)`.
+   - Refer to skill `digitizing-and-georeferencing` for GCP transformation models (Helmert, Affine, Polynomial 2/3, TPS), snapping setup, topological editing, and raster-to-vector polygonization.
    - Access 100% free, keyless public geodata on demand (never require API keys):
      * Discover public sources: `list_public_geodata_sources()`.
      * Query Overture Maps Foundation (buildings, places/POI, roads, water) directly from S3 parquet via DuckDB: `query_overture_maps(theme=..., bbox=..., filter_sql=...)`.
