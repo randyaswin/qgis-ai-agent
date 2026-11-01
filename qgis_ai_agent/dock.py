@@ -289,17 +289,21 @@ def render_assistant_message_html(text, model_info="", timestamp=""):
     meta_str = f"<span style='color: #94a3b8; font-size: 10px; font-weight: normal; margin-left: 6px;'>({html.escape(model_info)})</span>" if model_info else ""
 
     return (
-        f"<div style='margin: 10px 0 6px 0; background-color: #171822; border: 1px solid #28283a; "
+        f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 8px 0 6px 0;'>"
+        f"<tr><td>"
+        f"<div style='background-color: #171822; border: 1px solid #28283a; "
         f"border-radius: 6px; padding: 10px 12px;'>"
         f"<div style='margin-bottom: 6px; line-height: 16px;'>"
         f"<span style='background-color: #059669; color: #ecfdf5; font-size: 10px; font-weight: bold; "
-        f"padding: 1px 6px; border-radius: 3px;'>AGENT</span>"
+        f"padding: 1px 6px; border-radius: 3px;'>AGENT</span>&nbsp;&nbsp;"
         f"{meta_str}{time_str}"
         f"</div>"
         f"<div style='color: #e2e8f0; font-size: 12px; line-height: 1.5;'>"
         f"{formatted_body}"
         f"</div>"
         f"</div>"
+        f"</td></tr>"
+        f"</table>"
     )
 
 
@@ -318,11 +322,13 @@ def render_user_message_html(text, attachments=None, timestamp=""):
     clean_text = html.escape(text)
 
     return (
-        f"<div style='margin: 10px 0 6px 0; background-color: #172033; border: 1px solid #233352; "
+        f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 8px 0 4px 0;'>"
+        f"<tr><td>"
+        f"<div style='background-color: #172033; border: 1px solid #233352; "
         f"border-left: 3px solid #3b82f6; border-radius: 6px; padding: 8px 12px;'>"
         f"<div style='margin-bottom: 4px; line-height: 16px;'>"
         f"<span style='background-color: #2563eb; color: #eff6ff; font-size: 10px; font-weight: bold; "
-        f"padding: 1px 6px; border-radius: 3px;'>YOU</span>"
+        f"padding: 1px 6px; border-radius: 3px;'>YOU</span>&nbsp;&nbsp;"
         f"{time_str}"
         f"</div>"
         f"<div style='color: #f8fafc; font-size: 12px; line-height: 1.45; white-space: pre-wrap;'>"
@@ -330,75 +336,94 @@ def render_user_message_html(text, attachments=None, timestamp=""):
         f"</div>"
         f"{att_html}"
         f"</div>"
+        f"</td></tr>"
+        f"</table>"
     )
 
 
-def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_success=True, img_base64=None):
-    """Render a sleek, timeline tool execution node with IN and OUT blocks."""
-    dot_color = "#10b981" if is_success else "#ef4444"
-    status_border = "#28283a" if is_success else "#7f1d1d"
-    out_bg = "#111118" if is_success else "#1c1418"
-    out_color = "#e2e8f0" if is_success else "#fca5a5"
+def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_success=True, is_running=False, img_base64=None):
+    """Render a sleek vertical timeline tool node matching reference design."""
+    if is_running:
+        dot_color = "#38bdf8"
+    elif is_success:
+        dot_color = "#10b981"
+    else:
+        dot_color = "#ef4444"
+
+    header_desc = f"{name} &bull; {primary_arg}" if primary_arg else name
+
+    in_val = html.escape(in_str or "()")
+    if is_running:
+        out_cell = "<span style='color: #38bdf8; font-family: monospace; font-size: 10px; font-style: italic;'>Running...</span>"
+    else:
+        out_bg = "#0b0f17" if is_success else "#1c1418"
+        out_border = "#1e293b" if is_success else "#7f1d1d"
+        out_color = "#cbd5e1" if is_success else "#fca5a5"
+        escaped_out = html.escape(out_str or "").replace("\n", "<br>")
+        out_cell = (
+            f"<div style='background-color: {out_bg}; border: 1px solid {out_border}; "
+            f"border-radius: 3px; padding: 4px 6px; color: {out_color}; "
+            f"font-family: monospace; font-size: 10px; word-break: break-all;'>"
+            f"{escaped_out}"
+            f"</div>"
+        )
 
     img_html = ""
     if img_base64:
         img_html = (
-            f"<div style='margin-top: 6px; text-align: center;'>"
+            f"<div style='margin-top: 6px; text-align: left;'>"
             f"<img src='data:image/png;base64,{img_base64}' style='max-width: 95%; border: 1px solid #334155; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.5);'><br>"
             f"<span style='font-size: 10px; color: #64748b;'>🗺️ Canvas Preview ({html.escape(name)})</span>"
             f"</div>"
         )
 
-    in_block = ""
-    if in_str:
-        in_block = (
-            f"<div style='margin-top: 3px; font-family: monospace; font-size: 11px; background-color: #171822; "
-            f"padding: 3px 8px; border-radius: 3px; color: #cbd5e1; word-break: break-all;'>"
-            f"<span style='color: #64748b; font-weight: bold; font-size: 10px; margin-right: 6px;'>IN</span>"
-            f"{html.escape(in_str)}"
-            f"</div>"
-        )
-
-    out_block = ""
-    if out_str:
-        out_block = (
-            f"<div style='margin-top: 3px; font-family: monospace; font-size: 11px; background-color: {out_bg}; "
-            f"border: 1px solid {status_border}; padding: 4px 8px; border-radius: 3px; color: {out_color}; word-break: break-all;'>"
-            f"<span style='color: #64748b; font-weight: bold; font-size: 10px; margin-right: 6px;'>OUT</span>"
-            f"{html.escape(out_str)}"
-            f"</div>"
-        )
-
-    prim_badge = f"<span style='background-color: #1e1e2d; color: #93c5fd; padding: 1px 5px; border-radius: 3px; font-size: 10px; font-family: monospace; margin-left: 6px;'>{html.escape(primary_arg)}</span>" if primary_arg else ""
+    sub_table = (
+        f"<table cellpadding='0' cellspacing='0' style='margin-top: 4px; width: 100%;'>"
+        f"<tr>"
+        f"<td width='30' valign='top' style='color: #64748b; font-family: monospace; font-size: 10px; font-weight: bold; padding-bottom: 3px;'>IN</td>"
+        f"<td valign='top' style='color: #cbd5e1; font-family: monospace; font-size: 10px; padding-bottom: 3px; word-break: break-all;'>{in_val}</td>"
+        f"</tr>"
+        f"<tr>"
+        f"<td width='30' valign='top' style='color: #64748b; font-family: monospace; font-size: 10px; font-weight: bold;'>OUT</td>"
+        f"<td valign='top'>{out_cell}</td>"
+        f"</tr>"
+        f"</table>"
+    )
 
     return (
-        f"<div style='margin: 4px 0 4px 10px; border-left: 2px solid #334155; padding: 0 0 4px 12px;'>"
-        f"<div style='margin-left: -19px; line-height: 16px; margin-bottom: 2px;'>"
-        f"<span style='color: {dot_color}; font-size: 12px; margin-right: 4px;'>●</span>"
-        f"<span style='background-color: #1e293b; color: #38bdf8; font-size: 10px; font-weight: bold; padding: 1px 5px; border-radius: 3px;'>{html.escape(category)}</span>"
-        f"<b style='color: #f1f5f9; font-size: 11px; margin-left: 4px;'>{html.escape(name)}</b>"
-        f"{prim_badge}"
+        f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 0;'>"
+        f"<tr>"
+        f"<td width='18' valign='top' style='border-right: 2px solid #334155; padding-right: 6px; text-align: center;'>"
+        f"<span style='color: {dot_color}; font-size: 11px;'>●</span>"
+        f"</td>"
+        f"<td valign='top' style='padding-left: 10px; padding-bottom: 8px;'>"
+        f"<div style='line-height: 16px;'>"
+        f"<b style='color: #f8fafc; font-size: 11px;'>{html.escape(category)}</b>&nbsp;&nbsp;"
+        f"<span style='color: #94a3b8; font-size: 11px;'>{header_desc}</span>"
         f"</div>"
-        f"{in_block}"
-        f"{out_block}"
+        f"{sub_table}"
         f"{img_html}"
-        f"</div>"
+        f"</td>"
+        f"</tr>"
+        f"</table>"
     )
 
 
-def render_thinking_node_html(text=""):
-    """Render a sleek Thinking timeline node."""
-    preview_html = ""
-    if text.strip():
-        preview_html = f"<div style='color: #94a3b8; font-style: italic; font-size: 11px; margin-top: 2px; padding: 2px 4px;'>{html.escape(text.strip())}</div>"
+def render_thinking_node_html(text="Thought for 1s"):
+    """Render a short, sleek Thinking timeline node with connected vertical line."""
+    if not text:
+        text = "Thought for 1s"
     return (
-        f"<div style='margin: 4px 0 4px 10px; border-left: 2px solid #6366f1; padding: 0 0 2px 12px;'>"
-        f"<div style='margin-left: -19px; line-height: 16px;'>"
-        f"<span style='color: #818cf8; font-size: 12px; margin-right: 4px;'>✦</span>"
-        f"<span style='color: #a5b4fc; font-size: 11px; font-weight: 600;'>Thinking</span>"
-        f"</div>"
-        f"{preview_html}"
-        f"</div>"
+        f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 0;'>"
+        f"<tr>"
+        f"<td width='18' valign='top' style='border-right: 2px solid #334155; padding-right: 6px; text-align: center;'>"
+        f"<span style='color: #94a3b8; font-size: 11px;'>●</span>"
+        f"</td>"
+        f"<td valign='top' style='padding-left: 10px; padding-bottom: 6px;'>"
+        f"<span style='color: #94a3b8; font-size: 11px;'>{html.escape(text)}</span>"
+        f"</td>"
+        f"</tr>"
+        f"</table>"
     )
 
 
@@ -413,6 +438,8 @@ class AgentDock(QDockWidget):
         self._current_assistant_text = ""
         self._current_model_header = ""
         self._last_tool_call = {}
+        self._active_tool_pos = None
+        self._last_event_time = 0
         self.message_queue = []
         self.attachments = []
         self._running_words = [
@@ -858,7 +885,11 @@ class AgentDock(QDockWidget):
         self.settings_menu.addSeparator()
 
         act_clr = self.settings_menu.addAction("🗑️ Clear Chat History")
-        act_clr.triggered.connect(self.log.clear)
+        act_clr.triggered.connect(self._clear_chat_log)
+
+    def _clear_chat_log(self):
+        self._active_tool_pos = None
+        self.log.clear()
 
     def _set_cli(self, name):
         idx = self.cli.findData(name)
@@ -893,6 +924,7 @@ class AgentDock(QDockWidget):
                 return
         except Exception:
             pass
+        self._active_tool_pos = None
         self.log.clear()
         sess = self.session_manager.get_active_session()
         for m in sess.messages:
@@ -904,7 +936,7 @@ class AgentDock(QDockWidget):
                 elif m.role == "assistant":
                     self._append_html(render_assistant_message_html(m.text, model_info=m.model_info, timestamp=m.timestamp))
                 elif m.role == "tool":
-                    self._append_html(f"<div style='margin: 4px 0 4px 10px; color: #94a3b8; font-size: 11px;'>⚙ {html.escape(m.text)}</div>")
+                    self._append_html(render_tool_node_html("QGIS", m.text, "", "", m.text))
         self.first_turn = (sess.turns_count == 0)
         self.cont.setChecked(sess.turns_count > 0)
 
@@ -920,8 +952,12 @@ class AgentDock(QDockWidget):
     def _open_toolbox(self):
         res = tools.open_processing_toolbox()
         self._append_html(
-            f"<div style='margin: 4px 0; padding: 4px 8px; background-color: #1e293b; border-radius: 3px; font-size: 11px; color: #38bdf8;'>"
+            f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 4px 0;'>"
+            f"<tr><td>"
+            f"<div style='padding: 4px 8px; background-color: #1e293b; border-radius: 3px; font-size: 11px; color: #38bdf8;'>"
             f"🛠️ <b>Processing Toolbox:</b> Panel opened in QGIS.</div>"
+            f"</td></tr>"
+            f"</table>"
         )
 
     def _inspect_prompt(self):
@@ -954,9 +990,15 @@ class AgentDock(QDockWidget):
     def _append_html(self, html_content):
         c = self.log.textCursor()
         c.movePosition(QTextCursor.MoveOperation.End)
-        self.log.setTextCursor(c)
+        if c.positionInBlock() > 0:
+            c.insertBlock()
+        pos = c.position()
         c.insertHtml(html_content)
+        if c.positionInBlock() > 0:
+            c.insertBlock()
+        self.log.setTextCursor(c)
         self.log.ensureCursorVisible()
+        return pos
 
     def _clean_ansi(self, text):
         return ANSI.sub("", text).replace("\r\n", "\n").replace("\r", "\n")
@@ -971,7 +1013,9 @@ class AgentDock(QDockWidget):
         lower_clean = clean.lower()
         if ("<thinking>" in lower_clean or "<thought>" in lower_clean or
             clean.strip().startswith(("* Thinking", "Thinking:", "Thought:"))):
-            self._append_html(render_thinking_node_html())
+            elapsed = max(1, int(time.time() - (self._last_event_time or self.start_time or time.time())))
+            self._append_html(render_thinking_node_html(f"Thought for {elapsed}s"))
+            self._last_event_time = time.time()
             clean = re.sub(r"<\/?(thinking|thought)>|\*+\s*Thinking[^*]*\*+|Thinking:", "", clean, flags=re.I).strip()
             if not clean:
                 return
@@ -988,10 +1032,12 @@ class AgentDock(QDockWidget):
             header_str = " | ".join(meta)
             self._current_model_header = header_str
             self._append_html(
-                f"<div style='margin-top: 8px; margin-bottom: 2px;'>"
+                f"<table width='100%' cellpadding='0' cellspacing='0' style='margin-top: 8px; margin-bottom: 2px;'>"
+                f"<tr><td>"
                 f"<span style='background-color: #059669; color: #ecfdf5; font-size: 10px; font-weight: bold; padding: 1px 6px; border-radius: 3px;'>AGENT</span>"
                 f"<span style='color: #64748b; font-size: 10px; margin-left: 6px;'>({html.escape(header_str)})</span>"
-                f"</div>"
+                f"</td></tr>"
+                f"</table>"
             )
             self.is_agent_streaming = True
 
@@ -1012,61 +1058,38 @@ class AgentDock(QDockWidget):
             "primary": prim,
             "in_str": in_str,
         }
-        arg_disp = f"<span style='background-color: #1e1e2d; color: #93c5fd; padding: 1px 5px; border-radius: 3px; font-size: 10px; font-family: monospace; margin-left: 6px;'>{html.escape(prim)}</span>" if prim else ""
-        in_block = ""
-        if in_str:
-            in_block = (
-                f"<div style='margin-top: 3px; font-family: monospace; font-size: 11px; background-color: #171822; "
-                f"padding: 3px 8px; border-radius: 3px; color: #cbd5e1; word-break: break-all;'>"
-                f"<span style='color: #64748b; font-weight: bold; font-size: 10px; margin-right: 6px;'>IN</span>"
-                f"{html.escape(in_str)}"
-                f"</div>"
-            )
-        card = (
-            f"<div style='margin: 4px 0 2px 10px; border-left: 2px solid #3b82f6; padding: 0 0 2px 12px;'>"
-            f"<div style='margin-left: -19px; line-height: 16px;'>"
-            f"<span style='color: #3b82f6; font-size: 12px; margin-right: 4px;'>⚙</span>"
-            f"<span style='background-color: #1e293b; color: #38bdf8; font-size: 10px; font-weight: bold; padding: 1px 5px; border-radius: 3px;'>{html.escape(cat)}</span>"
-            f"<b style='color: #f1f5f9; font-size: 11px; margin-left: 4px;'>{html.escape(name)}</b>"
-            f"{arg_disp}"
-            f"</div>"
-            f"{in_block}"
-            f"</div>"
-        )
-        self._append_html(card)
+        running_html = render_tool_node_html(cat, name, prim, in_str, "Running...", is_running=True)
+        self._active_tool_pos = self._append_html(running_html)
 
     def _on_tool_completed(self, name, result):
         clean_summary = format_out_result(name, result)
-        img_html = ""
         img_b64 = None
         if isinstance(result, dict) and "__image__" in result:
             img_b64 = result["__image__"]
-            mime = result.get("mime", "image/png")
-            img_html = (
-                f"<div style='margin-top: 6px; text-align: center;'>"
-                f"<img src='data:{mime};base64,{img_b64}' style='max-width: 95%; border: 1px solid #334155; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.5);'><br>"
-                f"<span style='font-size: 10px; color: #64748b;'>🗺️ Canvas Preview ({html.escape(name)})</span>"
-                f"</div>"
-            )
 
-        out_html = (
-            f"<div style='margin: 0 0 4px 10px; border-left: 2px solid #10b981; padding: 0 0 4px 12px;'>"
-            f"<div style='font-family: monospace; font-size: 11px; background-color: #111118; border: 1px solid #28283a; padding: 4px 8px; border-radius: 3px; color: #cbd5e1; word-break: break-all;'>"
-            f"<span style='color: #10b981; font-weight: bold; font-size: 10px; margin-right: 6px;'>✓ OUT</span>"
-            f"{html.escape(clean_summary)}"
-            f"</div>"
-            f"{img_html}"
-            f"</div>"
-        )
-        self._append_html(out_html)
-        self.iface.mapCanvas().refresh()
-
-        # Persist unified Claude timeline node into active project session
         cat = self._last_tool_call.get("category", "QGIS")
         prim = self._last_tool_call.get("primary", "")
         in_str = self._last_tool_call.get("in_str", "")
-        full_node_html = render_tool_node_html(cat, name, prim, in_str, clean_summary, is_success=True, img_base64=img_b64)
+        full_node_html = render_tool_node_html(cat, name, prim, in_str, clean_summary, is_success=True, is_running=False, img_base64=img_b64)
 
+        if getattr(self, "_active_tool_pos", None) is not None:
+            c = self.log.textCursor()
+            c.setPosition(self._active_tool_pos)
+            c.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+            c.removeSelectedText()
+            c.insertHtml(full_node_html)
+            if c.positionInBlock() > 0:
+                c.insertBlock()
+            self.log.setTextCursor(c)
+            self.log.ensureCursorVisible()
+            self._active_tool_pos = None
+        else:
+            self._append_html(full_node_html)
+
+        self.iface.mapCanvas().refresh()
+        self._last_event_time = time.time()
+
+        # Persist unified timeline node into active project session
         active_sess = self.session_manager.get_active_session()
         active_sess.add_tool_record(
             name=name,
@@ -1078,20 +1101,26 @@ class AgentDock(QDockWidget):
         )
 
     def _on_tool_failed(self, name, err_msg):
-        out_html = (
-            f"<div style='margin: 0 0 4px 10px; border-left: 2px solid #ef4444; padding: 0 0 4px 12px;'>"
-            f"<div style='font-family: monospace; font-size: 11px; background-color: #1c1418; border: 1px solid #7f1d1d; padding: 4px 8px; border-radius: 3px; color: #fca5a5; word-break: break-all;'>"
-            f"<span style='color: #ef4444; font-weight: bold; font-size: 10px; margin-right: 6px;'>✗ ERR</span>"
-            f"{html.escape(err_msg)}"
-            f"</div>"
-            f"</div>"
-        )
-        self._append_html(out_html)
-
         cat = self._last_tool_call.get("category", "QGIS")
         prim = self._last_tool_call.get("primary", "")
         in_str = self._last_tool_call.get("in_str", "")
-        full_node_html = render_tool_node_html(cat, name, prim, in_str, err_msg, is_success=False)
+        full_node_html = render_tool_node_html(cat, name, prim, in_str, err_msg, is_success=False, is_running=False)
+
+        if getattr(self, "_active_tool_pos", None) is not None:
+            c = self.log.textCursor()
+            c.setPosition(self._active_tool_pos)
+            c.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+            c.removeSelectedText()
+            c.insertHtml(full_node_html)
+            if c.positionInBlock() > 0:
+                c.insertBlock()
+            self.log.setTextCursor(c)
+            self.log.ensureCursorVisible()
+            self._active_tool_pos = None
+        else:
+            self._append_html(full_node_html)
+
+        self._last_event_time = time.time()
 
         active_sess = self.session_manager.get_active_session()
         active_sess.add_tool_record(
@@ -1110,8 +1139,12 @@ class AgentDock(QDockWidget):
                                     + os.path.expanduser("~/.npm-global/bin") + os.pathsep + os.environ.get("PATH", "")})
             msg = (r.stdout + r.stderr).strip() or "OK"
             self._append_html(
-                f"<div style='margin: 4px 0; padding: 4px 8px; background-color: #eceff1; border-radius: 3px; font-size: 11px;'>"
-                f"<b>Register MCP:</b> <code>{' '.join(argv)}</code><br><pre>{html.escape(msg)}</pre></div>"
+                f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 4px 0;'>"
+                f"<tr><td>"
+                f"<div style='padding: 6px 10px; background-color: #1e293b; border: 1px solid #334155; border-radius: 4px; font-size: 11px; color: #cbd5e1;'>"
+                f"<b>Register MCP:</b> <code>{' '.join(argv)}</code><br><pre style='color: #94a3b8; margin: 4px 0 0 0;'>{html.escape(msg)}</pre></div>"
+                f"</td></tr>"
+                f"</table>"
             )
         except Exception as e:
             QMessageBox.warning(self, "Register MCP", str(e))
@@ -1336,19 +1369,26 @@ class AgentDock(QDockWidget):
         badge_html = ""
         if meta_badges:
             badge_html = (
-                f"<div style='margin: 2px 0 6px 0; padding: 3px 8px; background-color: #1a1a26; "
+                f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 2px 0 6px 0;'>"
+                f"<tr><td>"
+                f"<div style='padding: 3px 8px; background-color: #1a1a26; "
                 f"border-left: 3px solid #8b5cf6; border-radius: 3px; font-size: 11px; color: #cbd5e1;'>"
                 f"{' &nbsp;|&nbsp; '.join(meta_badges)}"
                 f"</div>"
+                f"</td></tr>"
+                f"</table>"
             )
 
         full_user_html = user_card_html + badge_html
         self._append_html(full_user_html)
         active_sess.add_user_message(user, full_user_html)
 
+        self._active_tool_pos = None
+        self._last_event_time = time.time()
+
         # If thinking / reasoning effort is active, emit initial Thinking timeline node
         if selected_effort and selected_effort != "default":
-            self._append_html(render_thinking_node_html())
+            self._append_html(render_thinking_node_html("Thinking..."))
 
         self.prompt.clear()
         self.action_btn.setText("■ Stop")
@@ -1381,6 +1421,7 @@ class AgentDock(QDockWidget):
     def _done(self, code):
         self.indicator_timer.stop()
         self.indicator_frame.hide()
+        self._active_tool_pos = None
         elapsed = time.time() - self.start_time if self.start_time else 0
         status_color = "#10b981" if code == 0 else "#ef4444"
         now_str = time.strftime("%H:%M:%S")
@@ -1407,10 +1448,14 @@ class AgentDock(QDockWidget):
         self._render_active_session_log()
 
         done_html = (
-            f"<div style='margin: 8px 0; padding: 4px 10px; background-color: #171c24; border: 1px solid #282f3d; "
+            f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 8px 0;'>"
+            f"<tr><td>"
+            f"<div style='padding: 4px 10px; background-color: #171c24; border: 1px solid #282f3d; "
             f"border-radius: 4px; font-size: 11px; color: {status_color}; text-align: right;'>"
             f"🏁 <b>Finished</b> in {elapsed:.1f}s (Exit Code: {code})"
             f"</div>"
+            f"</td></tr>"
+            f"</table>"
         )
         self._append_html(done_html)
 
