@@ -11,7 +11,7 @@ from qgis.PyQt.QtGui import QTextCursor
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QPlainTextEdit,
     QTextEdit, QCheckBox, QLabel, QLineEdit, QFileDialog, QMessageBox, QDialog,
-    QInputDialog, QFrame,
+    QInputDialog, QFrame, QToolButton, QMenu, QAction,
 )
 from qgis.core import Qgis, QgsProject
 
@@ -175,56 +175,209 @@ def format_out_result(name, result):
     return re.sub(r"<[^>]+>", "", summary)
 
 
+def markdown_to_clean_html(md_text):
+    """Convert standard markdown into clean, elegant HTML supported by Qt rich text."""
+    if not md_text:
+        return ""
+    text = md_text.replace("\r\n", "\n").replace("\r", "\n")
+
+    # 1. Protect & convert fenced code blocks
+    code_blocks = []
+    def _save_code(m):
+        lang = m.group(1).strip()
+        code = html.escape(m.group(2).strip("\n"))
+        lang_badge = f"<div style='color: #64748b; font-size: 10px; font-weight: bold; margin-bottom: 2px;'>{html.escape(lang.upper())}</div>" if lang else ""
+        card = (
+            f"<div style='margin: 6px 0; background-color: #0f1117; border: 1px solid #232736; "
+            f"border-radius: 5px; padding: 8px 12px; font-family: monospace; font-size: 11px; "
+            f"color: #a5b4fc; white-space: pre-wrap;'>{lang_badge}{code}</div>"
+        )
+        idx = len(code_blocks)
+        code_blocks.append(card)
+        return f"__CODE_BLOCK_{idx}__"
+
+    text = re.sub(r"```([a-zA-Z0-9_-]*)\n(.*?)```", _save_code, text, flags=re.S)
+
+    # 2. Markdown tables
+    def _table_conv(m):
+        table_str = m.group(0).strip()
+        lines = [ln.strip() for ln in table_str.split("\n") if ln.strip()]
+        if len(lines) < 2:
+            return table_str
+        rows = []
+        for i, line in enumerate(lines):
+            if re.match(r"^\|?[\s:\-|]+\|?$", line):
+                continue
+            cols = [c.strip() for c in line.strip("|").split("|")]
+            cell_tag = "th" if i == 0 else "td"
+            cell_style = "padding: 4px 8px; border: 1px solid #283040; "
+            if i == 0:
+                cell_style += "background-color: #1e293b; color: #38bdf8; font-weight: bold; font-size: 11px;"
+            else:
+                bg = "#141923" if i % 2 == 1 else "#0f131a"
+                cell_style += f"background-color: {bg}; color: #cbd5e1; font-size: 11px;"
+            row_html = "".join(f"<{cell_tag} style='{cell_style}'>{c}</{cell_tag}>" for c in cols)
+            rows.append(f"<tr>{row_html}</tr>")
+        body = "".join(rows)
+        return f"<table style='margin: 8px 0; border-collapse: collapse; width: 100%; border: 1px solid #283040;'>{body}</table>"
+
+    text = re.sub(r"(?:^\|.+\|\n?){2,}", _table_conv, text, flags=re.M)
+
+    # 3. Inline code spans
+    text = re.sub(r"`([^`\n]+)`", lambda m: f"<code style='background-color: #1e2230; color: #93c5fd; padding: 1px 5px; border-radius: 3px; font-family: monospace; font-size: 11px;'>{html.escape(m.group(1))}</code>", text)
+
+    # 4. Headings
+    text = re.sub(r"^###\s+(.+)$", r"<div style='color: #f1f5f9; font-size: 13px; font-weight: bold; margin: 10px 0 4px 0;'>\1</div>", text, flags=re.M)
+    text = re.sub(r"^##\s+(.+)$", r"<div style='color: #60a5fa; font-size: 14px; font-weight: bold; margin: 12px 0 4px 0;'>\1</div>", text, flags=re.M)
+    text = re.sub(r"^#\s+(.+)$", r"<div style='color: #38bdf8; font-size: 15px; font-weight: bold; margin: 14px 0 6px 0;'>\1</div>", text, flags=re.M)
+
+    # 5. Bold & Italic
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"\*([^*\n]+)\*", r"<i>\1</i>", text)
+
+    # 6. Horizontal rule
+    text = re.sub(r"^---+$", r"<hr style='border: none; border-top: 1px solid #282f3d; margin: 8px 0;'>", text, flags=re.M)
+
+    # 7. Blockquotes
+    text = re.sub(r"^>\s*(.+)$", r"<div style='margin: 6px 0; border-left: 3px solid #6366f1; background-color: #151824; padding: 4px 10px; color: #94a3b8; font-style: italic;'>\1</div>", text, flags=re.M)
+
+    # 8. Block flusher (grouping paragraphs vs list items vs preformatted elements)
+    lines = text.strip().split("\n")
+    blocks = []
+    current_p = []
+
+    def flush_p():
+        if current_p:
+            p_text = "<br>".join(current_p)
+            blocks.append(f"<div style='margin: 4px 0; line-height: 1.5; color: #e2e8f0;'>{p_text}</div>")
+            current_p.clear()
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            flush_p()
+            continue
+        if stripped.startswith("__CODE_BLOCK_") or stripped.startswith("<table") or stripped.startswith("<hr") or stripped.startswith("<div"):
+            flush_p()
+            blocks.append(stripped)
+            continue
+        m_b = re.match(r"^\s*[-*]\s+(.+)$", line)
+        m_n = re.match(r"^\s*(\d+)\.\s+(.+)$", line)
+        if m_b:
+            flush_p()
+            blocks.append(f"<div style='margin: 2px 0 2px 8px; color: #e2e8f0; line-height: 1.45;'><span style='color: #38bdf8; margin-right: 6px;'>•</span>{m_b.group(1)}</div>")
+        elif m_n:
+            flush_p()
+            blocks.append(f"<div style='margin: 2px 0 2px 8px; color: #e2e8f0; line-height: 1.45;'><span style='color: #38bdf8; font-weight: bold; margin-right: 6px;'>{m_n.group(1)}.</span>{m_n.group(2)}</div>")
+        else:
+            current_p.append(stripped)
+    flush_p()
+
+    result = "\n".join(blocks)
+
+    # 9. Restore code blocks
+    for idx, card in enumerate(code_blocks):
+        result = result.replace(f"__CODE_BLOCK_{idx}__", card)
+
+    return result
+
+
+def render_assistant_message_html(text, model_info="", timestamp=""):
+    """Render an AI Assistant message as an elegant, neatly formatted card."""
+    formatted_body = markdown_to_clean_html(text)
+    time_str = f"<span style='color: #64748b; font-size: 10px; font-weight: normal; margin-left: 6px;'>{html.escape(timestamp)}</span>" if timestamp else ""
+    meta_str = f"<span style='color: #94a3b8; font-size: 10px; font-weight: normal; margin-left: 6px;'>({html.escape(model_info)})</span>" if model_info else ""
+
+    return (
+        f"<div style='margin: 10px 0 6px 0; background-color: #171822; border: 1px solid #28283a; "
+        f"border-radius: 6px; padding: 10px 12px;'>"
+        f"<div style='margin-bottom: 6px; line-height: 16px;'>"
+        f"<span style='background-color: #059669; color: #ecfdf5; font-size: 10px; font-weight: bold; "
+        f"padding: 1px 6px; border-radius: 3px;'>AGENT</span>"
+        f"{meta_str}{time_str}"
+        f"</div>"
+        f"<div style='color: #e2e8f0; font-size: 12px; line-height: 1.5;'>"
+        f"{formatted_body}"
+        f"</div>"
+        f"</div>"
+    )
+
+
+def render_user_message_html(text, attachments=None, timestamp=""):
+    """Render a User message as a clean, styled card."""
+    time_str = f"<span style='color: #64748b; font-size: 10px; font-weight: normal; margin-left: 6px;'>{html.escape(timestamp)}</span>" if timestamp else ""
+
+    att_html = ""
+    if attachments:
+        pills = []
+        for a in attachments:
+            fname = os.path.basename(a)
+            pills.append(f"<span style='background-color: #0f172a; border: 1px solid #1e293b; color: #38bdf8; padding: 2px 7px; border-radius: 10px; font-size: 10px; margin-right: 4px;'>📎 {html.escape(fname)}</span>")
+        att_html = f"<div style='margin-top: 6px;'>{''.join(pills)}</div>"
+
+    clean_text = html.escape(text)
+
+    return (
+        f"<div style='margin: 10px 0 6px 0; background-color: #172033; border: 1px solid #233352; "
+        f"border-left: 3px solid #3b82f6; border-radius: 6px; padding: 8px 12px;'>"
+        f"<div style='margin-bottom: 4px; line-height: 16px;'>"
+        f"<span style='background-color: #2563eb; color: #eff6ff; font-size: 10px; font-weight: bold; "
+        f"padding: 1px 6px; border-radius: 3px;'>YOU</span>"
+        f"{time_str}"
+        f"</div>"
+        f"<div style='color: #f8fafc; font-size: 12px; line-height: 1.45; white-space: pre-wrap;'>"
+        f"{clean_text}"
+        f"</div>"
+        f"{att_html}"
+        f"</div>"
+    )
+
+
 def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_success=True, img_base64=None):
-    """Render a Claude-style timeline tool execution node with IN and OUT blocks."""
-    dot_color = "#22c55e" if is_success else "#ef4444"
-    status_border = "#2e3440" if is_success else "#7f1d1d"
+    """Render a sleek, timeline tool execution node with IN and OUT blocks."""
+    dot_color = "#10b981" if is_success else "#ef4444"
+    status_border = "#28283a" if is_success else "#7f1d1d"
+    out_bg = "#111118" if is_success else "#1c1418"
+    out_color = "#e2e8f0" if is_success else "#fca5a5"
 
     img_html = ""
     if img_base64:
         img_html = (
             f"<div style='margin-top: 6px; text-align: center;'>"
-            f"<img src='data:image/png;base64,{img_base64}' style='max-width: 96%; border: 1px solid #3b4252; border-radius: 4px; box-shadow: 0 2px 6px rgba(0,0,0,0.4);'><br>"
-            f"<span style='font-size: 10px; color: #94a3b8;'>🖼️ Map Visual Preview ({html.escape(name)})</span>"
+            f"<img src='data:image/png;base64,{img_base64}' style='max-width: 95%; border: 1px solid #334155; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.5);'><br>"
+            f"<span style='font-size: 10px; color: #64748b;'>🗺️ Canvas Preview ({html.escape(name)})</span>"
             f"</div>"
         )
 
     in_block = ""
     if in_str:
         in_block = (
-            f"<table style='margin-top: 3px; font-family: monospace; font-size: 11px; width: 100%; border-collapse: collapse;'>"
-            f"<tr>"
-            f"<td style='width: 32px; vertical-align: top; color: #64748b; font-weight: bold; font-size: 10px; padding-top: 2px;'>IN</td>"
-            f"<td style='color: #cbd5e1; background-color: #22222e; padding: 2px 8px; border-radius: 3px;'>{html.escape(in_str)}</td>"
-            f"</tr>"
-            f"</table>"
+            f"<div style='margin-top: 3px; font-family: monospace; font-size: 11px; background-color: #171822; "
+            f"padding: 3px 8px; border-radius: 3px; color: #cbd5e1; word-break: break-all;'>"
+            f"<span style='color: #64748b; font-weight: bold; font-size: 10px; margin-right: 6px;'>IN</span>"
+            f"{html.escape(in_str)}"
+            f"</div>"
         )
 
     out_block = ""
     if out_str:
-        out_bg = "#121218" if is_success else "#1c1418"
-        out_color = "#e2e8f0" if is_success else "#fca5a5"
         out_block = (
-            f"<table style='margin-top: 3px; font-family: monospace; font-size: 11px; width: 100%; border-collapse: collapse;'>"
-            f"<tr>"
-            f"<td style='width: 32px; vertical-align: top; color: #64748b; font-weight: bold; font-size: 10px; padding-top: 3px;'>OUT</td>"
-            f"<td>"
-            f"<div style='color: {out_color}; background-color: {out_bg}; border: 1px solid {status_border}; padding: 4px 8px; border-radius: 4px; word-break: break-all;'>"
+            f"<div style='margin-top: 3px; font-family: monospace; font-size: 11px; background-color: {out_bg}; "
+            f"border: 1px solid {status_border}; padding: 4px 8px; border-radius: 3px; color: {out_color}; word-break: break-all;'>"
+            f"<span style='color: #64748b; font-weight: bold; font-size: 10px; margin-right: 6px;'>OUT</span>"
             f"{html.escape(out_str)}"
             f"</div>"
-            f"</td>"
-            f"</tr>"
-            f"</table>"
         )
 
-    arg_display = f"<span style='color: #94a3b8; font-size: 11px; margin-left: 6px;'>{html.escape(primary_arg)}</span>" if primary_arg else ""
+    prim_badge = f"<span style='background-color: #1e1e2d; color: #93c5fd; padding: 1px 5px; border-radius: 3px; font-size: 10px; font-family: monospace; margin-left: 6px;'>{html.escape(primary_arg)}</span>" if primary_arg else ""
 
     return (
-        f"<div style='margin: 6px 0 6px 12px; border-left: 2px solid #374151; padding: 0 0 4px 14px;'>"
-        f"<div style='margin-left: -21px; margin-bottom: 3px; line-height: 16px;'>"
-        f"<span style='color: {dot_color}; font-size: 13px; margin-right: 6px;'>●</span>"
-        f"<b style='color: #f1f5f9; font-size: 12px;'>{html.escape(category)} [{html.escape(name)}]</b>"
-        f"{arg_display}"
+        f"<div style='margin: 4px 0 4px 10px; border-left: 2px solid #334155; padding: 0 0 4px 12px;'>"
+        f"<div style='margin-left: -19px; line-height: 16px; margin-bottom: 2px;'>"
+        f"<span style='color: {dot_color}; font-size: 12px; margin-right: 4px;'>●</span>"
+        f"<span style='background-color: #1e293b; color: #38bdf8; font-size: 10px; font-weight: bold; padding: 1px 5px; border-radius: 3px;'>{html.escape(category)}</span>"
+        f"<b style='color: #f1f5f9; font-size: 11px; margin-left: 4px;'>{html.escape(name)}</b>"
+        f"{prim_badge}"
         f"</div>"
         f"{in_block}"
         f"{out_block}"
@@ -234,15 +387,15 @@ def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_succe
 
 
 def render_thinking_node_html(text=""):
-    """Render a Claude-style Thinking timeline node."""
+    """Render a sleek Thinking timeline node."""
     preview_html = ""
     if text.strip():
-        preview_html = f"<div style='color: #71717a; font-style: italic; font-size: 11px; margin-top: 2px; padding: 2px 4px;'>{html.escape(text.strip())}</div>"
+        preview_html = f"<div style='color: #94a3b8; font-style: italic; font-size: 11px; margin-top: 2px; padding: 2px 4px;'>{html.escape(text.strip())}</div>"
     return (
-        f"<div style='margin: 6px 0 6px 12px; border-left: 2px solid #374151; padding: 0 0 4px 14px;'>"
-        f"<div style='margin-left: -21px; line-height: 16px;'>"
-        f"<span style='color: #94a3b8; font-size: 13px; margin-right: 6px;'>●</span>"
-        f"<span style='color: #94a3b8; font-size: 12px; font-weight: 500;'>Thinking</span>"
+        f"<div style='margin: 4px 0 4px 10px; border-left: 2px solid #6366f1; padding: 0 0 2px 12px;'>"
+        f"<div style='margin-left: -19px; line-height: 16px;'>"
+        f"<span style='color: #818cf8; font-size: 12px; margin-right: 4px;'>✦</span>"
+        f"<span style='color: #a5b4fc; font-size: 11px; font-weight: 600;'>Thinking</span>"
         f"</div>"
         f"{preview_html}"
         f"</div>"
@@ -284,31 +437,8 @@ class AgentDock(QDockWidget):
         self.indicator_timer.setInterval(2200)
         self.indicator_timer.timeout.connect(self._pulse_indicator)
 
-        w = QWidget()
-        lay = QVBoxLayout(w)
-
-        # Row 0: Session Management & Project Chat History
-        row0 = QHBoxLayout()
-        self.session_combo = QComboBox()
-        self.session_combo.setToolTip("Active conversation session bound to this QGIS project")
-        self.session_combo.currentIndexChanged.connect(self._on_session_combo_changed)
-
-        btn_new_sess = QPushButton("➕ New")
-        btn_new_sess.setToolTip("Start a new conversation session for this project")
-        btn_new_sess.clicked.connect(self._create_new_session)
-
-        btn_manage_sess = QPushButton("Sessions...")
-        btn_manage_sess.setToolTip("Open Session Manager (rename, branch, export, delete)")
-        btn_manage_sess.clicked.connect(self._open_session_manager)
-
-        row0.addWidget(QLabel("Session:"))
-        row0.addWidget(self.session_combo, 1)
-        row0.addWidget(btn_new_sess)
-        row0.addWidget(btn_manage_sess)
-        lay.addLayout(row0)
-
-        # Row 1: CLI Selection & MCP Registration
-        row1 = QHBoxLayout()
+        # Internal configuration storage
+        self.outdir = QLineEdit(s.value(SKEY + "outdir", os.path.expanduser("~/qgis-ai-maps")))
         self.cli = QComboBox()
         av = available()
         for name in ADAPTERS:
@@ -318,17 +448,105 @@ class AgentDock(QDockWidget):
         self.cli.setCurrentIndex(max(0, idx))
         self.cli.currentIndexChanged.connect(self._on_cli_changed)
 
-        reg = QPushButton("Register MCP")
-        reg.setToolTip("Register QGIS server with this CLI MCP configuration (run once)")
-        reg.clicked.connect(self._register)
+        self.skill_mode = QComboBox()
+        self.skill_mode.addItem("Skills: Auto (Smart Select)", "auto")
+        self.skill_mode.addItem("Skills: Manual (Pinned Only)", "manual")
+        self.skill_mode.addItem("Skills: Off (Disabled)", "off")
+        saved_mode = s.value(SKEY + "skill_mode", "auto")
+        self.skill_mode.setCurrentIndex(max(0, self.skill_mode.findData(saved_mode)))
+        self.skill_mode.currentIndexChanged.connect(self._on_skill_mode_changed)
 
-        row1.addWidget(QLabel("CLI:"))
-        row1.addWidget(self.cli, 1)
-        row1.addWidget(reg)
-        lay.addLayout(row1)
+        # Safety & Context Actions (housed in Settings menu)
+        self.auto = QAction("Auto-approve Tool Calls", self)
+        self.auto.setCheckable(True)
+        self.auto.setChecked(s.value(SKEY + "auto", True, type=bool))
+        self.auto.toggled.connect(lambda v: s.setValue(SKEY + "auto", v))
 
-        # Row 2: Model & Reasoning Effort
-        row2 = QHBoxLayout()
+        self.pyexec = QAction("Allow exec_pyqgis (Arbitrary Code)", self)
+        self.pyexec.setCheckable(True)
+        self.pyexec.setChecked(s.value(SKEY + "pyexec", False, type=bool))
+        self.pyexec.toggled.connect(lambda v: (tools.ALLOW_PYTHON.__setitem__("value", v), s.setValue(SKEY + "pyexec", v)))
+        tools.ALLOW_PYTHON["value"] = self.pyexec.isChecked()
+
+        self.cont = QAction("Continue Previous Session Context", self)
+        self.cont.setCheckable(True)
+        self.cont.setChecked(s.value(SKEY + "cont", True, type=bool))
+        self.cont.toggled.connect(lambda v: s.setValue(SKEY + "cont", v))
+
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setSpacing(6)
+        lay.setContentsMargins(6, 6, 6, 6)
+
+        # Row 0: Session Selector & Settings Menu (Replaces bulky button rows)
+        row0 = QHBoxLayout()
+        row0.setSpacing(6)
+
+        lbl_sess = QLabel("Session:")
+        lbl_sess.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600;")
+        self.session_combo = QComboBox()
+        self.session_combo.setToolTip("Active conversation session bound to this QGIS project")
+        self.session_combo.currentIndexChanged.connect(self._on_session_combo_changed)
+
+        btn_new_sess = QPushButton("➕")
+        btn_new_sess.setToolTip("Start a new conversation session for this project")
+        btn_new_sess.setFixedWidth(28)
+        btn_new_sess.setStyleSheet("""
+            QPushButton {
+                background-color: #232533;
+                color: #38bdf8;
+                border: 1px solid #36394d;
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 12px;
+                padding: 3px 0;
+            }
+            QPushButton:hover {
+                background-color: #2e3245;
+                color: #7dd3fc;
+            }
+        """)
+        btn_new_sess.clicked.connect(self._create_new_session)
+
+        # Settings & Tools Dropdown Menu (Consolidates 7 buttons & 3 checkboxes into 1 neat popup!)
+        self.settings_btn = QToolButton()
+        self.settings_btn.setText("⚙ Settings")
+        self.settings_btn.setToolTip("Tools, skills, engine configuration, and safety settings")
+        self.settings_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.settings_btn.setStyleSheet("""
+            QToolButton {
+                background-color: #232533;
+                color: #cbd5e1;
+                border: 1px solid #36394d;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QToolButton:hover {
+                background-color: #2e3245;
+                color: #ffffff;
+            }
+            QToolButton::menu-indicator {
+                image: none;
+                width: 0px;
+            }
+        """)
+        self.settings_menu = QMenu(self.settings_btn)
+        self.settings_btn.setMenu(self.settings_menu)
+
+        row0.addWidget(lbl_sess)
+        row0.addWidget(self.session_combo, 1)
+        row0.addWidget(btn_new_sess)
+        row0.addWidget(self.settings_btn)
+        lay.addLayout(row0)
+
+        # Row 1: Model & Reasoning Effort
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
+
+        lbl_model = QLabel("Model:")
+        lbl_model.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600;")
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)
         self.model_combo.setToolTip("Select model or enter custom model ID")
@@ -344,63 +562,10 @@ class AgentDock(QDockWidget):
         self.effort_combo.currentIndexChanged.connect(self._save_model_settings)
         self.model_combo.currentIndexChanged.connect(self._save_model_settings)
 
-        row2.addWidget(QLabel("Model:"))
-        row2.addWidget(self.model_combo, 1)
-        row2.addWidget(self.effort_combo)
-        lay.addLayout(row2)
-
-        # Row 3: Skills & Quick Tools Access
-        row3 = QHBoxLayout()
-        self.skill_mode = QComboBox()
-        self.skill_mode.addItem("Skills: Auto (Smart Select)", "auto")
-        self.skill_mode.addItem("Skills: Manual (Pinned Only)", "manual")
-        self.skill_mode.addItem("Skills: Off (Disabled)", "off")
-        saved_mode = s.value(SKEY + "skill_mode", "auto")
-        self.skill_mode.setCurrentIndex(max(0, self.skill_mode.findData(saved_mode)))
-        self.skill_mode.currentIndexChanged.connect(self._on_skill_mode_changed)
-
-        btn_skills = QPushButton("Skills...")
-        btn_skills.setToolTip("Open Skills Manager to inspect, pin, or install new skills")
-        btn_skills.clicked.connect(self._open_skills_dialog)
-
-        btn_toolbox = QPushButton("Toolbox...")
-        btn_toolbox.setToolTip("Open QGIS Processing Toolbox panel")
-        btn_toolbox.clicked.connect(self._open_toolbox)
-
-        btn_prompt_inspect = QPushButton("Prompt...")
-        btn_prompt_inspect.setToolTip("View or edit System Prompt & Custom Instructions")
-        btn_prompt_inspect.clicked.connect(self._inspect_prompt)
-
-        row3.addWidget(self.skill_mode, 1)
-        row3.addWidget(btn_skills)
-        row3.addWidget(btn_toolbox)
-        row3.addWidget(btn_prompt_inspect)
-        lay.addLayout(row3)
-
-        # Row 4: Output Folder
-        row4 = QHBoxLayout()
-        self.outdir = QLineEdit(s.value(SKEY + "outdir", os.path.expanduser("~/qgis-ai-maps")))
-        b = QPushButton("…")
-        b.clicked.connect(lambda: self.outdir.setText(QFileDialog.getExistingDirectory(self, "Output folder", self.outdir.text()) or self.outdir.text()))
-        row4.addWidget(QLabel("Output:"))
-        row4.addWidget(self.outdir, 1)
-        row4.addWidget(b)
-        lay.addLayout(row4)
-
-        # Row 5: Checkboxes Toggles
-        row5 = QHBoxLayout()
-        self.auto = QCheckBox("Auto-approve")
-        self.auto.setToolTip("Automatically approve tool calls without CLI confirmation prompts.")
-        self.auto.setChecked(s.value(SKEY + "auto", True, type=bool))
-        self.pyexec = QCheckBox("Allow exec_pyqgis")
-        self.pyexec.setChecked(s.value(SKEY + "pyexec", False, type=bool))
-        self.pyexec.toggled.connect(lambda v: tools.ALLOW_PYTHON.__setitem__("value", v))
-        tools.ALLOW_PYTHON["value"] = self.pyexec.isChecked()
-        self.cont = QCheckBox("Continue session")
-        self.cont.setToolTip("Continue previous AI CLI session context")
-        for c in (self.auto, self.pyexec, self.cont):
-            row5.addWidget(c)
-        lay.addLayout(row5)
+        row1.addWidget(lbl_model)
+        row1.addWidget(self.model_combo, 1)
+        row1.addWidget(self.effort_combo)
+        lay.addLayout(row1)
 
         # Chat log display (Claude Dark IDE Theme)
         self.log = QTextEdit()
@@ -408,11 +573,11 @@ class AgentDock(QDockWidget):
         self.log.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         self.log.setStyleSheet("""
             QTextEdit {
-                background-color: #17171e;
+                background-color: #12131a;
                 color: #e2e8f0;
-                border: 1px solid #282836;
+                border: 1px solid #232533;
                 border-radius: 6px;
-                padding: 8px;
+                padding: 10px;
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
                 font-size: 12px;
                 selection-background-color: #2563eb;
@@ -471,28 +636,64 @@ class AgentDock(QDockWidget):
         """)
         lay.addWidget(self.prompt)
 
-        # Action buttons
-        row6 = QHBoxLayout()
+        # Action buttons (Clean, minimal action bar)
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 4, 0, 0)
+        action_row.setSpacing(6)
+
         self.attach_btn = QPushButton("📎 Attach")
         self.attach_btn.setToolTip("Attach reference images, geodata, or style files")
+        self.attach_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1e1e2a;
+                color: #94a3b8;
+                border: 1px solid #333348;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #272738;
+                color: #e2e8f0;
+            }
+        """)
         self.attach_btn.clicked.connect(self._add_attachment)
-        self.run_btn = QPushButton("▶ Run")
-        self.run_btn.setStyleSheet("font-weight: bold; background-color: #2e7d32; color: white; padding: 6px;")
-        self.run_btn.clicked.connect(self._run)
-        self.stop_btn = QPushButton("■ Stop")
-        self.stop_btn.setEnabled(False)
-        self.stop_btn.clicked.connect(self.runner.stop)
-        clr = QPushButton("Clear")
-        clr.clicked.connect(self.log.clear)
-        row6.addWidget(self.attach_btn)
-        row6.addWidget(self.run_btn, 1)
-        row6.addWidget(self.stop_btn)
-        row6.addWidget(clr)
-        lay.addLayout(row6)
+
+        lbl_hint = QLabel("Ctrl+Enter to send")
+        lbl_hint.setStyleSheet("color: #475569; font-size: 10px; margin-left: 6px;")
+
+        self.action_btn = QPushButton("▶ Send")
+        self.action_btn.setToolTip("Execute map request (Ctrl+Enter)")
+        self.action_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #059669;
+                color: #ffffff;
+                font-weight: bold;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 20px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #10b981;
+            }
+        """)
+        self.action_btn.clicked.connect(self._on_action_btn_clicked)
+
+        # Backwards compatibility handles for runner callbacks
+        self.run_btn = self.action_btn
+        self.stop_btn = self.action_btn
+
+        action_row.addWidget(self.attach_btn)
+        action_row.addWidget(lbl_hint)
+        action_row.addStretch()
+        action_row.addWidget(self.action_btn)
+        lay.addLayout(action_row)
 
         self.setWidget(w)
         self.prompt.installEventFilter(self)
         self.custom_instructions = s.value(SKEY + "custom_instructions", "")
+        self._build_settings_menu()
         self._on_cli_changed()
         self._on_skill_mode_changed()
         self._on_sessions_changed()
@@ -582,6 +783,97 @@ class AgentDock(QDockWidget):
         dlg = SessionManagerDialog(self.session_manager, self)
         dlg.exec()
 
+    def _build_settings_menu(self):
+        self.settings_menu.clear()
+
+        # Tools & Managers
+        act_manage_sess = self.settings_menu.addAction("🗂️ Manage Sessions...")
+        act_manage_sess.triggered.connect(self._open_session_manager)
+
+        act_skills = self.settings_menu.addAction("🧩 Skills Manager...")
+        act_skills.triggered.connect(self._open_skills_dialog)
+
+        act_toolbox = self.settings_menu.addAction("🛠️ QGIS Processing Toolbox")
+        act_toolbox.triggered.connect(self._open_toolbox)
+
+        act_prompt = self.settings_menu.addAction("📝 System Prompt & Custom Instructions...")
+        act_prompt.triggered.connect(self._inspect_prompt)
+
+        self.settings_menu.addSeparator()
+
+        # Workspace & Engine Submenus
+        m_cli = self.settings_menu.addMenu("⚙️ CLI Engine")
+        av = available()
+        curr_cli = self.cli.currentData()
+        for name in ADAPTERS:
+            label = name + ("" if av[name] else "  (not found)")
+            act = m_cli.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(name == curr_cli)
+            act.setEnabled(av[name])
+            act.triggered.connect(lambda _, n=name: self._set_cli(n))
+
+        m_skills_mode = self.settings_menu.addMenu("🧠 Skills Selection Mode")
+        modes = [
+            ("Auto (Smart Select based on prompt)", "auto"),
+            ("Manual (Pinned skills only)", "manual"),
+            ("Off (Skills disabled)", "off"),
+        ]
+        curr_mode = self.skill_mode.currentData()
+        for label, mode_id in modes:
+            act = m_skills_mode.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(mode_id == curr_mode)
+            act.triggered.connect(lambda _, m=mode_id: self._set_skill_mode(m))
+
+        # Output Folder action
+        out_path = self.outdir.text().strip() or os.path.expanduser("~/qgis-ai-maps")
+        short_out = out_path if len(out_path) <= 30 else "…" + out_path[-27:]
+        act_outdir = self.settings_menu.addAction(f"📁 Output Folder ({short_out})")
+        act_outdir.setToolTip(f"Change output folder (Current: {out_path})")
+        act_outdir.triggered.connect(self._choose_outdir)
+
+        act_reg = self.settings_menu.addAction("⚡ Register MCP with CLI")
+        act_reg.triggered.connect(self._register)
+
+        self.settings_menu.addSeparator()
+
+        # Checkable Execution Preferences
+        self.settings_menu.addAction(self.auto)
+        self.settings_menu.addAction(self.pyexec)
+        self.settings_menu.addAction(self.cont)
+
+        self.settings_menu.addSeparator()
+
+        act_clr = self.settings_menu.addAction("🗑️ Clear Chat History")
+        act_clr.triggered.connect(self.log.clear)
+
+    def _set_cli(self, name):
+        idx = self.cli.findData(name)
+        if idx >= 0:
+            self.cli.setCurrentIndex(idx)
+        self._build_settings_menu()
+
+    def _set_skill_mode(self, mode_id):
+        idx = self.skill_mode.findData(mode_id)
+        if idx >= 0:
+            self.skill_mode.setCurrentIndex(idx)
+        self._build_settings_menu()
+
+    def _choose_outdir(self):
+        cur = self.outdir.text().strip() or os.path.expanduser("~/qgis-ai-maps")
+        d = QFileDialog.getExistingDirectory(self, "Select Output Folder", cur)
+        if d:
+            self.outdir.setText(d)
+            QSettings().setValue(SKEY + "outdir", d)
+            self._build_settings_menu()
+
+    def _on_action_btn_clicked(self):
+        if self.runner.running():
+            self.runner.stop()
+        else:
+            self._run()
+
     def _render_active_session_log(self):
         self.log.clear()
         sess = self.session_manager.get_active_session()
@@ -590,26 +882,11 @@ class AgentDock(QDockWidget):
                 self._append_html(m.html)
             elif m.text:
                 if m.role == "user":
-                    now_str = m.timestamp
-                    user_html = (
-                        f"<div style='margin: 8px 0 6px 0; padding: 6px 12px; background-color: #1e2433; "
-                        f"border-left: 3px solid #3b82f6; border-radius: 4px;'>"
-                        f"<div style='font-size: 11px; font-weight: bold; color: #60a5fa; margin-bottom: 3px;'>"
-                        f"🧑 YOU <span style='font-weight: normal; color: #94a3b8;'>({now_str})</span></div>"
-                        f"<div style='font-size: 12px; color: #f1f5f9; white-space: pre-wrap;'>{html.escape(m.text)}</div>"
-                        f"</div>"
-                    )
-                    self._append_html(user_html)
+                    self._append_html(render_user_message_html(m.text, timestamp=m.timestamp))
                 elif m.role == "assistant":
-                    self._append_html(
-                        f"<div style='margin-top: 10px; margin-bottom: 2px; font-weight: bold; color: #10b981; font-size: 11px;'>"
-                        f"🤖 AI AGENT:</div>"
-                    )
-                    c = self.log.textCursor()
-                    c.movePosition(QTextCursor.MoveOperation.End)
-                    self.log.setTextCursor(c)
-                    c.insertText(m.text)
-                    self.log.ensureCursorVisible()
+                    self._append_html(render_assistant_message_html(m.text, model_info=m.model_info, timestamp=m.timestamp))
+                elif m.role == "tool":
+                    self._append_html(f"<div style='margin: 4px 0 4px 10px; color: #94a3b8; font-size: 11px;'>⚙ {html.escape(m.text)}</div>")
         self.first_turn = (sess.turns_count == 0)
         self.cont.setChecked(sess.turns_count > 0)
 
@@ -625,7 +902,7 @@ class AgentDock(QDockWidget):
     def _open_toolbox(self):
         res = tools.open_processing_toolbox()
         self._append_html(
-            f"<div style='margin: 4px 0; padding: 4px 8px; background-color: #e8f5e9; border-radius: 3px; font-size: 11px; color: #1b5e20;'>"
+            f"<div style='margin: 4px 0; padding: 4px 8px; background-color: #1e293b; border-radius: 3px; font-size: 11px; color: #38bdf8;'>"
             f"🛠️ <b>Processing Toolbox:</b> Panel opened in QGIS.</div>"
         )
 
@@ -693,8 +970,10 @@ class AgentDock(QDockWidget):
             header_str = " | ".join(meta)
             self._current_model_header = header_str
             self._append_html(
-                f"<div style='margin-top: 10px; margin-bottom: 2px; font-weight: bold; color: #10b981; font-size: 11px;'>"
-                f"🤖 AI AGENT ({html.escape(header_str)}):</div>"
+                f"<div style='margin-top: 8px; margin-bottom: 2px;'>"
+                f"<span style='background-color: #059669; color: #ecfdf5; font-size: 10px; font-weight: bold; padding: 1px 6px; border-radius: 3px;'>AGENT</span>"
+                f"<span style='color: #64748b; font-size: 10px; margin-left: 6px;'>({html.escape(header_str)})</span>"
+                f"</div>"
             )
             self.is_agent_streaming = True
 
@@ -715,20 +994,25 @@ class AgentDock(QDockWidget):
             "primary": prim,
             "in_str": in_str,
         }
-        arg_disp = f"<span style='color: #94a3b8; font-size: 11px; margin-left: 6px;'>{html.escape(prim)}</span>" if prim else ""
+        arg_disp = f"<span style='background-color: #1e1e2d; color: #93c5fd; padding: 1px 5px; border-radius: 3px; font-size: 10px; font-family: monospace; margin-left: 6px;'>{html.escape(prim)}</span>" if prim else ""
+        in_block = ""
+        if in_str:
+            in_block = (
+                f"<div style='margin-top: 3px; font-family: monospace; font-size: 11px; background-color: #171822; "
+                f"padding: 3px 8px; border-radius: 3px; color: #cbd5e1; word-break: break-all;'>"
+                f"<span style='color: #64748b; font-weight: bold; font-size: 10px; margin-right: 6px;'>IN</span>"
+                f"{html.escape(in_str)}"
+                f"</div>"
+            )
         card = (
-            f"<div style='margin: 6px 0 2px 12px; border-left: 2px solid #374151; padding: 0 0 2px 14px;'>"
-            f"<div style='margin-left: -21px; margin-bottom: 3px; line-height: 16px;'>"
-            f"<span style='color: #22c55e; font-size: 13px; margin-right: 6px;'>●</span>"
-            f"<b style='color: #f1f5f9; font-size: 12px;'>{html.escape(cat)} [{html.escape(name)}]</b>"
+            f"<div style='margin: 4px 0 2px 10px; border-left: 2px solid #3b82f6; padding: 0 0 2px 12px;'>"
+            f"<div style='margin-left: -19px; line-height: 16px;'>"
+            f"<span style='color: #3b82f6; font-size: 12px; margin-right: 4px;'>⚙</span>"
+            f"<span style='background-color: #1e293b; color: #38bdf8; font-size: 10px; font-weight: bold; padding: 1px 5px; border-radius: 3px;'>{html.escape(cat)}</span>"
+            f"<b style='color: #f1f5f9; font-size: 11px; margin-left: 4px;'>{html.escape(name)}</b>"
             f"{arg_disp}"
             f"</div>"
-            f"<table style='margin-top: 3px; font-family: monospace; font-size: 11px; width: 100%; border-collapse: collapse;'>"
-            f"<tr>"
-            f"<td style='width: 32px; vertical-align: top; color: #64748b; font-weight: bold; font-size: 10px; padding-top: 2px;'>IN</td>"
-            f"<td style='color: #cbd5e1; background-color: #22222e; padding: 2px 8px; border-radius: 3px;'>{html.escape(in_str)}</td>"
-            f"</tr>"
-            f"</table>"
+            f"{in_block}"
             f"</div>"
         )
         self._append_html(card)
@@ -742,27 +1026,21 @@ class AgentDock(QDockWidget):
             mime = result.get("mime", "image/png")
             img_html = (
                 f"<div style='margin-top: 6px; text-align: center;'>"
-                f"<img src='data:{mime};base64,{img_b64}' style='max-width: 96%; border: 1px solid #3b4252; border-radius: 4px; box-shadow: 0 2px 6px rgba(0,0,0,0.4);'><br>"
-                f"<span style='font-size: 10px; color: #94a3b8;'>🖼️ Map Visual Preview ({html.escape(name)})</span>"
+                f"<img src='data:{mime};base64,{img_b64}' style='max-width: 95%; border: 1px solid #334155; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.5);'><br>"
+                f"<span style='font-size: 10px; color: #64748b;'>🗺️ Canvas Preview ({html.escape(name)})</span>"
                 f"</div>"
             )
 
-        card = (
-            f"<div style='margin: 0 0 6px 12px; border-left: 2px solid #374151; padding: 0 0 4px 14px;'>"
-            f"<table style='margin-top: 2px; font-family: monospace; font-size: 11px; width: 100%; border-collapse: collapse;'>"
-            f"<tr>"
-            f"<td style='width: 32px; vertical-align: top; color: #64748b; font-weight: bold; font-size: 10px; padding-top: 3px;'>OUT</td>"
-            f"<td>"
-            f"<div style='color: #e2e8f0; background-color: #121218; border: 1px solid #282836; padding: 4px 8px; border-radius: 4px; word-break: break-all;'>"
+        out_html = (
+            f"<div style='margin: 0 0 4px 10px; border-left: 2px solid #10b981; padding: 0 0 4px 12px;'>"
+            f"<div style='font-family: monospace; font-size: 11px; background-color: #111118; border: 1px solid #28283a; padding: 4px 8px; border-radius: 3px; color: #cbd5e1; word-break: break-all;'>"
+            f"<span style='color: #10b981; font-weight: bold; font-size: 10px; margin-right: 6px;'>✓ OUT</span>"
             f"{html.escape(clean_summary)}"
             f"</div>"
-            f"</td>"
-            f"</tr>"
-            f"</table>"
             f"{img_html}"
             f"</div>"
         )
-        self._append_html(card)
+        self._append_html(out_html)
         self.iface.mapCanvas().refresh()
 
         # Persist unified Claude timeline node into active project session
@@ -782,21 +1060,15 @@ class AgentDock(QDockWidget):
         )
 
     def _on_tool_failed(self, name, err_msg):
-        card = (
-            f"<div style='margin: 0 0 6px 12px; border-left: 2px solid #374151; padding: 0 0 4px 14px;'>"
-            f"<table style='margin-top: 2px; font-family: monospace; font-size: 11px; width: 100%; border-collapse: collapse;'>"
-            f"<tr>"
-            f"<td style='width: 32px; vertical-align: top; color: #ef4444; font-weight: bold; font-size: 10px; padding-top: 3px;'>OUT</td>"
-            f"<td>"
-            f"<div style='color: #fca5a5; background-color: #1c1418; border: 1px solid #7f1d1d; padding: 4px 8px; border-radius: 4px; word-break: break-all;'>"
+        out_html = (
+            f"<div style='margin: 0 0 4px 10px; border-left: 2px solid #ef4444; padding: 0 0 4px 12px;'>"
+            f"<div style='font-family: monospace; font-size: 11px; background-color: #1c1418; border: 1px solid #7f1d1d; padding: 4px 8px; border-radius: 3px; color: #fca5a5; word-break: break-all;'>"
+            f"<span style='color: #ef4444; font-weight: bold; font-size: 10px; margin-right: 6px;'>✗ ERR</span>"
             f"{html.escape(err_msg)}"
             f"</div>"
-            f"</td>"
-            f"</tr>"
-            f"</table>"
             f"</div>"
         )
-        self._append_html(card)
+        self._append_html(out_html)
 
         cat = self._last_tool_call.get("category", "QGIS")
         prim = self._last_tool_call.get("primary", "")
@@ -859,9 +1131,36 @@ class AgentDock(QDockWidget):
 
         if not self.attachments:
             self.attach_bar.hide()
+            self.attach_btn.setText("📎 Attach")
+            self.attach_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #1e1e2a;
+                    color: #94a3b8;
+                    border: 1px solid #333348;
+                    border-radius: 4px;
+                    padding: 6px 12px;
+                    font-size: 11px;
+                }
+                QPushButton:hover {
+                    background-color: #272738;
+                    color: #e2e8f0;
+                }
+            """)
             return
 
         self.attach_bar.show()
+        self.attach_btn.setText(f"📎 Attach ({len(self.attachments)})")
+        self.attach_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1e293b;
+                color: #38bdf8;
+                border: 1px solid #0284c7;
+                border-radius: 4px;
+                padding: 6px 12px;
+                font-size: 11px;
+                font-weight: bold;
+            }
+        """)
         for idx, path in enumerate(self.attachments):
             base = os.path.basename(path)
             pill = QFrame()
@@ -1002,45 +1301,54 @@ class AgentDock(QDockWidget):
         s.setValue(f"{SKEY}model_{self.cli.currentData()}", selected_model or "")
         s.setValue(SKEY + "effort", selected_effort)
 
-        # Render User Message Card (Claude Dark Theme)
+        # Render User Message Card (Clean Modern Dark Theme)
         now_str = time.strftime("%H:%M:%S")
-        user_html = (
-            f"<div style='margin: 8px 0 6px 0; padding: 6px 12px; background-color: #1e2433; "
-            f"border-left: 3px solid #3b82f6; border-radius: 4px;'>"
-            f"<div style='font-size: 11px; font-weight: bold; color: #60a5fa; margin-bottom: 3px;'>"
-            f"🧑 YOU <span style='font-weight: normal; color: #94a3b8;'>({now_str})</span></div>"
-            f"<div style='font-size: 12px; color: #f1f5f9; white-space: pre-wrap;'>{html.escape(user)}</div>"
-            f"</div>"
-        )
-        self._append_html(user_html)
-        active_sess.add_user_message(user, user_html)
+        user_card_html = render_user_message_html(user, attachments=attach_list, timestamp=now_str)
 
         # Render Skills & Model Info Badge
         loaded_skills = [s.name for s in sel["pinned"] + sel["full"]]
         meta_badges = []
         if selected_model:
-            meta_badges.append(f"Model: <code>{html.escape(selected_model)}</code>")
+            meta_badges.append(f"<span style='color: #a5b4fc;'>Model:</span> <code>{html.escape(selected_model)}</code>")
         if selected_effort and selected_effort != "default":
-            meta_badges.append(f"Effort: <code>{html.escape(selected_effort)}</code>")
+            meta_badges.append(f"<span style='color: #c084fc;'>Effort:</span> <code>{html.escape(selected_effort)}</code>")
         if loaded_skills:
-            meta_badges.append(f"Skills: <b>{', '.join(html.escape(s) for s in loaded_skills)}</b>")
+            meta_badges.append(f"<span style='color: #67e8f9;'>Skills:</span> <b>{', '.join(html.escape(s) for s in loaded_skills)}</b>")
 
+        badge_html = ""
         if meta_badges:
             badge_html = (
-                f"<div style='margin: 2px 0 6px 0; padding: 3px 8px; background-color: #261f36; "
-                f"border-left: 3px solid #a855f7; border-radius: 3px; font-size: 11px; color: #d8b4fe;'>"
-                f"{' | '.join(meta_badges)}"
+                f"<div style='margin: 2px 0 6px 0; padding: 3px 8px; background-color: #1a1a26; "
+                f"border-left: 3px solid #8b5cf6; border-radius: 3px; font-size: 11px; color: #cbd5e1;'>"
+                f"{' &nbsp;|&nbsp; '.join(meta_badges)}"
                 f"</div>"
             )
-            self._append_html(badge_html)
+
+        full_user_html = user_card_html + badge_html
+        self._append_html(full_user_html)
+        active_sess.add_user_message(user, full_user_html)
 
         # If thinking / reasoning effort is active, emit initial Thinking timeline node
         if selected_effort and selected_effort != "default":
             self._append_html(render_thinking_node_html())
 
         self.prompt.clear()
-        self.run_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
+        self.action_btn.setText("■ Stop")
+        self.action_btn.setToolTip("Stop active AI execution")
+        self.action_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc2626;
+                color: #ffffff;
+                font-weight: bold;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 20px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #ef4444;
+            }
+        """)
         self.indicator_label.setText(f"{random.choice(self._running_words)}…")
         self.indicator_frame.show()
         self.indicator_timer.start()
@@ -1057,6 +1365,29 @@ class AgentDock(QDockWidget):
         self.indicator_frame.hide()
         elapsed = time.time() - self.start_time if self.start_time else 0
         status_color = "#10b981" if code == 0 else "#ef4444"
+        now_str = time.strftime("%H:%M:%S")
+
+        # Record assistant response and persist sessions
+        active_sess = self.session_manager.get_active_session()
+        raw_asst_text = self._current_assistant_text.strip()
+        if raw_asst_text:
+            card_html = render_assistant_message_html(
+                raw_asst_text,
+                model_info=self._current_model_header,
+                timestamp=now_str
+            )
+            active_sess.add_assistant_message(
+                text=raw_asst_text,
+                html_card=card_html,
+                model_info=self._current_model_header
+            )
+
+        self.session_manager.save_project_sessions()
+        self._populate_sessions_dropdown()
+
+        # Re-render active session log with clean markdown and sleek cards
+        self._render_active_session_log()
+
         done_html = (
             f"<div style='margin: 8px 0; padding: 4px 10px; background-color: #171c24; border: 1px solid #282f3d; "
             f"border-radius: 4px; font-size: 11px; color: {status_color}; text-align: right;'>"
@@ -1065,22 +1396,25 @@ class AgentDock(QDockWidget):
         )
         self._append_html(done_html)
 
-        # Record assistant response and persist sessions
-        active_sess = self.session_manager.get_active_session()
-        if self._current_assistant_text.strip():
-            active_sess.add_assistant_message(
-                text=self._current_assistant_text.strip(),
-                html_card="",
-                model_info=self._current_model_header
-            )
-        self.session_manager.save_project_sessions()
-        self._populate_sessions_dropdown()
-
         self.is_agent_streaming = False
         self.first_turn = False
         self.cont.setChecked(True)
-        self.run_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
+        self.action_btn.setText("▶ Send")
+        self.action_btn.setToolTip("Execute map request (Ctrl+Enter)")
+        self.action_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #059669;
+                color: #ffffff;
+                font-weight: bold;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 20px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #10b981;
+            }
+        """)
         self.iface.mapCanvas().refreshAllLayers()
 
         # Check if there are queued messages to execute next
