@@ -35,8 +35,11 @@ class AIAgentPlugin:
             self.dock.shutdown()
             self.iface.removeDockWidget(self.dock)
             self.dock.deleteLater()
+            self.dock = None
         if self.action:
             self.iface.removeToolBarIcon(self.action)
             self.iface.removePluginMenu("AI Map Agent", self.action)
+            self.action = None
         if self.server:
             self.server.stop()
+            self.server = None

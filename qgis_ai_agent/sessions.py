@@ -211,6 +211,33 @@ class SessionManager:
             pass
         self.load_project_sessions(trigger_callback=trigger_callback)
 
+    def _trigger_on_change(self):
+        if callable(self.on_change):
+            try:
+                self.on_change()
+            except RuntimeError as e:
+                if "deleted" in str(e).lower():
+                    self.disconnect_signals()
+            except Exception:
+                pass
+
+    def disconnect_signals(self):
+        """Disconnect project lifecycle signals when plugin or dock is unloaded."""
+        p = QgsProject.instance()
+        try:
+            p.readProject.disconnect(self.on_project_loaded)
+        except Exception:
+            pass
+        try:
+            p.projectSaved.disconnect(self.on_project_saved)
+        except Exception:
+            pass
+        try:
+            p.cleared.disconnect(self.on_project_cleared)
+        except Exception:
+            pass
+        self.on_change = None
+
     def get_project_id(self):
         p = QgsProject.instance()
         pid, ok = p.readEntry("qgis_ai_agent", "project_id")
@@ -278,8 +305,8 @@ class SessionManager:
             latest = max(self.sessions.values(), key=lambda s: s.updated_at)
             self.active_session_id = latest.id
 
-        if trigger_callback and callable(self.on_change):
-            self.on_change()
+        if trigger_callback:
+            self._trigger_on_change()
 
     def save_project_sessions(self):
         pid = self.get_project_id()
@@ -325,16 +352,14 @@ class SessionManager:
         self.sessions[new_session.id] = new_session
         self.active_session_id = new_session.id
         self.save_project_sessions()
-        if callable(self.on_change):
-            self.on_change()
+        self._trigger_on_change()
         return new_session
 
     def switch_session(self, session_id):
         if session_id in self.sessions:
             self.active_session_id = session_id
             self.save_project_sessions()
-            if callable(self.on_change):
-                self.on_change()
+            self._trigger_on_change()
             return self.sessions[session_id]
         return None
 
@@ -343,8 +368,7 @@ class SessionManager:
             self.sessions[session_id].name = new_name.strip()
             self.sessions[session_id].updated_at = time.strftime("%Y-%m-%d %H:%M:%S")
             self.save_project_sessions()
-            if callable(self.on_change):
-                self.on_change()
+            self._trigger_on_change()
             return True
         return False
 
@@ -360,8 +384,7 @@ class SessionManager:
             self.sessions[new_s.id] = new_s
             self.active_session_id = new_s.id
             self.save_project_sessions()
-            if callable(self.on_change):
-                self.on_change()
+            self._trigger_on_change()
             return new_s
         return None
 
@@ -377,8 +400,7 @@ class SessionManager:
                 latest = max(self.sessions.values(), key=lambda s: s.updated_at)
                 self.active_session_id = latest.id
             self.save_project_sessions()
-            if callable(self.on_change):
-                self.on_change()
+            self._trigger_on_change()
             return True
         return False
 

@@ -743,10 +743,22 @@ class AgentDock(QDockWidget):
         s.setValue(SKEY + "effort", e_val)
 
     def _on_sessions_changed(self):
+        try:
+            from qgis.PyQt import sip
+            if sip.isdeleted(self) or not hasattr(self, "session_combo") or sip.isdeleted(self.session_combo):
+                return
+        except Exception:
+            pass
         self._populate_sessions_dropdown()
         self._render_active_session_log()
 
     def _populate_sessions_dropdown(self):
+        try:
+            from qgis.PyQt import sip
+            if sip.isdeleted(self) or not hasattr(self, "session_combo") or sip.isdeleted(self.session_combo):
+                return
+        except Exception:
+            pass
         self.session_combo.blockSignals(True)
         self.session_combo.clear()
         active_id = self.session_manager.active_session_id
@@ -875,6 +887,12 @@ class AgentDock(QDockWidget):
             self._run()
 
     def _render_active_session_log(self):
+        try:
+            from qgis.PyQt import sip
+            if sip.isdeleted(self) or not hasattr(self, "log") or sip.isdeleted(self.log):
+                return
+        except Exception:
+            pass
         self.log.clear()
         sess = self.session_manager.get_active_session()
         for m in sess.messages:
@@ -1423,3 +1441,10 @@ class AgentDock(QDockWidget):
 
     def shutdown(self):
         self.runner.stop()
+        if hasattr(self, "session_manager") and self.session_manager:
+            self.session_manager.disconnect_signals()
+
+    def closeEvent(self, event):
+        if hasattr(self, "session_manager") and self.session_manager:
+            self.session_manager.disconnect_signals()
+        super().closeEvent(event)
