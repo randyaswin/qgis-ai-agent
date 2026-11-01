@@ -30,12 +30,14 @@ def skills_block(sel, catalog_names):
     return "\n\n".join(parts)
 
 
-def build(system, context, skills_text, user, continuing):
+def build(system, context, skills_text, user, continuing, session_history=None):
     segs = []
     if not continuing and system:
         segs.append(system)
     if context:
         segs.append("# Current QGIS state (live, injected automatically)\n" + context)
+    if session_history:
+        segs.append(session_history)
     if skills_text:
         segs.append(skills_text)
     segs.append("# User request\n" + user)

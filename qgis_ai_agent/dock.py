@@ -17,6 +17,8 @@ from . import tools
 from .runner import ADAPTERS, CliRunner, available
 from .skills import REGISTRY
 from .skills_dialog import SkillsDialog
+from .sessions import SessionManager
+from .session_dialog import SessionManagerDialog
 from . import prompts
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
@@ -107,7 +109,13 @@ class AgentDock(QDockWidget):
         self.first_turn = True
         self.start_time = 0
         self.is_agent_streaming = False
+        self._current_assistant_text = ""
+        self._current_model_header = ""
+        self._last_tool_call = {}
         s = QSettings()
+
+        # Session Manager bound to QGIS project
+        self.session_manager = SessionManager(on_change_callback=self._on_sessions_changed)
 
         # Connect runner and server signals
         self.runner.output.connect(self._on_cli_output)
@@ -118,6 +126,26 @@ class AgentDock(QDockWidget):
 
         w = QWidget()
         lay = QVBoxLayout(w)
+
+        # Row 0: Session Management & Project Chat History
+        row0 = QHBoxLayout()
+        self.session_combo = QComboBox()
+        self.session_combo.setToolTip("Active conversation session bound to this QGIS project")
+        self.session_combo.currentIndexChanged.connect(self._on_session_combo_changed)
+
+        btn_new_sess = QPushButton("➕ New")
+        btn_new_sess.setToolTip("Start a new conversation session for this project")
+        btn_new_sess.clicked.connect(self._create_new_session)
+
+        btn_manage_sess = QPushButton("Sessions...")
+        btn_manage_sess.setToolTip("Open Session Manager (rename, branch, export, delete)")
+        btn_manage_sess.clicked.connect(self._open_session_manager)
+
+        row0.addWidget(QLabel("Session:"))
+        row0.addWidget(self.session_combo, 1)
+        row0.addWidget(btn_new_sess)
+        row0.addWidget(btn_manage_sess)
+        lay.addLayout(row0)
 
         # Row 1: CLI Selection & MCP Registration
         row1 = QHBoxLayout()
@@ -246,6 +274,7 @@ class AgentDock(QDockWidget):
         self.custom_instructions = s.value(SKEY + "custom_instructions", "")
         self._on_cli_changed()
         self._on_skill_mode_changed()
+        self._on_sessions_changed()
 
     def eventFilter(self, obj, ev):
         if obj is self.prompt and ev.type() == ev.Type.KeyPress and ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) \
@@ -290,6 +319,78 @@ class AgentDock(QDockWidget):
         s = QSettings()
         s.setValue(f"{SKEY}model_{cli_name}", m_val)
         s.setValue(SKEY + "effort", e_val)
+
+    def _on_sessions_changed(self):
+        self._populate_sessions_dropdown()
+        self._render_active_session_log()
+
+    def _populate_sessions_dropdown(self):
+        self.session_combo.blockSignals(True)
+        self.session_combo.clear()
+        active_id = self.session_manager.active_session_id
+        sessions = sorted(self.session_manager.sessions.values(), key=lambda s: s.updated_at, reverse=True)
+        active_idx = 0
+        for idx, s in enumerate(sessions):
+            label = f"{s.name} ({s.turns_count} turns)"
+            self.session_combo.addItem(label, s.id)
+            if s.id == active_id:
+                active_idx = idx
+        if self.session_combo.count() > 0:
+            self.session_combo.setCurrentIndex(active_idx)
+        self.session_combo.blockSignals(False)
+
+    def _on_session_combo_changed(self, idx):
+        sid = self.session_combo.currentData()
+        if sid and sid != self.session_manager.active_session_id:
+            self.session_manager.switch_session(sid)
+            self._render_active_session_log()
+
+    def _create_new_session(self):
+        name, ok = QInputDialog.getText(self, "New Session", "Enter session name:")
+        if ok and name.strip():
+            selected_model = self.model_combo.currentData() or self.model_combo.currentText().strip() or ""
+            selected_effort = self.effort_combo.currentData() or "default"
+            self.session_manager.create_session(
+                name=name.strip(),
+                cli=self.cli.currentData(),
+                model=selected_model,
+                effort=selected_effort
+            )
+
+    def _open_session_manager(self):
+        dlg = SessionManagerDialog(self.session_manager, self)
+        dlg.exec()
+
+    def _render_active_session_log(self):
+        self.log.clear()
+        sess = self.session_manager.get_active_session()
+        for m in sess.messages:
+            if m.html:
+                self._append_html(m.html)
+            elif m.text:
+                if m.role == "user":
+                    now_str = m.timestamp
+                    user_html = (
+                        f"<div style='margin: 8px 0 4px 0; padding: 8px 12px; background-color: #e3f2fd; "
+                        f"border-left: 4px solid #1976d2; border-radius: 4px;'>"
+                        f"<div style='font-size: 11px; font-weight: bold; color: #1565c0; margin-bottom: 3px;'>"
+                        f"🧑 YOU ({now_str})</div>"
+                        f"<div style='font-size: 13px; color: #0d47a1; white-space: pre-wrap;'>{html.escape(m.text)}</div>"
+                        f"</div>"
+                    )
+                    self._append_html(user_html)
+                elif m.role == "assistant":
+                    self._append_html(
+                        f"<div style='margin-top: 8px; margin-bottom: 2px; font-weight: bold; color: #1b5e20; font-size: 11px;'>"
+                        f"🤖 AI AGENT:</div>"
+                    )
+                    c = self.log.textCursor()
+                    c.movePosition(QTextCursor.MoveOperation.End)
+                    self.log.setTextCursor(c)
+                    c.insertText(m.text)
+                    self.log.ensureCursorVisible()
+        self.first_turn = (sess.turns_count == 0)
+        self.cont.setChecked(sess.turns_count > 0)
 
     def _on_skill_mode_changed(self):
         REGISTRY.mode = self.skill_mode.currentData()
@@ -348,6 +449,7 @@ class AgentDock(QDockWidget):
         clean = self._clean_ansi(text)
         if not clean:
             return
+        self._current_assistant_text += clean
         if not self.is_agent_streaming:
             cli_label = self.cli.currentData()
             model_info = self.model_combo.currentData() or self.model_combo.currentText().strip()
@@ -358,6 +460,7 @@ class AgentDock(QDockWidget):
             if effort_info and effort_info != "default":
                 meta.append(f"effort={effort_info}")
             header_str = " | ".join(meta)
+            self._current_model_header = header_str
             self._append_html(
                 f"<div style='margin-top: 8px; margin-bottom: 2px; font-weight: bold; color: #1b5e20; font-size: 11px;'>"
                 f"🤖 AI AGENT ({html.escape(header_str)}):</div>"
@@ -372,6 +475,7 @@ class AgentDock(QDockWidget):
 
     def _on_tool_called(self, name, args):
         self.is_agent_streaming = False
+        self._last_tool_call = {"name": name, "args": args or {}}
         args_str = html.escape(json.dumps(args or {}, ensure_ascii=False))
         if len(args_str) > 200:
             args_str = args_str[:200] + "..."
@@ -387,9 +491,11 @@ class AgentDock(QDockWidget):
         summary = summarize_tool_result(name, result)
         img_html = ""
         # Check for inline map rendering (canvas snapshot or layout preview)
+        has_image = False
         if isinstance(result, dict) and "__image__" in result:
             b64 = result["__image__"]
             mime = result.get("mime", "image/png")
+            has_image = True
             img_html = (
                 f"<div style='margin: 6px 0 6px 8px; text-align: center;'>"
                 f"<img src='data:{mime};base64,{b64}' style='max-width: 96%; border: 1px solid #b0bec5; border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,0.15);'><br>"
@@ -405,6 +511,17 @@ class AgentDock(QDockWidget):
         self._append_html(card)
         self.iface.mapCanvas().refresh()
 
+        # Persist tool execution into active project session
+        active_sess = self.session_manager.get_active_session()
+        active_sess.add_tool_record(
+            name=name,
+            args=self._last_tool_call.get("args", {}),
+            summary=summary,
+            success=True,
+            html_card=card,
+            image=result.get("__image__") if has_image else None
+        )
+
     def _on_tool_failed(self, name, err_msg):
         card = (
             f"<div style='margin: 4px 0 4px 8px; padding: 5px 8px; background-color: #ffebee; "
@@ -413,6 +530,16 @@ class AgentDock(QDockWidget):
             f"</div>"
         )
         self._append_html(card)
+
+        # Persist tool failure into active project session
+        active_sess = self.session_manager.get_active_session()
+        active_sess.add_tool_record(
+            name=name,
+            args=self._last_tool_call.get("args", {}),
+            summary=err_msg,
+            success=False,
+            html_card=card
+        )
 
     def _register(self):
         argv = self._adapter()["register"]
@@ -452,11 +579,23 @@ class AgentDock(QDockWidget):
         cont = self.cont.isChecked() and not self.first_turn
         self.start_time = time.time()
         self.is_agent_streaming = False
+        self._current_assistant_text = ""
 
         REGISTRY.mode = self.skill_mode.currentData()
         sel = REGISTRY.select(user)
 
-        # Assemble prompt
+        active_sess = self.session_manager.get_active_session()
+
+        # Model and Effort selection
+        selected_model = self.model_combo.currentData() or self.model_combo.currentText().strip() or None
+        selected_effort = self.effort_combo.currentData()
+
+        # Update active session metadata
+        active_sess.cli = self.cli.currentData()
+        active_sess.model = selected_model or ""
+        active_sess.effort = selected_effort or "default"
+
+        # Assemble prompt with session history context if restarting/resuming
         if cont:
             full = user
         else:
@@ -466,11 +605,8 @@ class AgentDock(QDockWidget):
             live_ctx = self._get_live_context()
             catalog = list(REGISTRY.available().keys())
             skills_txt = prompts.skills_block(sel, catalog) if REGISTRY.mode != "off" else ""
-            full = prompts.build(sys_text, live_ctx, skills_txt, user, continuing=False)
-
-        # Model and Effort selection
-        selected_model = self.model_combo.currentData() or self.model_combo.currentText().strip() or None
-        selected_effort = self.effort_combo.currentData()
+            sess_hist = active_sess.format_history_for_prompt() if active_sess.turns_count > 0 else None
+            full = prompts.build(sys_text, live_ctx, skills_txt, user, continuing=False, session_history=sess_hist)
 
         argv = self._adapter()["run"](full, cont, self.auto.isChecked(), model=selected_model, effort=selected_effort)
 
@@ -493,6 +629,7 @@ class AgentDock(QDockWidget):
             f"</div>"
         )
         self._append_html(user_html)
+        active_sess.add_user_message(user, user_html)
 
         # Render Skills & Model Info Badge
         loaded_skills = [s.name for s in sel["pinned"] + sel["full"]]
@@ -517,7 +654,9 @@ class AgentDock(QDockWidget):
         self.run_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         try:
-            self.runner.start(argv, outdir)
+            # Use isolated project workspace for CLI subprocess
+            proj_workspace = self.session_manager.get_workspace_dir()
+            self.runner.start(argv, proj_workspace)
         except Exception as e:
             self._on_tool_failed("Subprocess Start", str(e))
             self._done(-1)
@@ -532,6 +671,18 @@ class AgentDock(QDockWidget):
             f"</div>"
         )
         self._append_html(done_html)
+
+        # Record assistant response and persist sessions
+        active_sess = self.session_manager.get_active_session()
+        if self._current_assistant_text.strip():
+            active_sess.add_assistant_message(
+                text=self._current_assistant_text.strip(),
+                html_card="",
+                model_info=self._current_model_header
+            )
+        self.session_manager.save_project_sessions()
+        self._populate_sessions_dropdown()
+
         self.is_agent_streaming = False
         self.first_turn = False
         self.cont.setChecked(True)

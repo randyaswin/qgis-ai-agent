@@ -86,6 +86,13 @@ ToolServer (QGIS Main Thread) ──▶ tools.py (51 Tools)
    - Every prompt is automatically augmented with operational instructions ([AGENT.md](qgis_ai_agent/AGENT.md)), live layer schemas, active CRS, and relevant skills.
    - Bi-directional chat synchronization renders CLI thoughts, tool calls, results, and inline map previews directly inside the QGIS dock.
 
+5. **Project-Bound Session Manager & Persistent Chat History**:
+   - **Tied to QGIS Project**: Conversations, tool calls, results, and rendered previews are bound to the active QGIS project.
+   - **Dual Persistence**: Embedded directly inside `.qgs` / `.qgz` project files via XML entries (`qgis_ai_agent/session_manifest`) and mirrored in local project storage (`~/.qgis_ai_agent/projects/<project_id>/sessions.json`).
+   - **Isolated CLI Workspaces**: Each project runs inside its own isolated working directory (`~/.qgis_ai_agent/projects/<project_id>/workspace/`), keeping CLI session states (`-c`, `--resume`) strictly scoped to that project.
+   - **Lossless Context Resumption**: Switch between sessions or reopen saved projects at any time. When resuming past sessions, conversation summaries and actions are injected into the prompt context so the agent never loses awareness.
+   - **Session Management Dialog**: Create new sessions, switch branches, rename, duplicate, or export chat transcripts to Markdown (`.md`) or JSON.
+
 ---
 
 ## Getting Started
