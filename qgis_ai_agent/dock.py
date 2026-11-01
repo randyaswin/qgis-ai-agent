@@ -1,7 +1,9 @@
+import html
 import json
 import os
 import re
 import subprocess
+import time
 
 from qgis.PyQt.QtCore import Qt, QSettings
 from qgis.PyQt.QtGui import QTextCursor
@@ -17,8 +19,56 @@ from .skills import REGISTRY
 from .skills_dialog import SkillsDialog
 from . import prompts
 
-ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 SKEY = "qgis_ai_agent/"
+
+
+def summarize_tool_result(name, result):
+    """Generate concise, human-readable summary of tool execution."""
+    if not isinstance(result, dict):
+        return html.escape(str(result)[:250])
+    if name == "snapshot_canvas":
+        kb = len(result.get("__image__", "")) * 3 // 4 // 1024
+        return f"Tangkapan layar kanvas berhasil diambil ({kb} KB)"
+    if name == "export_layout":
+        meta = result.get("meta", result)
+        path = meta.get("path", "")
+        succ = "Berhasil" if meta.get("success") else "Gagal"
+        return f"Layout diekspor ke <code>{html.escape(path)}</code> ({succ})"
+    if name == "create_layout":
+        return f"Layout cetak '<b>{html.escape(result.get('layout', ''))}</b>' dibuat (Ukuran: {result.get('page_mm', [])} mm, Skala 1:{result.get('map_scale', 0):,.0f})"
+    if name == "add_vector_layer":
+        return f"Layer vektor '<b>{html.escape(result.get('name', ''))}</b>' dimuat ({result.get('geometry')}, {result.get('features')} fitur, CRS: {result.get('crs')})"
+    if name == "add_raster_layer":
+        return f"Layer raster '<b>{html.escape(result.get('name', ''))}</b>' dimuat ({result.get('width')}x{result.get('height')} px, {result.get('bands')} band, CRS: {result.get('crs')})"
+    if name == "add_basemap":
+        return f"Basemap '<b>{html.escape(result.get('name', ''))}</b>' berhasil dimuat"
+    if name == "run_processing":
+        new_lyrs = [l.get("name") for l in result.get("new_layers", []) if isinstance(l, dict)]
+        nl_str = f"Layer baru: <b>{', '.join(html.escape(n) for n in new_lyrs)}</b>" if new_lyrs else "Operasi selesai"
+        return f"Algoritma geoprocessing selesai ({nl_str})"
+    if name == "calculate_field":
+        return f"Kolom berhasil dihitung ({result.get('updated')} fitur diperbarui)"
+    if name == "set_labels":
+        st = "diaktifkan" if result.get("labels") else "dinonaktifkan"
+        return f"Pengaturan label {st}"
+    if name.startswith("style_"):
+        return f"Gaya visualisasi ({html.escape(name)}) berhasil diterapkan"
+    if name == "describe_layer":
+        return f"Inspeksi '<b>{html.escape(result.get('name', ''))}</b>': Tipe={result.get('layer_type')}, CRS={result.get('crs')}, Fitur={result.get('feature_count', '-')}"
+    if name == "describe_all_layers":
+        return f"Inspeksi proyek: {len(result.get('layers', []))} layer terdeteksi"
+    if name == "get_project_state":
+        return f"Proyek aktif: CRS={result.get('crs')}, {len(result.get('layers_top_to_bottom', []))} layer, {len(result.get('layouts', []))} layout"
+    if name == "load_skill":
+        return f"Panduan skill '<b>{html.escape(result.get('skill', ''))}</b>' berhasil dimuat"
+    if name == "list_skills":
+        return f"Ditemukan {len(result)} skill relevan"
+    if name == "zoom_to":
+        return "Tampilan kanvas dipusatkan"
+    # Fallback to compact JSON
+    s = json.dumps(result, ensure_ascii=False, default=str)
+    return html.escape(s[:250] + ("..." if len(s) > 250 else ""))
 
 
 class AgentDock(QDockWidget):
@@ -26,11 +76,17 @@ class AgentDock(QDockWidget):
         super().__init__("AI Map Agent")
         self.iface, self.server = iface, server
         self.runner = CliRunner(self)
-        self.runner.output.connect(self._append)
-        self.runner.finished.connect(self._done)
-        self.server.activity.connect(lambda m: self._append(f"\n{m}\n", tool=True))
         self.first_turn = True
+        self.start_time = 0
+        self.is_agent_streaming = False
         s = QSettings()
+
+        # Connect runner and server signals
+        self.runner.output.connect(self._on_cli_output)
+        self.runner.finished.connect(self._done)
+        self.server.tool_called.connect(self._on_tool_called)
+        self.server.tool_completed.connect(self._on_tool_completed)
+        self.server.tool_failed.connect(self._on_tool_failed)
 
         w = QWidget()
         lay = QVBoxLayout(w)
@@ -105,13 +161,14 @@ class AgentDock(QDockWidget):
 
         # User prompt input
         self.prompt = QPlainTextEdit()
-        self.prompt.setPlaceholderText("Contoh: Buat peta kepadatan penduduk per kecamatan Jawa Barat, choropleth 5 kelas natural breaks, label nama, layout A3 landscape, ekspor PDF. (Ctrl+Enter)")
-        self.prompt.setMaximumHeight(110)
+        self.prompt.setPlaceholderText("Ketik perintah peta (misal: 'Buat peta kepadatan penduduk Jawa Barat, klasifikasi jenks 5 kelas, layout A3 landscape, ekspor PDF') ... [Ctrl+Enter]")
+        self.prompt.setMaximumHeight(100)
         lay.addWidget(self.prompt)
 
         # Action buttons
         row5 = QHBoxLayout()
         self.run_btn = QPushButton("▶ Run")
+        self.run_btn.setStyleSheet("font-weight: bold; background-color: #2e7d32; color: white; padding: 5px;")
         self.run_btn.clicked.connect(self._run)
         self.stop_btn = QPushButton("■ Stop")
         self.stop_btn.setEnabled(False)
@@ -171,16 +228,76 @@ class AgentDock(QDockWidget):
     def _adapter(self):
         return ADAPTERS[self.cli.currentData()]
 
-    def _append(self, text, tool=False):
-        text = ANSI.sub("", text)
+    def _append_html(self, html_content):
         c = self.log.textCursor()
         c.movePosition(QTextCursor.MoveOperation.End)
         self.log.setTextCursor(c)
-        if tool:
-            self.log.setTextColor(Qt.GlobalColor.darkGreen)
-        self.log.insertPlainText(text)
-        self.log.setTextColor(Qt.GlobalColor.black)
+        c.insertHtml(html_content)
         self.log.ensureCursorVisible()
+
+    def _clean_ansi(self, text):
+        return ANSI.sub("", text).replace("\r\n", "\n").replace("\r", "\n")
+
+    def _on_cli_output(self, text):
+        clean = self._clean_ansi(text)
+        if not clean:
+            return
+        if not self.is_agent_streaming:
+            self._append_html(
+                f"<div style='margin-top: 8px; margin-bottom: 2px; font-weight: bold; color: #1b5e20; font-size: 11px;'>"
+                f"🤖 AI AGENT ({html.escape(self.cli.currentData())}):</div>"
+            )
+            self.is_agent_streaming = True
+
+        c = self.log.textCursor()
+        c.movePosition(QTextCursor.MoveOperation.End)
+        self.log.setTextCursor(c)
+        c.insertText(clean)
+        self.log.ensureCursorVisible()
+
+    def _on_tool_called(self, name, args):
+        self.is_agent_streaming = False
+        args_str = html.escape(json.dumps(args or {}, ensure_ascii=False))
+        if len(args_str) > 200:
+            args_str = args_str[:200] + "..."
+        card = (
+            f"<div style='margin: 4px 0 2px 8px; padding: 5px 8px; background-color: #fffde7; "
+            f"border-left: 3px solid #fbc02d; border-radius: 3px; font-size: 11px; color: #4e342e;'>"
+            f"<b>⚙️ Aksi QGIS:</b> <code>{html.escape(name)}</code> <span style='color: #6d4c41;'>({args_str})</span>"
+            f"</div>"
+        )
+        self._append_html(card)
+
+    def _on_tool_completed(self, name, result):
+        summary = summarize_tool_result(name, result)
+        img_html = ""
+        # Check for inline map rendering (canvas snapshot or layout preview)
+        if isinstance(result, dict) and "__image__" in result:
+            b64 = result["__image__"]
+            mime = result.get("mime", "image/png")
+            img_html = (
+                f"<div style='margin: 6px 0 6px 8px; text-align: center;'>"
+                f"<img src='data:{mime};base64,{b64}' style='max-width: 96%; border: 1px solid #b0bec5; border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,0.15);'><br>"
+                f"<span style='font-size: 10px; color: #546e7a;'>🖼️ Pratinjau Visual Peta ({html.escape(name)})</span>"
+                f"</div>"
+            )
+        card = (
+            f"<div style='margin: 2px 0 6px 8px; padding: 5px 8px; background-color: #e8f5e9; "
+            f"border-left: 3px solid #43a047; border-radius: 3px; font-size: 11px; color: #1b5e20;'>"
+            f"<b>✅ Hasil:</b> {summary}"
+            f"</div>{img_html}"
+        )
+        self._append_html(card)
+        self.iface.mapCanvas().refresh()
+
+    def _on_tool_failed(self, name, err_msg):
+        card = (
+            f"<div style='margin: 4px 0 4px 8px; padding: 5px 8px; background-color: #ffebee; "
+            f"border-left: 3px solid #e53935; border-radius: 3px; font-size: 11px; color: #b71c1c;'>"
+            f"<b>❌ Gagal mengeksekusi {html.escape(name)}:</b> {html.escape(err_msg)}"
+            f"</div>"
+        )
+        self._append_html(card)
 
     def _register(self):
         argv = self._adapter()["register"]
@@ -189,12 +306,14 @@ class AgentDock(QDockWidget):
                                env={**os.environ, "PATH": os.path.expanduser("~/.local/bin") + os.pathsep
                                     + os.path.expanduser("~/.npm-global/bin") + os.pathsep + os.environ.get("PATH", "")})
             msg = (r.stdout + r.stderr).strip() or "OK"
-            self._append(f"\n$ {' '.join(argv)}\n{msg}\n", tool=True)
+            self._append_html(
+                f"<div style='margin: 4px 0; padding: 4px 8px; background-color: #eceff1; border-radius: 3px; font-size: 11px;'>"
+                f"<b>Register MCP:</b> <code>{' '.join(argv)}</code><br><pre>{html.escape(msg)}</pre></div>"
+            )
         except Exception as e:
             QMessageBox.warning(self, "Register MCP", str(e))
 
     def _get_live_context(self):
-        """Compact summary of live QGIS project layers and canvas."""
         p = QgsProject.instance()
         layers = p.mapLayers().values()
         if not layers:
@@ -216,13 +335,14 @@ class AgentDock(QDockWidget):
         outdir = self.outdir.text().strip() or os.path.expanduser("~/qgis-ai-maps")
         os.makedirs(outdir, exist_ok=True)
         cont = self.cont.isChecked() and not self.first_turn
+        self.start_time = time.time()
+        self.is_agent_streaming = False
 
         REGISTRY.mode = self.skill_mode.currentData()
         sel = REGISTRY.select(user)
 
         # Assemble prompt
         if cont:
-            # Continuing turn: send only user text, or with dynamic skill/context if new ones were picked
             full = user
         else:
             sys_text = prompts.system_prompt(Qgis.version(), outdir, REGISTRY.mode)
@@ -241,14 +361,28 @@ class AgentDock(QDockWidget):
         s.setValue(SKEY + "auto", self.auto.isChecked())
         s.setValue(SKEY + "pyexec", self.pyexec.isChecked())
 
-        # Log UI banner
-        self._append(f"\n━━ 🧑 User Request: {user}\n", tool=False)
+        # Render User Message Card
+        now_str = time.strftime("%H:%M:%S")
+        user_html = (
+            f"<div style='margin: 8px 0 4px 0; padding: 8px 12px; background-color: #e3f2fd; "
+            f"border-left: 4px solid #1976d2; border-radius: 4px;'>"
+            f"<div style='font-size: 11px; font-weight: bold; color: #1565c0; margin-bottom: 3px;'>"
+            f"🧑 ANDA ({now_str})</div>"
+            f"<div style='font-size: 13px; color: #0d47a1; white-space: pre-wrap;'>{html.escape(user)}</div>"
+            f"</div>"
+        )
+        self._append_html(user_html)
+
+        # Render Skills Info Badge
         loaded_skills = [s.name for s in sel["pinned"] + sel["full"]]
         if loaded_skills:
-            self._append(f"━━ 🧠 Skills Injected ({REGISTRY.mode}): {', '.join(loaded_skills)}\n", tool=True)
-        if sel["hint"]:
-            self._append(f"━━ 💡 Skills on standby (agent can call load_skill): {', '.join(s.name for s in sel['hint'])}\n", tool=True)
-        self._append(f"━━ ▶ Executing {argv[0]} ({'continue session' if cont else 'new session'})...\n", tool=True)
+            skills_html = (
+                f"<div style='margin: 2px 0 4px 0; padding: 4px 8px; background-color: #f3e5f5; "
+                f"border-left: 3px solid #8e24aa; border-radius: 3px; font-size: 11px; color: #4a148c;'>"
+                f"<b>🧠 Skills Aktif ({REGISTRY.mode}):</b> {', '.join(html.escape(s) for s in loaded_skills)}"
+                f"</div>"
+            )
+            self._append_html(skills_html)
 
         self.prompt.clear()
         self.run_btn.setEnabled(False)
@@ -256,11 +390,20 @@ class AgentDock(QDockWidget):
         try:
             self.runner.start(argv, outdir)
         except Exception as e:
-            self._append(f"\n[error] {e}\n")
+            self._on_tool_failed("Subprocess Start", str(e))
             self._done(-1)
 
     def _done(self, code):
-        self._append(f"\n━━ finished (exit {code})\n", tool=True)
+        elapsed = time.time() - self.start_time if self.start_time else 0
+        status_color = "#2e7d32" if code == 0 else "#c62828"
+        done_html = (
+            f"<div style='margin: 8px 0; padding: 4px 10px; background-color: #f5f5f5; border-radius: 4px; "
+            f"font-size: 11px; color: {status_color}; text-align: right;'>"
+            f"🏁 <b>Selesai</b> dalam {elapsed:.1f} detik (Exit Code: {code})"
+            f"</div>"
+        )
+        self._append_html(done_html)
+        self.is_agent_streaming = False
         self.first_turn = False
         self.cont.setChecked(True)
         self.run_btn.setEnabled(True)
