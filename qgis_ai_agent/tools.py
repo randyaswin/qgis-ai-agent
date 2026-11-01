@@ -558,13 +558,76 @@ def set_layer_filter(layer, where=""):
     return {"ok": ok, "features": lyr.featureCount()}
 
 
-# ---------------------------------------------------------------- processing
-@tool("Search Processing algorithms (native, gdal, qgis...).", {"query": S("string", "substring, e.g. buffer")})
-def list_algorithms(query=""):
+# ---------------------------------------------------------------- processing & toolbox
+@tool("List all active Processing providers (e.g. native, gdal, pdal, qgis, grass, model, script) and their algorithm counts.")
+def list_processing_providers():
+    reg = QgsApplication.processingRegistry()
+    out = []
+    for p in reg.providers():
+        algs = [a.id() for a in reg.algorithms() if a.provider().id() == p.id()]
+        out.append({"id": p.id(), "name": p.name(), "algorithm_count": len(algs)})
+    return out
+
+
+@tool("Search Processing algorithms by name/id and optionally filter by provider (e.g. 'native', 'gdal', 'qgis').",
+      {"query": S("string", "substring, e.g. buffer, clip, contour, slope, raster"),
+       "provider": S("string", "optional provider id: native, gdal, qgis, pdal, grass, model")})
+def list_algorithms(query="", provider=None):
     q = query.lower()
-    return [{"id": a.id(), "name": a.displayName()}
-            for a in QgsApplication.processingRegistry().algorithms()
-            if q in a.id().lower() or q in a.displayName().lower()][:80]
+    reg = QgsApplication.processingRegistry()
+    out = []
+    for a in reg.algorithms():
+        if provider and a.provider().id().lower() != provider.lower():
+            continue
+        if not q or (q in a.id().lower() or q in a.displayName().lower()):
+            out.append({"id": a.id(), "name": a.displayName(), "provider": a.provider().id()})
+            if len(out) >= 100:
+                break
+    return out
+
+
+@tool("Open the visual Processing Toolbox dock panel in the QGIS user interface.")
+def open_processing_toolbox():
+    from qgis.PyQt.QtWidgets import QDockWidget, QAction
+    iface = _iface()
+    if hasattr(iface, "mainWindow") and iface.mainWindow():
+        dock = iface.mainWindow().findChild(QDockWidget, "ProcessingToolbox")
+        if dock:
+            dock.setVisible(True)
+            dock.raise_()
+            return {"status": "opened", "dock": "ProcessingToolbox"}
+        for act in iface.mainWindow().findChildren(QAction):
+            if "Processing Toolbox" in act.text() or act.objectName() == "mActionShowProcessingToolbox":
+                act.trigger()
+                return {"status": "opened", "action": act.text()}
+    return {"status": "action_triggered"}
+
+
+@tool("Open the interactive QGIS Processing Algorithm dialog for a specific algorithm with optional prefilled parameters.",
+      {"algorithm": S("string", "e.g. 'native:buffer', 'gdal:contour', 'qgis:heatmapkerneldensityestimation'"),
+       "params": S("object", "optional prefilled parameters dict")})
+def open_processing_algorithm_dialog(algorithm, params=None):
+    alg = QgsApplication.processingRegistry().algorithmById(algorithm)
+    if not alg:
+        raise ValueError(f"Unknown algorithm {algorithm}")
+    from processing.gui.AlgorithmDialog import AlgorithmDialog
+    params = dict(params or {})
+    for k, v in list(params.items()):
+        if isinstance(v, str) and QgsProject.instance().mapLayersByName(v):
+            params[k] = QgsProject.instance().mapLayersByName(v)[0]
+    parent = _iface().mainWindow() if hasattr(_iface(), "mainWindow") else None
+    dlg = AlgorithmDialog(alg.create(), params=params, parent=parent)
+    dlg.show()
+    return {"opened_dialog": algorithm, "display_name": alg.displayName()}
+
+
+@tool("Open the QGIS Graphical Model Designer dialog for visual workflow creation.")
+def open_model_designer():
+    from processing.modeler.ModelerDialog import ModelerDialog
+    parent = _iface().mainWindow() if hasattr(_iface(), "mainWindow") else None
+    dlg = ModelerDialog(parent=parent)
+    dlg.show()
+    return {"status": "opened", "window": "ModelerDialog"}
 
 
 @tool("Parameter definitions of a Processing algorithm.", {"algorithm": S("string", "e.g. native:buffer")})

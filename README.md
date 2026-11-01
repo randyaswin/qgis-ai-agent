@@ -22,18 +22,26 @@ ToolServer (QGIS Main Thread) ──▶ tools.py (37 Tools)
 
 ## Fitur Utama
 
-1. **37 Tools MCP Lengkap**:
+1. **41 Tools MCP Lengkap**:
    - **Proyek & CRS**: `get_project_state`, `set_project_crs`, `new_project`, `open_project`, `save_project`, `zoom_to`.
    - **Inspeksi Data**: `describe_layer` (vektor, raster, mesh, point cloud, vector tile), `describe_all_layers`, `get_features`, `get_selected_features`, `field_stats`, `sample_raster`.
-   - **Manipulasi & Processing**: `calculate_field`, `set_layer_filter`, `list_algorithms`, `describe_algorithm`, `run_processing`.
+   - **Processing Toolbox & Geoprocessing**:
+     - `list_processing_providers`: Daftar provider aktif (native, gdal, pdal, qgis, grass, model).
+     - `list_algorithms`: Pencarian 440+ algoritma berdasarkan kata kunci atau provider.
+     - `describe_algorithm`: Skema lengkap parameter input/output algoritma.
+     - `run_processing`: Eksekusi algoritma dengan temporary output otomatis & penamaan layer.
+     - `open_processing_toolbox`: Membuka dock panel Processing Toolbox langsung di antarmuka QGIS.
+     - `open_processing_algorithm_dialog`: Membuka dialog GUI interaktif algoritma tertentu dengan parameter terisi.
+     - `open_model_designer`: Membuka Graphical Model Designer untuk alur kerja visual.
    - **Kartografi & Simbologi**: `style_single`, `style_categorized`, `style_graduated`, `style_raster`, `load_style`, `list_color_ramps`, `set_labels`.
    - **Verifikasi Visual (Loop)**: `snapshot_canvas` (render PNG dikirim langsung ke agent untuk self-correction).
    - **Tata Letak & Ekspor**: `create_layout` (judul, legenda, skala, arah utara, grid, kredit sumber), `edit_layout`, `export_layout` (PDF/PNG/SVG + preview), `open_layout_designer`.
    - **Skills Discovery & Loading**: `list_skills`, `load_skill`.
    - **Sandbox Escape Hatch**: `exec_pyqgis` (eksekusi kode PyQGIS bebas; dinonaktifkan secara default).
 
-2. **Dukungan 45+ GIS Skills Berstandar `SKILL.md`**:
-   - **11 Custom Use Case Skills**:
+2. **Dukungan 46 GIS Skills Berstandar `SKILL.md`**:
+   - **12 Custom Use Case Skills**:
+     - `qgis-processing-toolbox`: Panduan komprehensif penemuan & otomatisasi 440+ algoritma geoprocessing QGIS, pemanggilan dialog GUI, dan modeler visual.
      - `choropleth-density-map`: Peta tematik rasio/kepadatan & normalisasi data.
      - `indonesia-geodata-crs`: Database CRS lokal Indonesia (UTM 46–54, SRGI2013, DGN95), kaidah kode wilayah BPS/Kemendagri.
      - `terrain-relief-map`: DEM, kontur, kemiringan lereng, aspek, dan hillshade.

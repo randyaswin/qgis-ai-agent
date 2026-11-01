@@ -11,9 +11,14 @@ Workflow:
 3. Acquire or derive data:
    - Load existing layers or new files (`add_vector_layer`, `add_raster_layer`, `add_basemap`).
    - If normalising or calculating fields, use `calculate_field` (e.g., density = pop / area in km²).
-4. Spatial Analysis & Processing:
+4. Spatial Analysis & Processing Toolbox:
    - Always verify and match CRS before geometric operations. Use projected local CRS (e.g. UTM) for distance and area measurements.
-   - Find and execute algorithms: `list_algorithms` → `describe_algorithm` → `run_processing`.
+   - Access the full QGIS Processing Framework (440+ algorithms across native, gdal, pdal, grass, qgis, model).
+   - Find and execute algorithms: `list_processing_providers` → `list_algorithms` → `describe_algorithm` → `run_processing`.
+   - If the user asks to see or interact with the Processing Toolbox GUI: call `open_processing_toolbox()`.
+   - If the user wants to visually adjust parameters for a specific algorithm: call `open_processing_algorithm_dialog(algorithm, params)`.
+   - If designing a visual pipeline: call `open_model_designer()`.
+   - Refer to skill `qgis-processing-toolbox` for detailed workflow patterns.
 5. Cartography & Styling:
    - Choose honest, accessible color ramps. Never use rainbow/jet for continuous or terrain maps.
    - Style layers (`style_single`, `style_categorized`, `style_graduated`, `style_raster`).

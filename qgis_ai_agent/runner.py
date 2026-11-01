@@ -9,29 +9,83 @@ BRIDGE = os.path.join(os.path.dirname(__file__), "mcp_bridge.py")
 PY = shutil.which("python3") or sys.executable
 
 
-# name -> run(prompt, continue, auto_approve) -> argv, plus MCP registration command.
+# name -> run(prompt, continue, auto_approve, model, effort) -> argv, plus MCP registration command.
 ADAPTERS = {
     "agy (Antigravity CLI)": {
         "bin": "agy",
-        "run": lambda p, cont, auto: ["agy", "-p", p] + (["-c"] if cont else []) + (["--dangerously-skip-permissions"] if auto else []),
+        "models": [
+            ("gemini-3.8-flash-high (Rekomendasi Cepat)", "gemini-3.8-flash-high"),
+            ("gemini-3.8-flash-medium", "gemini-3.8-flash-medium"),
+            ("gemini-4-argon-high (Rekomendasi Akurat)", "gemini-4-argon-high"),
+            ("gemini-4-argon-medium", "gemini-4-argon-medium"),
+            ("claude-opus-5-5-high", "claude-opus-5-5-high"),
+            ("claude-sonnet-5-5-high", "claude-sonnet-5-5-high"),
+            ("claude-sonnet-5-5-medium", "claude-sonnet-5-5-medium"),
+            ("gpt-oss-120b-medium", "gpt-oss-120b-medium"),
+        ],
+        "supports_effort": True,
+        "run": lambda p, cont, auto, model=None, effort=None: (
+            ["agy", "-p", p]
+            + (["-c"] if cont else [])
+            + (["--dangerously-skip-permissions"] if auto else [])
+            + (["--model", model] if model else [])
+            + (["--effort", effort.lower()] if effort and effort.lower() != "default" else [])
+        ),
         "register": ["agy", "mcp", "add", "qgis", PY, BRIDGE],
     },
     "Claude Code": {
         "bin": "claude",
-        "run": lambda p, cont, auto: ["claude", "-p", p] + (["-c"] if cont else [])
-        + (["--dangerously-skip-permissions"] if auto else ["--allowedTools", "mcp__qgis"]),
+        "models": [
+            ("claude-sonnet-4-5-20250929", "claude-sonnet-4-5-20250929"),
+            ("claude-opus-4-5-20251101", "claude-opus-4-5-20251101"),
+            ("claude-3-7-sonnet", "claude-3-7-sonnet"),
+            ("claude-3-5-sonnet", "claude-3-5-sonnet"),
+            ("claude-3-5-haiku", "claude-3-5-haiku"),
+        ],
+        "supports_effort": True,
+        "run": lambda p, cont, auto, model=None, effort=None: (
+            ["claude", "-p", p]
+            + (["-c"] if cont else [])
+            + (["--dangerously-skip-permissions"] if auto else ["--allowedTools", "mcp__qgis"])
+            + (["--model", model] if model else [])
+            + (["--effort", effort.lower()] if effort and effort.lower() != "default" else [])
+        ),
         "register": ["claude", "mcp", "add", "--scope", "user", "qgis", PY, BRIDGE],
     },
     "Gemini CLI": {
         "bin": "gemini",
-        "run": lambda p, cont, auto: ["gemini", "-p", p] + (["--resume", "latest"] if cont else [])
-        + (["--yolo"] if auto else ["--allowed-mcp-server-names", "qgis"]),
+        "models": [
+            ("gemini-2.5-pro", "gemini-2.5-pro"),
+            ("gemini-2.5-flash", "gemini-2.5-flash"),
+            ("gemini-2.0-flash", "gemini-2.0-flash"),
+            ("gemini-1.5-pro", "gemini-1.5-pro"),
+            ("gemini-1.5-flash", "gemini-1.5-flash"),
+        ],
+        "supports_effort": False,
+        "run": lambda p, cont, auto, model=None, effort=None: (
+            ["gemini", "-p", p]
+            + (["--resume", "latest"] if cont else [])
+            + (["--yolo"] if auto else ["--allowed-mcp-server-names", "qgis"])
+            + (["-m", model] if model else [])
+        ),
         "register": ["gemini", "mcp", "add", "--scope", "user", "qgis", PY, BRIDGE],
     },
     "Codex CLI": {
         "bin": "codex",
-        "run": lambda p, cont, auto: (["codex", "exec", "resume", "--last"] if cont else ["codex", "exec"])
-        + (["--full-auto", "--skip-git-repo-check"] if auto else ["--skip-git-repo-check"]) + [p],
+        "models": [
+            ("o3-mini", "o3-mini"),
+            ("o1", "o1"),
+            ("gpt-4o", "gpt-4o"),
+            ("gpt-4.5-preview", "gpt-4.5-preview"),
+        ],
+        "supports_effort": True,
+        "run": lambda p, cont, auto, model=None, effort=None: (
+            (["codex", "exec", "resume", "--last"] if cont else ["codex", "exec"])
+            + (["--full-auto", "--skip-git-repo-check"] if auto else ["--skip-git-repo-check"])
+            + (["-m", model] if model else [])
+            + (["-c", f'model_reasoning_effort="{effort.lower()}"'] if effort and effort.lower() != "default" else [])
+            + [p]
+        ),
         "register": ["codex", "mcp", "add", "qgis", "--", PY, BRIDGE],
     },
 }
