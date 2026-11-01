@@ -20,14 +20,14 @@ class SkillsDialog(QDialog):
 
         top_bar = QHBoxLayout()
         self.search_box = QLineEdit()
-        self.search_box.setPlaceholderText("Cari skill (misal: 'banjir', 'choropleth', 'lidar', 'utm', 'layout')...")
+        self.search_box.setPlaceholderText("Search skills (e.g. 'flood', 'choropleth', 'lidar', 'utm', 'layout', 'overture')...")
         self.search_box.textChanged.connect(self._refresh_list)
-        top_bar.addWidget(QLabel("Cari:"))
+        top_bar.addWidget(QLabel("Search:"))
         top_bar.addWidget(self.search_box, 1)
 
-        btn_install_folder = QPushButton("📁 Pasang dari Folder")
+        btn_install_folder = QPushButton("📁 Install from Folder")
         btn_install_folder.clicked.connect(self._install_folder)
-        btn_install_git = QPushButton("🌐 Pasang dari Git")
+        btn_install_git = QPushButton("🌐 Install from Git")
         btn_install_git.clicked.connect(self._install_git)
         top_bar.addWidget(btn_install_folder)
         top_bar.addWidget(btn_install_git)
@@ -35,18 +35,18 @@ class SkillsDialog(QDialog):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        left_widget = QGroupBox("Daftar Skills")
+        left_widget = QGroupBox("Skills Catalog")
         left_layout = QVBoxLayout(left_widget)
         self.skill_list = QListWidget()
         self.skill_list.currentItemChanged.connect(self._on_select_skill)
         left_layout.addWidget(self.skill_list)
 
         btn_row = QHBoxLayout()
-        self.btn_pin = QPushButton("📌 Pin (Manual Aktif)")
+        self.btn_pin = QPushButton("📌 Pin (Always Active)")
         self.btn_pin.clicked.connect(self._toggle_pin)
         self.btn_disable = QPushButton("🚫 Disable/Enable")
         self.btn_disable.clicked.connect(self._toggle_disable)
-        self.btn_delete = QPushButton("🗑️ Hapus User Skill")
+        self.btn_delete = QPushButton("🗑️ Delete User Skill")
         self.btn_delete.clicked.connect(self._delete_user_skill)
         btn_row.addWidget(self.btn_pin)
         btn_row.addWidget(self.btn_disable)
@@ -54,7 +54,7 @@ class SkillsDialog(QDialog):
         left_layout.addLayout(btn_row)
         splitter.addWidget(left_widget)
 
-        right_widget = QGroupBox("Detail & Isi Panduan (SKILL.md)")
+        right_widget = QGroupBox("Skill Details & Guide (SKILL.md)")
         right_layout = QVBoxLayout(right_widget)
         self.detail_text = QTextEdit()
         self.detail_text.setReadOnly(True)
@@ -69,7 +69,7 @@ class SkillsDialog(QDialog):
         self.lbl_stats = QLabel()
         bottom_bar.addWidget(self.lbl_stats)
         bottom_bar.addStretch()
-        btn_close = QPushButton("Tutup")
+        btn_close = QPushButton("Close")
         btn_close.clicked.connect(self.accept)
         bottom_bar.addWidget(btn_close)
         main_layout.addLayout(bottom_bar)
@@ -122,8 +122,8 @@ class SkillsDialog(QDialog):
         s = REGISTRY.skills.get(name)
         if not s:
             return
-        refs = f"\n\n**File Referensi Tambahan:**\n" + "\n".join(f"- {r}" for r in s.references) if s.references else ""
-        header = f"# {s.name}\n**Sumber:** {s.source} | **Path:** {s.path}\n**Deskripsi:** {s.description}\n{refs}\n\n---\n\n"
+        refs = f"\n\n**Additional Reference Files:**\n" + "\n".join(f"- {r}" for r in s.references) if s.references else ""
+        header = f"# {s.name}\n**Source:** {s.source} | **Path:** {s.path}\n**Description:** {s.description}\n{refs}\n\n---\n\n"
         self.detail_text.setMarkdown(header + s.body())
 
     def _toggle_pin(self):
@@ -154,28 +154,28 @@ class SkillsDialog(QDialog):
             return
         s = REGISTRY.skills.get(name)
         if not s or s.source != "user":
-            QMessageBox.information(self, "Hapus Skill", "Hanya skill yang dipasang pengguna di ~/.qgis_ai_agent/skills/ yang dapat dihapus.")
+            QMessageBox.information(self, "Delete Skill", "Only user-installed skills in ~/.qgis_ai_agent/skills/ can be deleted.")
             return
-        if QMessageBox.question(self, "Konfirmasi Hapus", f"Hapus skill '{name}'?") == QMessageBox.StandardButton.Yes:
+        if QMessageBox.question(self, "Confirm Delete", f"Delete skill '{name}'?") == QMessageBox.StandardButton.Yes:
             REGISTRY.remove_user_skill(name)
             self._refresh_list()
 
     def _install_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Pilih Folder Skill (harus berisi SKILL.md)")
+        folder = QFileDialog.getExistingDirectory(self, "Select Skill Folder (must contain SKILL.md)")
         if folder:
             try:
                 installed = REGISTRY.install_path(folder)
-                QMessageBox.information(self, "Berhasil", f"Berhasil memasang skills: {', '.join(installed)}")
+                QMessageBox.information(self, "Success", f"Successfully installed skills: {', '.join(installed)}")
                 self._refresh_list()
             except Exception as e:
-                QMessageBox.warning(self, "Gagal Memasang", str(e))
+                QMessageBox.warning(self, "Installation Failed", str(e))
 
     def _install_git(self):
-        url, ok = QInputDialog.getText(self, "Pasang dari Git", "Masukkan Git repository URL (https://...):")
+        url, ok = QInputDialog.getText(self, "Install from Git", "Enter Git repository URL (https://...):")
         if ok and url.strip():
             try:
                 installed = REGISTRY.install_git(url.strip())
-                QMessageBox.information(self, "Berhasil", f"Berhasil memasang skills dari Git: {', '.join(installed)}")
+                QMessageBox.information(self, "Success", f"Successfully installed skills from Git: {', '.join(installed)}")
                 self._refresh_list()
             except Exception as e:
-                QMessageBox.warning(self, "Gagal Memasang", str(e))
+                QMessageBox.warning(self, "Installation Failed", str(e))

@@ -1204,16 +1204,16 @@ def add_layout_callout_box(layout, x, y, width, height, title, subtitle="", badg
     return {"callout_added": True, "badge": badge, "title": title}
 
 
-@tool("Create a publication-quality styled print layout with professional themes: 'infographic_bencana' (disaster dashboard with inset, chart, and multi-bar legends like BNPB), 'natgeo' (National Geographic: classic neatline borders, serif typography, warm tones), 'relief_topographic' (Swiss/Imhof alpine topo), or 'modern_clean' (executive corporate).",
-      {"name": S("string", "layout name"),
-       "style_theme": S("string", "'infographic_bencana' | 'natgeo' | 'relief_topographic' | 'modern_clean'"),
+@tool("Create a publication-quality styled print layout with professional themes: 'infographic_disaster' (or 'infographic_bencana': disaster dashboard with inset, chart, and multi-bar legends like BNPB), 'natgeo' (National Geographic: classic neatline borders, serif typography, warm tones), 'relief_topographic' (Swiss/Imhof alpine topo), or 'modern_clean' (executive corporate).",
+      {"name": S("string", "layout name, default 'Map'"),
+       "style_theme": S("string", "'infographic_disaster' | 'infographic_bencana' | 'natgeo' | 'relief_topographic' | 'modern_clean'"),
        "title": S("string", "main map title"), "subtitle": S("string", "subtitle"),
        "credits": S("string", "credits and data source"),
        "extent_layer": S("string", "main study area layer name"),
        "page_size": S("string", "A4|A3|A2, default A3"),
        "orientation": S("string", "landscape|portrait, default landscape"),
        "grid": S("boolean", "include coordinate grid (default true)")})
-def create_styled_layout(name="Peta", style_theme="infographic_bencana", title="", subtitle="", credits="",
+def create_styled_layout(name="Map", style_theme="infographic_disaster", title="", subtitle="", credits="",
                          extent_layer=None, page_size="A3", orientation="landscape", grid=True):
     p = QgsProject.instance()
     mgr = p.layoutManager()
@@ -1233,7 +1233,7 @@ def create_styled_layout(name="Peta", style_theme="infographic_bencana", title="
 
     # Configure Theme Styles
     is_natgeo = (style_theme == "natgeo")
-    is_infographic = (style_theme == "infographic_bencana")
+    is_infographic = (style_theme in ("infographic_bencana", "infographic_disaster"))
     is_relief = (style_theme == "relief_topographic")
 
     font_family = "Georgia" if is_natgeo else "Arial"

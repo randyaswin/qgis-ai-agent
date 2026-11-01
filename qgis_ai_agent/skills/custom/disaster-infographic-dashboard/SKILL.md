@@ -1,59 +1,69 @@
 ---
 name: disaster-infographic-dashboard
 description: Use when building comprehensive disaster, hazard, or incident infographic maps (like BNPB / BPBD / BMKG situational dashboards). Covers combining relief DEM, multi-category incident symbols, KDE heatmap density, 10km cluster buffer zones, capital city inset map, callout cards A-B-C-D-E, horizontal bar chart ranking, and continuous gradient legend bars.
-keywords: disaster, bencana, infografis, dashboard, bnpb, bpbd, bali, banjir, longsor, kebakaran, gempa, kejadian, callout, cluster, inset, denpasar, diagram batang, bar chart, heatmap, relief, peta komposit
+keywords: disaster, hazard, incident, infographic, dashboard, bnpb, bpbd, situational map, flood, landslide, fire, callout, cluster, inset, bar chart, heatmap, relief, composite map, bencana, infografis, kejadian
 license: MIT
 ---
 
-# Peta Infografis & Situational Disaster Dashboard
+# Situational Disaster & Hazard Infographic Dashboard
 
-Panduan komprehensif membuat peta infografis bencana setara standar BNPB/BPBD (seperti Peta Kejadian Bencana Provinsi Bali):
+Comprehensive guide for creating professional disaster and hazard situational infographic maps (such as provincial/national disaster situational reports):
 
-## 1. Persiapan Data & Geometri
-1. **Sistem Proyeksi (CRS) & Peta Dasar (Basemap):**
-   - Wajib gunakan proyeksi metrik UTM lokal (misal Bali = EPSG:32750 / UTM Zona 50S; Jawa = Zona 48S/49S). Panggil `set_project_crs` sebelum menghitung buffer atau KDE.
-   - Peta dasar wajib menggunakan XYZ tile tanpa API key: panggil `add_basemap(preset="carto_light")` (Carto Positron berona abu-abu lembut agar titik tematik menonjol) atau `add_basemap(preset="esri_satellite")` jika membutuhkan citra satelit tanpa kunci. Atur transparansi dengan `update_layer(opacity=0.4)`.
-2. **Relief Medan (DEM):**
-   - Turunkan hillshade dari DEM (`native:hillshade`, Azimuth 315°, V_Angle 45°).
-   - Terapkan simbologi pseudocolor elevasi halus (`style_raster` dengan ramp `Spectral` atau `YlOrBr` dibalik), lalu letakkan hillshade di atasnya dengan transparansi 45-50% (`update_layer opacity=0.5`).
-3. **Titik Kejadian Bencana (Multi-simbol):**
-   - Terapkan `style_categorized` berdasarkan kolom jenis bencana dengan bentuk simbol standar kartografi bencana:
-     - **Banjir**: Lingkaran biru (`#1976d2`)
-     - **Tanah Longsor**: Segitiga cokelat/merah (`#d32f2f`)
-     - **Kebakaran Hutan/Lahan**: Belah ketupat oranye (`#f57c00`)
-     - **Kebakaran Gedung/Permukiman**: Kotak merah bata (`#c2185b`)
-     - **Cuaca Ekstrem / Angin**: Bintang ungu (`#7b1fa2`)
-     - **Kekeringan**: Lingkaran kuning/emas (`#fbc02d`)
-4. **Heatmap Kepadatan (KDE):**
-   - Jalankan `qgis:heatmapkerneldensityestimation` dengan radius pencarian 10 km (10.000 meter) dan ukuran piksel 100 m.
-   - Beri simbologi `style_raster` dengan ramp `YlOrRd` (kuning ke merah tua) dan transparansi bawah agar peta dasar tetap terlihat.
-5. **Zonasi Lingkaran Cluster (10 km):**
-   - Lakukan agregasi titik atau pilih titik pusat kluster utama, lalu buat buffer 10 km (`native:buffer` jarak 10.000 m).
-   - Beri style garis lingkar tipis putih/merah tanpa isian (`style_single` dengan outline 0.8 mm dan opacity 0.7).
+---
 
-## 2. Penyusunan Layout Infografis Komposit
-Gunakan tool layout modern bertahap:
-1. **Inisialisasi Template Peta:**
-   - Panggil `create_styled_layout(name="Peta Bencana", style_theme="infographic_bencana", title="PETA KEJADIAN BENCANA PROVINSI BALI", subtitle="OKTOBER 2026", page_size="A3", orientation="landscape", grid=True)`.
-   - Tool ini otomatis membuat frame peta utama bergrid derajat/menit, skala, arah utara, dan ruang khusus untuk inset dan diagram.
-2. **Peta Inset Detail (Ibu Kota / Titik Kritis):**
-   - Panggil `add_layout_inset_map(layout="Peta Bencana", x=12, y=60, width=80, height=85, extent_layer="Denpasar", title="DETAIL KOTA DENPASAR", show_overview_on_main=True, grid=True)`.
-   - Inset map otomatis memiliki skala sendiri dan memunculkan kotak penunjuk lokasi (*overview rectangle*) di peta utama.
-3. **Kartu Callout Cluster (A, B, C, D, E):**
-   - Panggil `add_layout_callout_box` untuk kluster-kluster kritis:
-     - `badge="A"`, `title="SAMBANGAN · BULELENG"`, `subtitle="18 kejadian · radius 10 km"`.
-     - `badge="B"`, `title="TULIKUP DAN SEKITARNYA"`, `subtitle="18 kejadian · radius 10 km"`.
-     - `badge="C"`, `title="PEMECUTAN KAJA · DENPASAR"`, `subtitle="15 kejadian · radius 10 km"`.
-4. **Legenda Bar Gradien Horizontal:**
-   - Panggil `add_layout_gradient_legend` untuk variabel kontinu di bagian bawah peta:
-     - Ketinggian: `title="Ketinggian (m)"`, `ramp="Spectral"`, `min_val="-3"`, `max_val="2.945"`, `invert_ramp=True`.
-     - Bahaya Banjir: `title="Indeks bahaya banjir"`, `ramp="Blues"`, `min_val="0 Rendah"`, `max_val="1 Tinggi"`.
-     - Kepadatan: `title="Kepadatan kejadian"`, `ramp="YlOrRd"`, `min_val="Rendah"`, `max_val="Tinggi"`.
-5. **Kartu Infografis Diagram Batang:**
-   - Kumpulkan jumlah kejadian per kabupaten (bisa dari `qgis:statisticsbycategories` atau agregasi).
-   - Panggil `add_layout_infographic_chart(layout="Peta Bencana", x=325, y=200, width=85, height=85, title="KEJADIAN PER KABUPATEN/KOTA", subtitle="Oktober 2026 · total 143 kejadian", data=[{"label":"Buleleng","value":36}, {"label":"Karangasem","value":27}, ...], bar_color="#2b5c8f")`.
+## 1. Data Preparation & Geometry
 
-## 3. Verifikasi & Ekspor
-1. Panggil `export_layout(name="Peta Bencana", path=".../peta_bencana_bali.png", preview=True)` untuk menginspeksi visual peta langsung di chat.
-2. Periksa keselarasan teks, keterbacaan label, dan kontras warna.
-3. Ekspor versi cetak resolusi tinggi: `export_layout(name="Peta Bencana", path=".../peta_bencana_bali.pdf", dpi=300)`.
+1. **Coordinate Reference System (CRS) & Basemap:**
+   - Always use a local metric projected CRS (e.g. UTM Zone). Call `set_project_crs` before calculating buffers or KDE heatmaps.
+   - Use 100% free, keyless XYZ tile basemaps: call `add_basemap(preset="carto_light")` (CartoDB Positron with soft gray tones so thematic layers stand out) or `add_basemap(preset="esri_satellite")` for aerial imagery. Adjust opacity if needed (`update_layer(opacity=0.4)`).
+2. **Terrain Relief (DEM):**
+   - Derive hillshade from DEM (`native:hillshade`, Azimuth 315°, V_Angle 45°).
+   - Apply smooth elevation pseudocolor symbology (`style_raster` with `Spectral` or inverted `YlOrBr` ramp), overlaying hillshade on top with 45–50% opacity (`update_layer opacity=0.5`).
+3. **Incident Points (Categorized Symbology):**
+   - Apply `style_categorized` based on incident type column using standard emergency cartography shapes and colors:
+     - **Flood**: Blue circle (`#1976d2`)
+     - **Landslide**: Brown/red triangle (`#d32f2f`)
+     - **Wildfire / Forest Fire**: Orange diamond (`#f57c00`)
+     - **Building / Urban Fire**: Crimson square (`#c2185b`)
+     - **Extreme Weather / Storm**: Purple star (`#7b1fa2`)
+     - **Drought**: Golden yellow circle (`#fbc02d`)
+4. **Heatmap Density (KDE):**
+   - Run `qgis:heatmapkerneldensityestimation` with an appropriate search radius (e.g., 10,000 meters / 10 km) and 100m pixel size.
+   - Style with `style_raster` using `YlOrRd` (yellow to dark red) ramp and lower-end transparency so base features remain visible.
+5. **Cluster Ring Buffers (10 km):**
+   - Aggregate points or select primary cluster centroids, then generate 10 km buffers (`native:buffer` distance 10,000 m).
+   - Apply thin outline symbology with no fill (`style_single` with 0.8 mm outline width and 0.7 opacity).
+
+---
+
+## 2. Assembling Composite Infographic Layouts
+
+Use the modern composite layout tools step-by-step:
+
+1. **Initialize Layout Template:**
+   - Call `create_styled_layout(name="Disaster_Map", style_theme="infographic_disaster", title="PROVINCIAL DISASTER SITUATION REPORT", subtitle="OCTOBER 2026", page_size="A3", orientation="landscape", grid=True)`.
+   - Automatically sets up a neatline frame with graticules, north arrow, scale bar, and reserved space for insets and analytics cards.
+2. **Detail Urban / Regional Inset Map:**
+   - Call `add_layout_inset_map(layout="Disaster_Map", x=12, y=60, width=80, height=85, extent_layer="Capital_City", title="DETAIL CAPITAL CITY", show_overview_on_main=True, grid=True)`.
+   - The inset map maintains its own scale and automatically renders an overview rectangle on the main map canvas.
+3. **Cluster Callout Cards (A, B, C, D, E):**
+   - Call `add_layout_callout_box` for significant hazard clusters:
+     - `badge="A"`, `title="NORTH CLUSTER"`, `subtitle="18 incidents · 10 km radius"`.
+     - `badge="B"`, `title="EAST CLUSTER"`, `subtitle="18 incidents · 10 km radius"`.
+     - `badge="C"`, `title="METROPOLITAN CLUSTER"`, `subtitle="15 incidents · 10 km radius"`.
+4. **Horizontal Gradient Legend Bars:**
+   - Call `add_layout_gradient_legend` for continuous variables along the bottom dock:
+     - Elevation: `title="Elevation (m)"`, `ramp="Spectral"`, `min_val="-3"`, `max_val="2,945"`, `invert_ramp=True`.
+     - Flood Hazard: `title="Flood hazard index"`, `ramp="Blues"`, `min_val="0 Low"`, `max_val="1 High"`.
+     - Incident Density: `title="Incident density"`, `ramp="YlOrRd"`, `min_val="Low"`, `max_val="High"`.
+5. **Infographic Bar Chart:**
+   - Aggregate incidents per administrative division.
+   - Call `add_layout_infographic_chart(layout="Disaster_Map", x=325, y=200, width=85, height=85, title="INCIDENTS BY DISTRICT", subtitle="October 2026 · total 143 incidents", data=[{"label":"District A","value":36}, {"label":"District B","value":27}, ...], bar_color="#2b5c8f")`.
+
+---
+
+## 3. Verification & Export
+
+1. Call `export_layout(name="Disaster_Map", path=".../disaster_map_preview.png", preview=True)` to inspect the rendered map directly in the agent chat.
+2. Check typography hierarchy, label readability, and color contrast.
+3. Export publication-quality print deliverable: `export_layout(name="Disaster_Map", path=".../disaster_map.pdf", dpi=300)`.

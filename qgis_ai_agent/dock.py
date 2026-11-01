@@ -29,71 +29,71 @@ def summarize_tool_result(name, result):
         return html.escape(str(result)[:250])
     if name == "snapshot_canvas":
         kb = len(result.get("__image__", "")) * 3 // 4 // 1024
-        return f"Tangkapan layar kanvas berhasil diambil ({kb} KB)"
+        return f"Canvas screenshot captured ({kb} KB)"
     if name == "export_layout":
         meta = result.get("meta", result)
         path = meta.get("path", "")
-        succ = "Berhasil" if meta.get("success") else "Gagal"
-        return f"Layout diekspor ke <code>{html.escape(path)}</code> ({succ})"
+        succ = "Success" if meta.get("success") else "Failed"
+        return f"Layout exported to <code>{html.escape(path)}</code> ({succ})"
     if name == "create_layout":
-        return f"Layout cetak '<b>{html.escape(result.get('layout', ''))}</b>' dibuat (Ukuran: {result.get('page_mm', [])} mm, Skala 1:{result.get('map_scale', 0):,.0f})"
+        return f"Print layout '<b>{html.escape(result.get('layout', ''))}</b>' created (Page: {result.get('page_mm', [])} mm, Scale 1:{result.get('map_scale', 0):,.0f})"
     if name == "create_styled_layout":
-        return f"Layout bergaya '<b>{html.escape(result.get('theme', ''))}</b>' (<b>{html.escape(result.get('layout', ''))}</b>) berhasil dibuat"
+        return f"Styled layout '<b>{html.escape(result.get('theme', ''))}</b>' (<b>{html.escape(result.get('layout', ''))}</b>) successfully created"
     if name == "add_layout_inset_map":
-        return "🖼️ Peta inset detail ditambahkan ke layout (overview rectangle tersambung)"
+        return "🖼️ Inset detail map added to layout (linked overview rectangle)"
     if name == "add_layout_infographic_chart":
-        return f"📊 Kartu infografis diagram batang ({result.get('items', 0)} item) ditambahkan ke layout"
+        return f"📊 Infographic bar chart ({result.get('items', 0)} items) added to layout"
     if name == "add_layout_gradient_legend":
-        return f"🌈 Bar gradien legenda horizontal '<b>{html.escape(result.get('title', ''))}</b>' ditambahkan ke layout"
+        return f"🌈 Horizontal gradient legend bar '<b>{html.escape(result.get('title', ''))}</b>' added to layout"
     if name == "add_layout_callout_box":
-        return f"🏷️ Kartu callout cluster <b>{html.escape(result.get('badge', ''))}</b> ('{html.escape(result.get('title', ''))}') ditambahkan"
+        return f"🏷️ Cluster callout card <b>{html.escape(result.get('badge', ''))}</b> ('{html.escape(result.get('title', ''))}') added"
     if name == "list_public_geodata_sources":
-        return "🌐 Katalog sumber data geospasial publik (Overture, STAC, COG) dimuat"
+        return "🌐 Public open geospatial data catalog (Overture, STAC, COG) loaded"
     if name == "search_stac_items":
-        return f"🛰️ Pencarian STAC menemukan {result.get('found_count', 0)} item citra/elevasi COG"
+        return f"🛰️ STAC search found {result.get('found_count', 0)} COG imagery/elevation items"
     if name == "load_public_cog":
-        return f"🛰️ COG raster '<b>{html.escape(result.get('name', ''))}</b>' dimuat langsung via streaming HTTP/S3"
+        return f"🛰️ COG raster '<b>{html.escape(result.get('name', ''))}</b>' streamed via HTTP/S3"
     if name == "query_overture_maps":
-        return f"🏢 Overture Maps '<b>{html.escape(result.get('name', ''))}</b>' dimuat ({result.get('features', 0)} fitur)"
+        return f"🏢 Overture Maps '<b>{html.escape(result.get('name', ''))}</b>' loaded ({result.get('features', 0)} features)"
     if name == "query_duckdb_spatial":
-        return f"🦆 Query spasial DuckDB '<b>{html.escape(result.get('name', ''))}</b>' selesai ({result.get('features', 0)} fitur)"
+        return f"🦆 DuckDB spatial query '<b>{html.escape(result.get('name', ''))}</b>' executed ({result.get('features', 0)} features)"
     if name == "add_vector_layer":
-        return f"Layer vektor '<b>{html.escape(result.get('name', ''))}</b>' dimuat ({result.get('geometry')}, {result.get('features')} fitur, CRS: {result.get('crs')})"
+        return f"Vector layer '<b>{html.escape(result.get('name', ''))}</b>' loaded ({result.get('geometry')}, {result.get('features')} features, CRS: {result.get('crs')})"
     if name == "add_raster_layer":
-        return f"Layer raster '<b>{html.escape(result.get('name', ''))}</b>' dimuat ({result.get('width')}x{result.get('height')} px, {result.get('bands')} band, CRS: {result.get('crs')})"
+        return f"Raster layer '<b>{html.escape(result.get('name', ''))}</b>' loaded ({result.get('width')}x{result.get('height')} px, {result.get('bands')} bands, CRS: {result.get('crs')})"
     if name == "add_basemap":
-        return f"Basemap '<b>{html.escape(result.get('name', ''))}</b>' berhasil dimuat"
+        return f"Basemap '<b>{html.escape(result.get('name', ''))}</b>' loaded"
     if name == "run_processing":
         new_lyrs = [l.get("name") for l in result.get("new_layers", []) if isinstance(l, dict)]
-        nl_str = f"Layer baru: <b>{', '.join(html.escape(n) for n in new_lyrs)}</b>" if new_lyrs else "Operasi selesai"
-        return f"Algoritma geoprocessing selesai ({nl_str})"
+        nl_str = f"New layers: <b>{', '.join(html.escape(n) for n in new_lyrs)}</b>" if new_lyrs else "Operation finished"
+        return f"Geoprocessing algorithm completed ({nl_str})"
     if name == "open_processing_toolbox":
-        return "🛠️ Panel Processing Toolbox dibuka di QGIS"
+        return "🛠️ Processing Toolbox panel opened in QGIS"
     if name == "open_processing_algorithm_dialog":
-        return f"🛠️ Dialog algoritma '<b>{html.escape(result.get('display_name', ''))}</b>' dibuka di QGIS"
+        return f"🛠️ Algorithm dialog '<b>{html.escape(result.get('display_name', ''))}</b>' opened in QGIS"
     if name == "open_model_designer":
-        return "🛠️ Graphical Model Designer dibuka di QGIS"
+        return "🛠️ Graphical Model Designer opened in QGIS"
     if name == "list_processing_providers":
-        return f"🛠️ Ditemukan {len(result)} provider geoprocessing aktif"
+        return f"🛠️ Found {len(result)} active geoprocessing providers"
     if name == "calculate_field":
-        return f"Kolom berhasil dihitung ({result.get('updated')} fitur diperbarui)"
+        return f"Field calculated successfully ({result.get('updated')} features updated)"
     if name == "set_labels":
-        st = "diaktifkan" if result.get("labels") else "dinonaktifkan"
-        return f"Pengaturan label {st}"
+        st = "enabled" if result.get("labels") else "disabled"
+        return f"Layer labeling {st}"
     if name.startswith("style_"):
-        return f"Gaya visualisasi ({html.escape(name)}) berhasil diterapkan"
+        return f"Symbology style ({html.escape(name)}) applied"
     if name == "describe_layer":
-        return f"Inspeksi '<b>{html.escape(result.get('name', ''))}</b>': Tipe={result.get('layer_type')}, CRS={result.get('crs')}, Fitur={result.get('feature_count', '-')}"
+        return f"Inspect '<b>{html.escape(result.get('name', ''))}</b>': Type={result.get('layer_type')}, CRS={result.get('crs')}, Features={result.get('feature_count', '-')}"
     if name == "describe_all_layers":
-        return f"Inspeksi proyek: {len(result.get('layers', []))} layer terdeteksi"
+        return f"Project audit: {len(result.get('layers', []))} layers detected"
     if name == "get_project_state":
-        return f"Proyek aktif: CRS={result.get('crs')}, {len(result.get('layers_top_to_bottom', []))} layer, {len(result.get('layouts', []))} layout"
+        return f"Active project: CRS={result.get('crs')}, {len(result.get('layers_top_to_bottom', []))} layers, {len(result.get('layouts', []))} layouts"
     if name == "load_skill":
-        return f"Panduan skill '<b>{html.escape(result.get('skill', ''))}</b>' berhasil dimuat"
+        return f"Skill guide '<b>{html.escape(result.get('skill', ''))}</b>' loaded"
     if name == "list_skills":
-        return f"Ditemukan {len(result)} skill relevan"
+        return f"Found {len(result)} relevant skills"
     if name == "zoom_to":
-        return "Tampilan kanvas dipusatkan"
+        return "Canvas view centered"
     # Fallback to compact JSON
     s = json.dumps(result, ensure_ascii=False, default=str)
     return html.escape(s[:250] + ("..." if len(s) > 250 else ""))
@@ -131,7 +131,7 @@ class AgentDock(QDockWidget):
         self.cli.currentIndexChanged.connect(self._on_cli_changed)
 
         reg = QPushButton("Register MCP")
-        reg.setToolTip("Daftarkan server QGIS ke konfigurasi MCP CLI ini (cukup 1x)")
+        reg.setToolTip("Register QGIS server with this CLI MCP configuration (run once)")
         reg.clicked.connect(self._register)
 
         row1.addWidget(QLabel("CLI:"))
@@ -139,18 +139,18 @@ class AgentDock(QDockWidget):
         row1.addWidget(reg)
         lay.addLayout(row1)
 
-        # Row 2: Model & Reasoning Effort (Bobot)
+        # Row 2: Model & Reasoning Effort
         row2 = QHBoxLayout()
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)
-        self.model_combo.setToolTip("Pilih model atau ketik custom model ID")
+        self.model_combo.setToolTip("Select model or enter custom model ID")
 
         self.effort_combo = QComboBox()
-        self.effort_combo.addItem("Bobot: Default", "default")
-        self.effort_combo.addItem("Bobot: Low", "low")
-        self.effort_combo.addItem("Bobot: Medium", "medium")
-        self.effort_combo.addItem("Bobot: High", "high")
-        self.effort_combo.addItem("Bobot: Max", "max")
+        self.effort_combo.addItem("Effort: Default", "default")
+        self.effort_combo.addItem("Effort: Low", "low")
+        self.effort_combo.addItem("Effort: Medium", "medium")
+        self.effort_combo.addItem("Effort: High", "high")
+        self.effort_combo.addItem("Effort: Max", "max")
         saved_effort = s.value(SKEY + "effort", "default")
         self.effort_combo.setCurrentIndex(max(0, self.effort_combo.findData(saved_effort)))
         self.effort_combo.currentIndexChanged.connect(self._save_model_settings)
@@ -164,23 +164,23 @@ class AgentDock(QDockWidget):
         # Row 3: Skills & Quick Tools Access
         row3 = QHBoxLayout()
         self.skill_mode = QComboBox()
-        self.skill_mode.addItem("Skills: Auto (Pilih Otomatis)", "auto")
-        self.skill_mode.addItem("Skills: Manual (Hanya Pinned)", "manual")
-        self.skill_mode.addItem("Skills: Off (Tanpa Skills)", "off")
+        self.skill_mode.addItem("Skills: Auto (Smart Select)", "auto")
+        self.skill_mode.addItem("Skills: Manual (Pinned Only)", "manual")
+        self.skill_mode.addItem("Skills: Off (Disabled)", "off")
         saved_mode = s.value(SKEY + "skill_mode", "auto")
         self.skill_mode.setCurrentIndex(max(0, self.skill_mode.findData(saved_mode)))
         self.skill_mode.currentIndexChanged.connect(self._on_skill_mode_changed)
 
         btn_skills = QPushButton("Skills...")
-        btn_skills.setToolTip("Buka Skills Manager untuk melihat, pin, atau pasang skill baru")
+        btn_skills.setToolTip("Open Skills Manager to inspect, pin, or install new skills")
         btn_skills.clicked.connect(self._open_skills_dialog)
 
         btn_toolbox = QPushButton("Toolbox...")
-        btn_toolbox.setToolTip("Buka Processing Toolbox QGIS")
+        btn_toolbox.setToolTip("Open QGIS Processing Toolbox panel")
         btn_toolbox.clicked.connect(self._open_toolbox)
 
         btn_prompt_inspect = QPushButton("Prompt...")
-        btn_prompt_inspect.setToolTip("Lihat atau sesuaikan System Prompt & Aturan Tambahan")
+        btn_prompt_inspect.setToolTip("View or edit System Prompt & Custom Instructions")
         btn_prompt_inspect.clicked.connect(self._inspect_prompt)
 
         row3.addWidget(self.skill_mode, 1)
@@ -202,14 +202,14 @@ class AgentDock(QDockWidget):
         # Row 5: Checkboxes Toggles
         row5 = QHBoxLayout()
         self.auto = QCheckBox("Auto-approve")
-        self.auto.setToolTip("Lewati konfirmasi izin alat secara otomatis pada CLI.")
+        self.auto.setToolTip("Automatically approve tool calls without CLI confirmation prompts.")
         self.auto.setChecked(s.value(SKEY + "auto", True, type=bool))
         self.pyexec = QCheckBox("Allow exec_pyqgis")
         self.pyexec.setChecked(s.value(SKEY + "pyexec", False, type=bool))
         self.pyexec.toggled.connect(lambda v: tools.ALLOW_PYTHON.__setitem__("value", v))
         tools.ALLOW_PYTHON["value"] = self.pyexec.isChecked()
         self.cont = QCheckBox("Continue session")
-        self.cont.setToolTip("Lanjutkan sesi percakapan CLI sebelumnya")
+        self.cont.setToolTip("Continue previous AI CLI session context")
         for c in (self.auto, self.pyexec, self.cont):
             row5.addWidget(c)
         lay.addLayout(row5)
@@ -222,7 +222,7 @@ class AgentDock(QDockWidget):
 
         # User prompt input
         self.prompt = QPlainTextEdit()
-        self.prompt.setPlaceholderText("Ketik perintah peta (misal: 'Buka processing toolbox dan jalankan buffer 500m pada layer jalan' atau 'Buat peta kepadatan...') [Ctrl+Enter]")
+        self.prompt.setPlaceholderText("Type map request (e.g. 'Build a disaster infographic layout with inset map and bar chart' or 'Buffer roads 500m') [Ctrl+Enter]")
         self.prompt.setMaximumHeight(95)
         lay.addWidget(self.prompt)
 
@@ -277,9 +277,9 @@ class AgentDock(QDockWidget):
         sup_effort = adapter.get("supports_effort", False)
         self.effort_combo.setEnabled(sup_effort)
         if not sup_effort:
-            self.effort_combo.setToolTip("CLI ini mengatur bobot melalui pemilihan model langsung")
+            self.effort_combo.setToolTip("This CLI controls reasoning effort via model selection directly")
         else:
-            self.effort_combo.setToolTip("Atur bobot reasoning / thinking effort untuk model terpilih")
+            self.effort_combo.setToolTip("Set reasoning / thinking effort for the selected model")
 
         s.setValue(SKEY + "cli", cli_name)
 
@@ -304,7 +304,7 @@ class AgentDock(QDockWidget):
         res = tools.open_processing_toolbox()
         self._append_html(
             f"<div style='margin: 4px 0; padding: 4px 8px; background-color: #e8f5e9; border-radius: 3px; font-size: 11px; color: #1b5e20;'>"
-            f"🛠️ <b>Processing Toolbox:</b> Panel berhasil dibuka di jendela QGIS.</div>"
+            f"🛠️ <b>Processing Toolbox:</b> Panel opened in QGIS.</div>"
         )
 
     def _inspect_prompt(self):
@@ -312,14 +312,14 @@ class AgentDock(QDockWidget):
         dlg.setWindowTitle("System Prompt & Custom Instructions")
         dlg.resize(650, 480)
         d_lay = QVBoxLayout(dlg)
-        d_lay.addWidget(QLabel("Aturan Tambahan Pengguna (diinjeksi ke setiap prompt baru):"))
+        d_lay.addWidget(QLabel("User Custom Instructions (injected into every new prompt):"))
         txt = QTextEdit()
         txt.setPlainText(self.custom_instructions)
         d_lay.addWidget(txt, 1)
         btn_box = QHBoxLayout()
-        btn_save = QPushButton("Simpan")
+        btn_save = QPushButton("Save")
         btn_save.clicked.connect(lambda: (self._save_instructions(txt.toPlainText()), dlg.accept()))
-        btn_cancel = QPushButton("Batal")
+        btn_cancel = QPushButton("Cancel")
         btn_cancel.clicked.connect(dlg.reject)
         btn_box.addStretch()
         btn_box.addWidget(btn_save)
@@ -378,7 +378,7 @@ class AgentDock(QDockWidget):
         card = (
             f"<div style='margin: 4px 0 2px 8px; padding: 5px 8px; background-color: #fffde7; "
             f"border-left: 3px solid #fbc02d; border-radius: 3px; font-size: 11px; color: #4e342e;'>"
-            f"<b>⚙️ Aksi QGIS:</b> <code>{html.escape(name)}</code> <span style='color: #6d4c41;'>({args_str})</span>"
+            f"<b>⚙️ QGIS Action:</b> <code>{html.escape(name)}</code> <span style='color: #6d4c41;'>({args_str})</span>"
             f"</div>"
         )
         self._append_html(card)
@@ -393,13 +393,13 @@ class AgentDock(QDockWidget):
             img_html = (
                 f"<div style='margin: 6px 0 6px 8px; text-align: center;'>"
                 f"<img src='data:{mime};base64,{b64}' style='max-width: 96%; border: 1px solid #b0bec5; border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,0.15);'><br>"
-                f"<span style='font-size: 10px; color: #546e7a;'>🖼️ Pratinjau Visual Peta ({html.escape(name)})</span>"
+                f"<span style='font-size: 10px; color: #546e7a;'>🖼️ Map Visual Preview ({html.escape(name)})</span>"
                 f"</div>"
             )
         card = (
             f"<div style='margin: 2px 0 6px 8px; padding: 5px 8px; background-color: #e8f5e9; "
             f"border-left: 3px solid #43a047; border-radius: 3px; font-size: 11px; color: #1b5e20;'>"
-            f"<b>✅ Hasil:</b> {summary}"
+            f"<b>✅ Result:</b> {summary}"
             f"</div>{img_html}"
         )
         self._append_html(card)
@@ -409,7 +409,7 @@ class AgentDock(QDockWidget):
         card = (
             f"<div style='margin: 4px 0 4px 8px; padding: 5px 8px; background-color: #ffebee; "
             f"border-left: 3px solid #e53935; border-radius: 3px; font-size: 11px; color: #b71c1c;'>"
-            f"<b>❌ Gagal mengeksekusi {html.escape(name)}:</b> {html.escape(err_msg)}"
+            f"<b>❌ Failed to execute {html.escape(name)}:</b> {html.escape(err_msg)}"
             f"</div>"
         )
         self._append_html(card)
@@ -432,8 +432,8 @@ class AgentDock(QDockWidget):
         p = QgsProject.instance()
         layers = p.mapLayers().values()
         if not layers:
-            return "Project kosong (tidak ada layer yang sedang dimuat)."
-        summary = [f"Project CRS: {p.crs().authid()} | File: {p.fileName() or '(belum disimpan)'}"]
+            return "Empty project (no layers currently loaded)."
+        summary = [f"Project CRS: {p.crs().authid()} | File: {p.fileName() or '(unsaved)'}"]
         for lyr in layers:
             info = f"- '{lyr.name()}' ({lyr.type().name.lower() if hasattr(lyr.type(), 'name') else str(lyr.type())}, CRS={lyr.crs().authid()})"
             if hasattr(lyr, "featureCount"):
@@ -488,7 +488,7 @@ class AgentDock(QDockWidget):
             f"<div style='margin: 8px 0 4px 0; padding: 8px 12px; background-color: #e3f2fd; "
             f"border-left: 4px solid #1976d2; border-radius: 4px;'>"
             f"<div style='font-size: 11px; font-weight: bold; color: #1565c0; margin-bottom: 3px;'>"
-            f"🧑 ANDA ({now_str})</div>"
+            f"🧑 YOU ({now_str})</div>"
             f"<div style='font-size: 13px; color: #0d47a1; white-space: pre-wrap;'>{html.escape(user)}</div>"
             f"</div>"
         )
@@ -500,7 +500,7 @@ class AgentDock(QDockWidget):
         if selected_model:
             meta_badges.append(f"Model: <code>{html.escape(selected_model)}</code>")
         if selected_effort and selected_effort != "default":
-            meta_badges.append(f"Bobot: <code>{html.escape(selected_effort)}</code>")
+            meta_badges.append(f"Effort: <code>{html.escape(selected_effort)}</code>")
         if loaded_skills:
             meta_badges.append(f"Skills: <b>{', '.join(html.escape(s) for s in loaded_skills)}</b>")
 
@@ -528,7 +528,7 @@ class AgentDock(QDockWidget):
         done_html = (
             f"<div style='margin: 8px 0; padding: 4px 10px; background-color: #f5f5f5; border-radius: 4px; "
             f"font-size: 11px; color: {status_color}; text-align: right;'>"
-            f"🏁 <b>Selesai</b> dalam {elapsed:.1f} detik (Exit Code: {code})"
+            f"🏁 <b>Finished</b> in {elapsed:.1f}s (Exit Code: {code})"
             f"</div>"
         )
         self._append_html(done_html)

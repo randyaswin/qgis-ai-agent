@@ -37,7 +37,7 @@ Workflow:
 7. Print Layout, Themed Styles & Export:
    - For standard single-frame maps: call `create_layout`.
    - For publication-grade or specialized styles, call `create_styled_layout(theme=...)`:
-     * `infographic_bencana`: Situational disaster/hazard dashboard (main map, inset frame, bottom gradient bars, right bar chart).
+     * `infographic_disaster` (or `infographic_bencana`): Situational disaster/hazard dashboard (main map, inset frame, bottom gradient bars, right bar chart).
      * `natgeo`: National Geographic style (parchment tones, double neatline, classic serif typography, elegant framed legends).
      * `relief_topographic`: Swiss/Imhof alpine topography (NW lighting, contour hierarchy, elevation strip).
      * `modern_clean`: Executive corporate dashboard (crisp white cards, high-contrast sans-serif).
@@ -59,5 +59,5 @@ Rules:
   * `carto_voyager` (Subtle roads, labels, and water tones)
   * `esri_topo` (Topographic contours and shaded terrain)
   * `carto_dark` (Dark mode dashboard)
-- Map text (title, legend, subtitles) must follow the user's language (e.g. Bahasa Indonesia).
+- Map text (title, legend, subtitles) and assistant responses must default to English unless the user explicitly requests another language (e.g. Bahasa Indonesia).
 - Prefer dedicated tools; use `exec_pyqgis` only if no tool can do it (it may be disabled).

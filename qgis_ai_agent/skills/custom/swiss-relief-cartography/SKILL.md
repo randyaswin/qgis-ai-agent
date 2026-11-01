@@ -1,32 +1,41 @@
 ---
 name: swiss-relief-cartography
 description: Use when the user requests a Swiss-style alpine topographic map, Eduard Imhof relief shading, or high-precision mountain cartography. Covers multidirectional shaded relief, cool shadow tinting, elevation contour hierarchy, rock drawing, and Swiss Federal Topography (swisstopo) conventions.
-keywords: swiss, imhof, swisstopo, relief style, alpine, topography, topografi, pegunungan, kontur, shaded relief, swiss style, bayangan gunung, kemiringan lereng, elevasi presisi
+keywords: swiss, imhof, swisstopo, relief style, alpine, topography, shaded relief, swiss style, alpine cartography, mountain contours, elevation
 license: MIT
 ---
 
-# Swiss Alpine & Imhof Topographic Relief Cartography
+# Swiss Alpine & Eduard Imhof Topographic Relief Cartography
 
-Terinspirasi oleh standar emas kartografi topografi Swiss (*Federal Office of Topography swisstopo* dan karya Profesor Eduard Imhof).
+Inspired by the gold standard of Swiss alpine cartography (*Federal Office of Topography swisstopo* and the foundational works of Professor Eduard Imhof).
 
-## 1. Prinsip Relief & Pencahayaan Imhof
-- **Arah Cahaya Alami:** Sudut azimuth 315° (Barat Laut), elevasi matahari 45°. Lereng yang menghadap Barat Laut menerima cahaya terang, lereng Tenggara berada dalam bayangan.
-- **Teori Warna Bayangan:**
-  - Bagian terkena cahaya: nada hangat (kuning gading / putih lembut).
-  - Bagian bayangan: nada sejuk kebiruan (bukan hitam pekat, melainkan abu-abu kebiruan *slate blue*).
-- **Kombinasi Layer Relief di QGIS:**
-  1. Layer dasar: Shaded relief reguler (`native:hillshade`).
-  2. Layer kedua: Slope (kemiringan lereng) dengan transparansi untuk mempertegas tebing curam.
-  3. Layer ketiga: Hypsometric tinting lembut (`style_raster` dengan palet hijau lembut ke krem ke putih).
+---
 
-## 2. Hierarki Garis Kontur (Topographic Contours)
-Gunakan `gdal:contour` dengan pembagian berjenjang:
-- **Garis Kontur Standar (*Intermediate*):** Interval reguler (misal 25 m atau 50 m), ketebalan garis sangat tipis (0.12 - 0.15 mm), warna cokelat zaitun atau sepia (`#7a6348`).
-- **Garis Kontur Indeks (*Index Contours*):** Setiap kelipatan ke-5 (misal 100 m atau 250 m), ketebalan garis 0.28 - 0.35 mm.
-- **Pelabelan Kontur:** Hanya berikan label angka pada garis kontur indeks (`set_labels` dengan filter kelipatan), arah label melengkung mengikuti garis kontur (*curved placement*), dengan halo putih tipis (0.8 mm).
+## 1. Principles of Imhof Shaded Relief
 
-## 3. Komposisi Tata Letak (Layout)
-- Panggil `create_styled_layout(name="Peta Topografi", style_theme="relief_topographic", title="TOPOGRAFI PEGUNUNGAN", page_size="A3")`.
-- Bingkai tepi minimalis dengan takik koordinat lintang/bujur presisi di keempat sisi kanvas.
-- Skala numerik tajam (*line ticks up*) dengan satuan kilometer/meter.
-- Tambahkan bar profil elevasi horizontal (`add_layout_gradient_legend`) untuk rentang meter di atas permukaan laut (m dpl).
+- **Natural Illumination:** Azimuth 315° (Northwest), sun elevation 45°. Slopes facing northwest receive bright direct illumination, while southeast-facing slopes cast deep shadows.
+- **Shadow Color Theory:**
+  - Illuminated slopes: Warm hues (ivory white to soft buff).
+  - Shadowed slopes: Cool tones (not flat black, but atmospheric slate-blue and cool gray).
+- **Multi-Layer Relief Composition in QGIS:**
+  1. Base layer: Shaded relief (`native:hillshade`).
+  2. Accent layer: Slope steepness overlay with transparency to accentuate cliffs and ravines.
+  3. Hypsometric tint layer: Soft elevation color progression (`style_raster` transitioning from meadow green to warm beige to snow white).
+
+---
+
+## 2. Topographic Contour Hierarchy
+
+Generate contours with `gdal:contour` following strict visual weight tiers:
+- **Intermediate Contours:** Regular interval (e.g. 25m or 50m), hairline width (0.12–0.15mm), sepia or warm olive brown (`#7a6348`).
+- **Index Contours:** Every 5th contour (e.g. 100m or 250m), bold width (0.28–0.35mm).
+- **Contour Labeling:** Place elevation numbers exclusively on index contours (`set_labels` with modulus filter), curved along the line, protected by a crisp 0.8mm white text halo.
+
+---
+
+## 3. Layout Composition
+
+- Call `create_styled_layout(name="Topographic_Map", style_theme="relief_topographic", title="ALPINE TOPOGRAPHY", page_size="A3")`.
+- Clean minimalist neatline with high-precision tick marks along all four canvas edges.
+- High-contrast tick scale bar with metric kilometer/meter intervals.
+- Include a horizontal elevation gradient bar (`add_layout_gradient_legend`) indicating meters above sea level (m a.s.l.).
