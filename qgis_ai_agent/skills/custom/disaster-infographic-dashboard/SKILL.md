@@ -10,8 +10,9 @@ license: MIT
 Panduan komprehensif membuat peta infografis bencana setara standar BNPB/BPBD (seperti Peta Kejadian Bencana Provinsi Bali):
 
 ## 1. Persiapan Data & Geometri
-1. **Sistem Proyeksi (CRS):**
+1. **Sistem Proyeksi (CRS) & Peta Dasar (Basemap):**
    - Wajib gunakan proyeksi metrik UTM lokal (misal Bali = EPSG:32750 / UTM Zona 50S; Jawa = Zona 48S/49S). Panggil `set_project_crs` sebelum menghitung buffer atau KDE.
+   - Peta dasar wajib menggunakan XYZ tile tanpa API key: panggil `add_basemap(preset="carto_light")` (Carto Positron berona abu-abu lembut agar titik tematik menonjol) atau `add_basemap(preset="esri_satellite")` jika membutuhkan citra satelit tanpa kunci. Atur transparansi dengan `update_layer(opacity=0.4)`.
 2. **Relief Medan (DEM):**
    - Turunkan hillshade dari DEM (`native:hillshade`, Azimuth 315°, V_Angle 45°).
    - Terapkan simbologi pseudocolor elevasi halus (`style_raster` dengan ramp `Spectral` atau `YlOrBr` dibalik), lalu letakkan hillshade di atasnya dengan transparansi 45-50% (`update_layer opacity=0.5`).

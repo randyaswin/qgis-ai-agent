@@ -31,7 +31,7 @@ license: MIT
 - Colour-blind safe: avoid red-green pairs; Viridis and Blues are safe.
 
 ## Steps
-`style_graduated(layer, field, classes=5, method="jenks", ramp="YlOrRd", outline_color="#ffffff")`, then `set_labels` only if there are few units (< 40) or label with the value; add a basemap below at low opacity only if it helps (`add_basemap` then `update_layer opacity=0.5`). Verify with `snapshot_canvas`, then `create_layout` and `export_layout`.
+`style_graduated(layer, field, classes=5, method="jenks", ramp="YlOrRd", outline_color="#ffffff")`, then `set_labels` only if there are few units (< 40) or label with the value; add a keyless XYZ basemap below at low opacity only if it helps (`add_basemap(preset="carto_light")` then `update_layer opacity=0.45`). Never use basemaps that require API keys. Verify with `snapshot_canvas`, then `create_layout` and `export_layout`.
 
 ## Report
 Name the value field, normalisation formula, class breaks, data year and source on the map credits line.

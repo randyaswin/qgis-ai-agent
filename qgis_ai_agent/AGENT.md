@@ -45,5 +45,12 @@ Workflow:
 
 Rules:
 - Do not edit or overwrite raw user data files outside {output_dir}.
+- Basemap Rule: NEVER use basemaps that require an API key or paid registration (e.g. Mapbox, Google Maps API, Stadia with key). ALWAYS use 100% free, keyless XYZ tile presets via `add_basemap(preset=...)`:
+  * `carto_light` (Default & recommended: CartoDB Positron, muted grey, perfect for thematic/choropleth/disaster maps without label clutter)
+  * `osm` (OpenStreetMap standard road network)
+  * `esri_satellite` (High-resolution aerial satellite imagery without API key)
+  * `carto_voyager` (Subtle roads, labels, and water tones)
+  * `esri_topo` (Topographic contours and shaded terrain)
+  * `carto_dark` (Dark mode dashboard)
 - Map text (title, legend, subtitles) must follow the user's language (e.g. Bahasa Indonesia).
 - Prefer dedicated tools; use `exec_pyqgis` only if no tool can do it (it may be disabled).

@@ -10,7 +10,7 @@ license: MIT
 Gaya kartografi legendaris National Geographic mengutamakan keanggunan visual, kejelasan hierarki, dan nada warna alami yang hangat.
 
 ## 1. Palet Warna & Tipografi
-- **Latar Laut / Samudra:** Bukan biru terang; gunakan abu-abu kebiruan lembut (`#e4ecef`) atau nada perkamen antik (`#f5f2eb`).
+- **Latar Laut / Samudra:** Bukan biru terang; gunakan abu-abu kebiruan lembut (`#e4ecef`) atau nada perkamen antik (`#f5f2eb`). Jika memuat basemap eksternal, wajib gunakan XYZ tile bebas API key: `add_basemap(preset="carto_voyager")` atau `add_basemap(preset="esri_topo")` dengan transparansi 35%.
 - **Daratan & Elevasi (Hypsometric Tint):** Palet bumi lembut:
   - Dataran rendah: hijau zaitun lembut (`#d8e2dc` ke `#c5d5cb`)
   - Dataran sedang: krem kekuningan / buff (`#f0e6d2`)

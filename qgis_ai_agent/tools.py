@@ -167,13 +167,38 @@ def add_raster_layer(path, name=None, provider="gdal"):
     return _layer_info(lyr)
 
 
-@tool("Add an XYZ tile basemap at the bottom of the layer stack.",
-      {"url": S("string", "XYZ template, default OpenStreetMap"), "name": S("string", "")})
-def add_basemap(url="https://tile.openstreetmap.org/{z}/{x}/{y}.png", name="OpenStreetMap"):
-    uri = f"type=xyz&url={url}&zmax=19&zmin=0"
-    lyr = QgsRasterLayer(uri, name, "wms")
+BASEMAP_PRESETS = {
+    "carto_light": ("https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png", "CartoDB Positron (No Key)", 20),
+    "osm": ("https://tile.openstreetmap.org/{z}/{x}/{y}.png", "OpenStreetMap (No Key)", 19),
+    "esri_satellite": ("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", "Esri World Imagery (No Key)", 19),
+    "carto_voyager": ("https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png", "CartoDB Voyager (No Key)", 20),
+    "carto_dark": ("https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png", "CartoDB Dark Matter (No Key)", 20),
+    "esri_topo": ("https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}", "Esri World Topo (No Key)", 19),
+}
+
+
+@tool("Add a 100% free XYZ tile basemap at the bottom of the layer stack without requiring ANY API key. "
+      "Choose from proven no-key presets: 'carto_light' (default, recommended muted grey for thematic & choropleth maps), "
+      "'osm' (OpenStreetMap standard roads), 'esri_satellite' (high-res public aerial imagery), "
+      "'carto_voyager' (subtle roads/labels), 'carto_dark' (dark mode), or 'esri_topo' (topographic). "
+      "Never use basemaps that require API keys or credentials.",
+      {"preset": S("string", "'carto_light' | 'osm' | 'esri_satellite' | 'carto_voyager' | 'carto_dark' | 'esri_topo' (default 'carto_light')"),
+       "url": S("string", "custom keyless XYZ tile URL template"),
+       "name": S("string", "optional custom layer name")})
+def add_basemap(preset="carto_light", url=None, name=None):
+    if preset and preset.lower() in BASEMAP_PRESETS:
+        p_url, p_name, zmax = BASEMAP_PRESETS[preset.lower()]
+        target_url = url or p_url
+        layer_name = name or p_name
+    else:
+        target_url = url or BASEMAP_PRESETS["carto_light"][0]
+        layer_name = name or "Basemap"
+        zmax = 19
+
+    uri = f"type=xyz&url={target_url}&zmax={zmax}&zmin=0&http-header:User-Agent=QGIS-AI-Agent"
+    lyr = QgsRasterLayer(uri, layer_name, "wms")
     if not lyr.isValid():
-        raise ValueError("Basemap failed to load")
+        raise ValueError(f"Basemap failed to load from {target_url}")
     p = QgsProject.instance()
     p.addMapLayer(lyr, False)
     p.layerTreeRoot().insertLayer(-1, lyr)
