@@ -54,8 +54,13 @@ ToolServer (QGIS Main Thread) ──▶ tools.py (51 Tools)
    - **Skills Discovery & Loading**: `list_skills`, `load_skill`.
    - **Sandbox Escape Hatch**: `exec_pyqgis` (arbitrary PyQGIS execution; disabled by default).
 
-2. **Support for 50 Standard `SKILL.md` GIS Skills**:
-   - **16 Custom Specialized Skills**:
+2. **Support for 55 Standard `SKILL.md` GIS & Cartography Skills**:
+   - **21 Custom Specialized Skills**:
+     - `cartographic-symbology-and-styling`: Visual hierarchy, Bertin's graphic variables, point scaling (Flannery proportional vs graduated), cased roads, line hierarchy, polygon boundary rendering, opacity, and layer blending modes (Multiply/Overlay).
+     - `cartographic-typography-and-labeling`: Map lettering conventions, typography hierarchy, QGIS PAL placement engine, text halos/buffers, curved hydrographic lettering, tracking, callouts, and collision avoidance.
+     - `color-theory-and-palettes`: Perceptual color harmony, sequential/diverging/qualitative ColorBrewer schemes, CVD (colorblind) accessibility, avoiding rainbow/jet artifacts, and print CMYK total ink limits.
+     - `thematic-mapping-methods`: Quantitative mapping paradigms, choropleths with rate/density normalization, proportional symbols, dot density maps with dasymetric masking, bivariate choropleths (3x3 correlation matrices), flow/desire lines, and cartograms.
+     - `multiscale-map-design`: Multiscale mapping, Level of Detail (LOD), the 7 cartographic generalization operators (simplification, smoothing, aggregation, amalgamation, collapse, exaggeration, displacement), and scale-dependent rendering.
      - `public-cog-stac-duckdb`: Query Overture Maps Foundation via DuckDB S3 GeoParquet, search public STAC catalogs, and stream COGs with zero API keys.
      - `disaster-infographic-dashboard`: Comprehensive disaster & hazard situational map architecture (main map + inset + KDE heatmap + 10km buffer cluster + callouts + bar chart + gradient bars).
      - `natgeo-cartography-style`: National Geographic classic style (warm parchment canvas, double neatline border, classic serif typography, muted earth tones).

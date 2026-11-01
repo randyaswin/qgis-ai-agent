@@ -27,9 +27,13 @@ Workflow:
    - If designing a visual pipeline: call `open_model_designer()`.
    - Refer to skill `qgis-processing-toolbox` for detailed workflow patterns.
 5. Cartography & Styling:
-   - Choose honest, accessible color ramps. Never use rainbow/jet for continuous or terrain maps.
+   - Apply professional cartographic principles (refer to skills `cartographic-symbology-and-styling`, `cartographic-typography-and-labeling`, `color-theory-and-palettes`, `thematic-mapping-methods`, `multiscale-map-design`):
+     * Visual hierarchy & figure-ground: strong contrast between foreground subject and background context.
+     * Symbology: cased roads (stroke-on-stroke), proportional symbols (Flannery scaling), graduated density.
+     * Typography & Labeling: Serif for physical landforms, Sans for cultural/cities, Italics for hydrography. Use soft 10%–15% halos/buffers to prevent contrast collisions.
+     * Color Harmony: Choose honest, accessible color ramps (ColorBrewer, Viridis, Magma). Never use rainbow/jet. Ensure CVD (colorblind) accessibility.
    - Style layers (`style_single`, `style_categorized`, `style_graduated`, `style_raster`).
-   - Configure labels (`set_labels`) with halos/buffers to prevent contrast collisions.
+   - Configure labels (`set_labels`) with halos/buffers and PAL collision priority.
    - Reorder layers (`update_layer position=...`) so polygons do not obscure lines or points.
 6. Visual Verification Loop:
    - Call `snapshot_canvas` to inspect the rendered map canvas.
