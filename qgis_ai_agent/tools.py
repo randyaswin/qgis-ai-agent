@@ -1168,12 +1168,16 @@ def create_layout(name="Map", title="", subtitle="", credits="", page_size="A4",
     mp = QgsLayoutItemMap(lay)
     mp.setRect(0, 0, 10, 10)
     lay.addLayoutItem(mp)
+    mp.setCrs(p.crs())
     mp.attemptMove(QgsLayoutPoint(m, top, mm))
     mp.attemptResize(QgsLayoutSize(W - 2 * m - side, H - top - bottom, mm))
     if extent_layer:
-        lyr = _layer(extent_layer)
-        ext = QgsCoordinateTransform(lyr.crs(), p.crs(), p).transformBoundingBox(lyr.extent())
-        ext.scale(1.05)
+        try:
+            lyr = _layer(extent_layer)
+            ext = QgsCoordinateTransform(lyr.crs(), p.crs(), p).transformBoundingBox(lyr.extent())
+            ext.scale(1.05)
+        except Exception:
+            ext = _canvas().extent()
     else:
         ext = _canvas().extent()
     mp.zoomToExtent(ext)
@@ -1181,6 +1185,7 @@ def create_layout(name="Map", title="", subtitle="", credits="", page_size="A4",
     if grid:
         from qgis.core import QgsLayoutItemMapGrid
         g = QgsLayoutItemMapGrid("grid", mp)
+        g.setCrs(p.crs())
         iv = max(ext.width(), ext.height()) / 5
         g.setIntervalX(iv)
         g.setIntervalY(iv)
@@ -1357,12 +1362,18 @@ def add_layout_infographic_chart(layout=None, x=0, y=0, width=80, height=50, tit
         val = float(d.get("value", 0))
         pct = min(100, max(2, round((val / top_val) * 100)))
         val_str = str(int(val) if val.is_integer() else val)
+        bar_table = (
+            f"<table width='100%' cellpadding='0' cellspacing='0' style='border-collapse: collapse;'>"
+            f"<tr>"
+            f"<td width='{pct}%' bgcolor='{bar_color}' height='7' style='border-radius: 2px;'></td>"
+            f"<td width='{100 - pct}%'></td>"
+            f"</tr>"
+            f"</table>"
+        )
         rows.append(
             f"<tr>"
             f"<td style='padding: 2px 4px; font-size: 9px; color: #263238; white-space: nowrap;'>{lbl}</td>"
-            f"<td style='padding: 2px 4px; width: 60%;'>"
-            f"<div style='background: {bar_color}; height: 8px; border-radius: 2px; width: {pct}%;'></div>"
-            f"</td>"
+            f"<td style='padding: 2px 4px; width: 60%;'>{bar_table}</td>"
             f"<td align='right' style='padding: 2px 4px; font-size: 9px; font-weight: bold; color: #1a237e;'>{val_str}</td>"
             f"</tr>"
         )
@@ -1404,13 +1415,14 @@ def add_layout_gradient_legend(layout=None, x=0, y=0, width=55, height=18, title
     r = _ramp(ramp)
     steps = 9
     colors = [r.color((1.0 - (i / (steps - 1))) if invert_ramp else (i / (steps - 1))).name() for i in range(steps)]
-    css_grad = f"linear-gradient(to right, {', '.join(colors)})"
+    cells = "".join(f"<td width='{100 // steps}%' bgcolor='{c}' height='8'></td>" for c in colors)
+    grad_bar = f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 3px 0 2px 0; border: 0.5px solid #b0bec5; border-collapse: collapse;'><tr>{cells}</tr></table>"
 
     full_html = (
         f"<div style='font-family: Arial, Helvetica, sans-serif; background: #ffffff; border: 1px solid #cfd8dc; "
         f"border-radius: 4px; padding: 5px 7px;'>"
         f"<div style='font-size: 9.5px; font-weight: bold; color: #263238;'>{_html.escape(title)}</div>"
-        f"<div style='height: 8px; margin: 3px 0 2px 0; border-radius: 2px; border: 0.5px solid #b0bec5; background: {css_grad};'></div>"
+        f"{grad_bar}"
         f"<table width='100%' style='border-collapse: collapse; font-size: 8px; color: #455a64;'>"
         f"<tr><td align='left'>{_html.escape(str(min_val))}</td><td align='right'>{_html.escape(str(max_val))}</td></tr>"
         f"</table>"
@@ -1506,7 +1518,21 @@ def create_styled_layout(name="Map", style_theme="infographic_disaster", title="
     mm = QgsUnitTypes.LayoutUnit.LayoutMillimeters if hasattr(QgsUnitTypes, "LayoutUnit") else Qgis.LayoutUnit.Millimeters
     m = 10
 
-    # Configure Theme Styles
+    # Monkey-patch QgsLayoutItemShape.setFillColor for backward/script compatibility
+    try:
+        from qgis.core import QgsLayoutItemShape, QgsFillSymbol
+        from qgis.PyQt.QtGui import QColor
+        if hasattr(QgsLayoutItemShape, "setSymbol") and not hasattr(QgsLayoutItemShape, "setFillColor"):
+            def _shape_set_fill_color(self, color):
+                c = QColor(color) if isinstance(color, str) else color
+                sym = self.symbol()
+                if sym:
+                    sym.setColor(c)
+                else:
+                    self.setSymbol(QgsFillSymbol.createSimple({"color": c.name(), "outline_color": "transparent"}))
+            QgsLayoutItemShape.setFillColor = _shape_set_fill_color
+    except Exception:
+        pass
     is_natgeo = (style_theme == "natgeo")
     is_infographic = (style_theme in ("infographic_bencana", "infographic_disaster"))
     is_relief = (style_theme == "relief_topographic")
@@ -1545,13 +1571,17 @@ def create_styled_layout(name="Map", style_theme="infographic_disaster", title="
     mp = QgsLayoutItemMap(lay)
     mp.setRect(0, 0, 10, 10)
     lay.addLayoutItem(mp)
+    mp.setCrs(p.crs())
     mp.attemptMove(QgsLayoutPoint(m, map_top, mm))
     mp.attemptResize(QgsLayoutSize(map_w, map_h, mm))
 
     if extent_layer:
-        lyr = _layer(extent_layer)
-        ext = QgsCoordinateTransform(lyr.crs(), p.crs(), p).transformBoundingBox(lyr.extent())
-        ext.scale(1.05)
+        try:
+            lyr = _layer(extent_layer)
+            ext = QgsCoordinateTransform(lyr.crs(), p.crs(), p).transformBoundingBox(lyr.extent())
+            ext.scale(1.05)
+        except Exception:
+            ext = _canvas().extent()
     else:
         ext = _canvas().extent()
     mp.zoomToExtent(ext)
@@ -1565,8 +1595,8 @@ def create_styled_layout(name="Map", style_theme="infographic_disaster", title="
         g = QgsLayoutItemMapGrid("grid", mp)
         g.setStyle(QgsLayoutItemMapGrid.GridStyle.Cross)
         g.setCrossLength(1.5)
-
-        map_crs = mp.crs() if hasattr(mp, "crs") and mp.crs().isValid() else p.crs()
+        map_crs = p.crs()
+        g.setCrs(map_crs)
         if map_crs.isGeographic():
             iv = max(round(max(ext.width(), ext.height()) / 4, 3), 0.001)
             g.setIntervalX(iv)
@@ -1575,7 +1605,7 @@ def create_styled_layout(name="Map", style_theme="infographic_disaster", title="
             g.setAnnotationPrecision(1)
         else:
             raw_iv = max(ext.width(), ext.height()) / 5
-            mag = 10 ** math.floor(math.log10(max(raw_iv, 1)))
+            mag = 10 ** math.floor(math.log10(max(raw_iv, 100)))
             clean_iv = max(round(raw_iv / mag) * mag, mag)
             g.setIntervalX(clean_iv)
             g.setIntervalY(clean_iv)

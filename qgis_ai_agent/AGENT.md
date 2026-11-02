@@ -108,4 +108,10 @@ Rules:
      - Processing algorithm fails -> check layer geometry with `check_validity`, run fix geometries, or choose an alternate processing algorithm (e.g. native vs gdal).
      - Layout item fails -> inspect items with `list_layout_items`, compute new millimeter coordinates, and retry.
   4. Accountability: NEVER pretend a failed step succeeded or silently proceed without required data. If after 2-3 attempts a tool cannot succeed, explain clearly to the user what failed, the error encountered, and the alternative taken.
+- Stability & Layer Preservation (NEVER wipe the active project):
+  * Once layers are loaded, NEVER call `QgsProject.instance().clear()`, `p.removeAllMapLayers()`, or reset the project canvas in `exec_pyqgis`. Always modify existing layers in-place (`update_layer`, `style_*`, `remove_layer(specific_name)`).
+  * Never reset the project CRS back to EPSG:4326/3857 after UTM layers are loaded.
+  * In layouts, do NOT create north arrows using `QgsLayoutNorthArrowHandlerStandard` (which does not exist in QGIS 3.x). Always use `add_layout_north_arrow(layout=...)` or `QgsLayoutItemPicture` with SVG path `:/images/north_arrows/...`.
+  * In layouts, `QgsLayoutItemShape` uses `it.symbol().setColor(QColor(...))` or `it.setSymbol(...)`, not `it.setFillColor(...)`. Prefer `add_layout_shape(layout=..., fill=...)`.
+  * For bar charts in layouts, always use `add_layout_infographic_chart(layout, x, y, w, h, title, data)` which renders proportional nested table bars. Never hardcode divs with `width: %` in custom HTML labels.
 - Prefer dedicated tools; use `exec_pyqgis` only if no tool can do it (it may be disabled).

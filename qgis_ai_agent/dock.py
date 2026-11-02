@@ -356,14 +356,14 @@ def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_succe
     if is_running:
         out_cell = "<span style='color: #38bdf8; font-family: monospace; font-size: 10px; font-style: italic;'>Running...</span>"
     else:
-        out_bg = "#0b0f17" if is_success else "#1c1418"
-        out_border = "#1e293b" if is_success else "#7f1d1d"
-        out_color = "#cbd5e1" if is_success else "#fca5a5"
+        out_bg = "#0d1117" if is_success else "#1c1418"
+        out_border = "#21262d" if is_success else "#7f1d1d"
+        out_color = "#c9d1d9" if is_success else "#fca5a5"
         escaped_out = html.escape(out_str or "").replace("\n", "<br>")
         out_cell = (
             f"<div style='background-color: {out_bg}; border: 1px solid {out_border}; "
-            f"border-radius: 3px; padding: 4px 6px; color: {out_color}; "
-            f"font-family: monospace; font-size: 10px; word-break: break-all;'>"
+            f"border-radius: 4px; padding: 5px 8px; color: {out_color}; "
+            f"font-family: monospace; font-size: 10px; line-height: 1.45; word-break: break-all;'>"
             f"{escaped_out}"
             f"</div>"
         )
@@ -378,13 +378,13 @@ def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_succe
         )
 
     sub_table = (
-        f"<table cellpadding='0' cellspacing='0' style='margin-top: 4px; width: 100%;'>"
+        f"<table cellpadding='0' cellspacing='0' style='margin-top: 4px; margin-left: 2px; width: 100%;'>"
         f"<tr>"
-        f"<td width='30' valign='top' style='color: #64748b; font-family: monospace; font-size: 10px; font-weight: bold; padding-bottom: 3px;'>IN</td>"
-        f"<td valign='top' style='color: #cbd5e1; font-family: monospace; font-size: 10px; padding-bottom: 3px; word-break: break-all;'>{in_val}</td>"
+        f"<td width='34' valign='top' style='color: #64748b; font-family: monospace; font-size: 10px; font-weight: bold; padding-bottom: 3px;'>IN</td>"
+        f"<td valign='top' style='color: #94a3b8; font-family: monospace; font-size: 10px; padding-bottom: 3px; word-break: break-all;'>{in_val}</td>"
         f"</tr>"
         f"<tr>"
-        f"<td width='30' valign='top' style='color: #64748b; font-family: monospace; font-size: 10px; font-weight: bold;'>OUT</td>"
+        f"<td width='34' valign='top' style='color: #64748b; font-family: monospace; font-size: 10px; font-weight: bold;'>OUT</td>"
         f"<td valign='top'>{out_cell}</td>"
         f"</tr>"
         f"</table>"
@@ -393,13 +393,13 @@ def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_succe
     return (
         f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 0;'>"
         f"<tr>"
-        f"<td width='18' valign='top' style='border-right: 2px solid #334155; padding-right: 6px; text-align: center;'>"
-        f"<span style='color: {dot_color}; font-size: 11px;'>●</span>"
+        f"<td width='20' valign='top' align='center' style='border-right: 2px solid #334155; padding-right: 8px;'>"
+        f"<span style='color: {dot_color}; font-size: 13px; line-height: 16px;'>●</span>"
         f"</td>"
-        f"<td valign='top' style='padding-left: 10px; padding-bottom: 8px;'>"
+        f"<td valign='top' style='padding-left: 10px; padding-bottom: 10px;'>"
         f"<div style='line-height: 16px;'>"
         f"<b style='color: #f8fafc; font-size: 11px;'>{html.escape(category)}</b>&nbsp;&nbsp;"
-        f"<span style='color: #94a3b8; font-size: 11px;'>{header_desc}</span>"
+        f"<span style='color: #cbd5e1; font-size: 11px;'>{header_desc}</span>"
         f"</div>"
         f"{sub_table}"
         f"{img_html}"
@@ -416,8 +416,8 @@ def render_thinking_node_html(text="Thought for 1s"):
     return (
         f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 0;'>"
         f"<tr>"
-        f"<td width='18' valign='top' style='border-right: 2px solid #334155; padding-right: 6px; text-align: center;'>"
-        f"<span style='color: #94a3b8; font-size: 11px;'>●</span>"
+        f"<td width='20' valign='top' align='center' style='border-right: 2px solid #334155; padding-right: 8px;'>"
+        f"<span style='color: #64748b; font-size: 11px; line-height: 16px;'>●</span>"
         f"</td>"
         f"<td valign='top' style='padding-left: 10px; padding-bottom: 6px;'>"
         f"<span style='color: #94a3b8; font-size: 11px;'>{html.escape(text)}</span>"
@@ -928,7 +928,20 @@ class AgentDock(QDockWidget):
         self.log.clear()
         sess = self.session_manager.get_active_session()
         for m in sess.messages:
-            if m.html:
+            if m.role == "tool" and m.tool_calls:
+                tc = m.tool_calls[0]
+                cat, prim = categorize_tool(tc.get("name", "QGIS"), tc.get("args", {}))
+                in_str = format_in_args(tc.get("args", {}))
+                card_html = render_tool_node_html(
+                    category=cat,
+                    name=tc.get("name", "Tool"),
+                    primary_arg=prim,
+                    in_str=in_str,
+                    out_str=tc.get("summary", ""),
+                    is_success=tc.get("success", True)
+                )
+                self._append_html(card_html)
+            elif m.html:
                 self._append_html(m.html)
             elif m.text:
                 if m.role == "user":
@@ -994,8 +1007,7 @@ class AgentDock(QDockWidget):
             c.insertBlock()
         pos = c.position()
         c.insertHtml(html_content)
-        if c.positionInBlock() > 0:
-            c.insertBlock()
+        c.insertBlock()
         self.log.setTextCursor(c)
         self.log.ensureCursorVisible()
         return pos
@@ -1009,18 +1021,20 @@ class AgentDock(QDockWidget):
             return
         self._current_assistant_text += clean
 
-        # Detect Thinking blocks from reasoning models
+        # Strip raw thinking tags if model outputs them in stream
         lower_clean = clean.lower()
-        if ("<thinking>" in lower_clean or "<thought>" in lower_clean or
-            clean.strip().startswith(("* Thinking", "Thinking:", "Thought:"))):
-            elapsed = max(1, int(time.time() - (self._last_event_time or self.start_time or time.time())))
-            self._append_html(render_thinking_node_html(f"Thought for {elapsed}s"))
-            self._last_event_time = time.time()
-            clean = re.sub(r"<\/?(thinking|thought)>|\*+\s*Thinking[^*]*\*+|Thinking:", "", clean, flags=re.I).strip()
+        if "<thinking>" in lower_clean or "<thought>" in lower_clean:
+            clean = re.sub(r"<\/?(thinking|thought)>", "", clean, flags=re.I).strip()
             if not clean:
                 return
 
         if not self.is_agent_streaming:
+            now = time.time()
+            elapsed = max(0, round(now - (self._last_event_time or self.start_time or now)))
+            if elapsed >= 1:
+                self._append_html(render_thinking_node_html(f"Thought for {elapsed}s"))
+                self._last_event_time = now
+
             cli_label = self.cli.currentData()
             model_info = self.model_combo.currentData() or self.model_combo.currentText().strip()
             effort_info = self.effort_combo.currentData()
@@ -1058,47 +1072,36 @@ class AgentDock(QDockWidget):
             "primary": prim,
             "in_str": in_str,
         }
-        running_html = render_tool_node_html(cat, name, prim, in_str, "Running...", is_running=True)
-        self._active_tool_pos = self._append_html(running_html)
+        # Render elapsed thought duration before this tool call
+        now = time.time()
+        elapsed = max(0, round(now - (self._last_event_time or self.start_time or now)))
+        self._append_html(render_thinking_node_html(f"Thought for {elapsed}s"))
+        self._last_event_time = now
+
+        # Update live indicator label
+        self.indicator_label.setText(f"Running {name}…")
+        self.indicator_frame.show()
 
     def _on_tool_completed(self, name, result):
         clean_summary = format_out_result(name, result)
-        img_b64 = None
-        if isinstance(result, dict) and "__image__" in result:
-            img_b64 = result["__image__"]
-
         cat = self._last_tool_call.get("category", "QGIS")
         prim = self._last_tool_call.get("primary", "")
         in_str = self._last_tool_call.get("in_str", "")
-        # Pass img_base64=None so inspect screenshots stay in background and don't clutter the chat UI
+        # Render clean vertical timeline tool node matching reference design
         full_node_html = render_tool_node_html(cat, name, prim, in_str, clean_summary, is_success=True, is_running=False, img_base64=None)
-
-        if getattr(self, "_active_tool_pos", None) is not None:
-            c = self.log.textCursor()
-            c.setPosition(self._active_tool_pos)
-            c.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
-            c.removeSelectedText()
-            c.insertHtml(full_node_html)
-            if c.positionInBlock() > 0:
-                c.insertBlock()
-            self.log.setTextCursor(c)
-            self.log.ensureCursorVisible()
-            self._active_tool_pos = None
-        else:
-            self._append_html(full_node_html)
+        self._append_html(full_node_html)
 
         self.iface.mapCanvas().refresh()
         self._last_event_time = time.time()
 
-        # Persist unified timeline node into active project session
+        # Persist into active project session
         active_sess = self.session_manager.get_active_session()
         active_sess.add_tool_record(
             name=name,
             args=self._last_tool_call.get("args", {}),
             summary=clean_summary,
             success=True,
-            html_card=full_node_html,
-            image=img_b64
+            html_card=full_node_html
         )
 
     def _on_tool_failed(self, name, err_msg):
@@ -1106,20 +1109,7 @@ class AgentDock(QDockWidget):
         prim = self._last_tool_call.get("primary", "")
         in_str = self._last_tool_call.get("in_str", "")
         full_node_html = render_tool_node_html(cat, name, prim, in_str, err_msg, is_success=False, is_running=False)
-
-        if getattr(self, "_active_tool_pos", None) is not None:
-            c = self.log.textCursor()
-            c.setPosition(self._active_tool_pos)
-            c.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
-            c.removeSelectedText()
-            c.insertHtml(full_node_html)
-            if c.positionInBlock() > 0:
-                c.insertBlock()
-            self.log.setTextCursor(c)
-            self.log.ensureCursorVisible()
-            self._active_tool_pos = None
-        else:
-            self._append_html(full_node_html)
+        self._append_html(full_node_html)
 
         self._last_event_time = time.time()
 
@@ -1383,10 +1373,6 @@ class AgentDock(QDockWidget):
 
         self._active_tool_pos = None
         self._last_event_time = time.time()
-
-        # If thinking / reasoning effort is active, emit initial Thinking timeline node
-        if selected_effort and selected_effort != "default":
-            self._append_html(render_thinking_node_html("Thinking..."))
 
         self.prompt.clear()
         self.action_btn.setText("■ Stop")
