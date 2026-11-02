@@ -1330,18 +1330,15 @@ class AgentDock(QDockWidget):
         active_sess.model = selected_model or ""
         active_sess.effort = selected_effort or "default"
 
-        # Assemble prompt with session history context if restarting/resuming
-        if cont:
-            full = user
-        else:
-            sys_text = prompts.system_prompt(Qgis.version(), outdir, REGISTRY.mode)
-            if self.custom_instructions.strip():
-                sys_text += f"\n\n# User custom instructions\n{self.custom_instructions.strip()}"
-            live_ctx = self._get_live_context()
-            catalog = list(REGISTRY.available().keys())
-            skills_txt = prompts.skills_block(sel, catalog) if REGISTRY.mode != "off" else ""
-            sess_hist = active_sess.format_history_for_prompt() if active_sess.turns_count > 0 else None
-            full = prompts.build(sys_text, live_ctx, skills_txt, user, continuing=False, session_history=sess_hist)
+        # Assemble prompt: always include live QGIS context, session history, and active skills
+        sys_text = prompts.system_prompt(Qgis.version(), outdir, REGISTRY.mode)
+        if self.custom_instructions.strip():
+            sys_text += f"\n\n# User custom instructions\n{self.custom_instructions.strip()}"
+        live_ctx = self._get_live_context()
+        catalog = list(REGISTRY.available().keys())
+        skills_txt = prompts.skills_block(sel, catalog) if REGISTRY.mode != "off" else ""
+        sess_hist = active_sess.format_history_for_prompt() if active_sess.turns_count > 0 else None
+        full = prompts.build(sys_text, live_ctx, skills_txt, user, continuing=cont, session_history=sess_hist)
 
         argv = self._adapter()["run"](full, cont, self.auto.isChecked(), model=selected_model, effort=selected_effort)
 

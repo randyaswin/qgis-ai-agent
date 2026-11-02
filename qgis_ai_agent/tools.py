@@ -27,8 +27,8 @@ from qgis.core import (
     QgsExpressionContextUtils, QgsFeatureRequest, QgsField, QgsApplication,
     QgsPrintLayout, QgsLayoutItemMap, QgsLayoutItemLabel, QgsLayoutItemLegend,
     QgsLayoutItemScaleBar, QgsLayoutItemPicture, QgsLayoutPoint, QgsLayoutSize,
-    QgsUnitTypes, QgsLayoutItemPage, QgsLayoutExporter, QgsSingleBandPseudoColorRenderer,
-    QgsColorRampShader, QgsRasterShader, QgsRasterBandStats, QgsWkbTypes,
+    QgsLayoutMeasurement, QgsUnitTypes, QgsLayoutItemPage, QgsLayoutExporter,
+    QgsSingleBandPseudoColorRenderer, QgsColorRampShader, QgsRasterShader, QgsRasterBandStats, QgsWkbTypes,
 )
 from qgis.PyQt.QtCore import QMetaType
 
@@ -1229,6 +1229,23 @@ def create_layout(name="Map", title="", subtitle="", credits="", page_size="A4",
     return {"layout": name, "page_mm": [W, H], "map_scale": mp.scale()}
 
 
+def _get_layout(layout_name):
+    mgr = QgsProject.instance().layoutManager()
+    if not layout_name:
+        layouts = mgr.printLayouts()
+        if layouts:
+            return layouts[0]
+        raise ValueError("No layout specified and active project has no layouts.")
+    lay = mgr.layoutByName(str(layout_name))
+    if not lay:
+        for l in mgr.printLayouts():
+            if l.name().lower() == str(layout_name).lower():
+                return l
+        avail = [l.name() for l in mgr.printLayouts()]
+        raise ValueError(f"No layout {layout_name!r}. Available: {avail}")
+    return lay
+
+
 # ---------------------------------------------------------------- modern & composite layout tools
 @tool("Add an inset detail map to an existing print layout, with optional overview rectangle on the main map frame.",
       {"layout": S("string", "name of existing layout"), "x": S("number", "x position on page in mm"),
@@ -1238,11 +1255,10 @@ def create_layout(name="Map", title="", subtitle="", credits="", page_size="A4",
        "title": S("string", "optional header text, e.g. 'DETAIL VIEW / INSET AREA'"),
        "show_overview_on_main": S("boolean", "draw an overview rectangle on the main map (default true)"),
        "grid": S("boolean", "include coordinate grid on the inset map")})
-def add_layout_inset_map(layout, x, y, width, height, extent_layer=None, bbox=None, scale=None,
+def add_layout_inset_map(layout=None, x=0, y=0, width=50, height=50, extent_layer=None, bbox=None, scale=None,
                          title="", show_overview_on_main=True, grid=False, **kwargs):
-    lay = QgsProject.instance().layoutManager().layoutByName(layout)
-    if not lay:
-        raise ValueError(f"No layout {layout}")
+    target = layout or kwargs.get("layout_name") or kwargs.get("name")
+    lay = _get_layout(target)
     mm = QgsUnitTypes.LayoutUnit.LayoutMillimeters if hasattr(QgsUnitTypes, "LayoutUnit") else Qgis.LayoutUnit.Millimeters
     p = QgsProject.instance()
 
@@ -1317,11 +1333,10 @@ def add_layout_inset_map(layout, x, y, width, height, extent_layer=None, bbox=No
        "data": S("array", "list of dicts [{'label':'District A','value':36}, ...] or key-value dict"),
        "bar_color": S("string", "hex color, default '#2b5c8f'"),
        "max_value": S("number", "optional axis maximum for percentage scaling")})
-def add_layout_infographic_chart(layout, x, y, width, height, title, subtitle="", data=None, bar_color="#2b5c8f", max_value=None, **kwargs):
+def add_layout_infographic_chart(layout=None, x=0, y=0, width=80, height=50, title="", subtitle="", data=None, bar_color="#2b5c8f", max_value=None, **kwargs):
     import html as _html
-    lay = QgsProject.instance().layoutManager().layoutByName(layout)
-    if not lay:
-        raise ValueError(f"No layout {layout}")
+    target = layout or kwargs.get("layout_name") or kwargs.get("name")
+    lay = _get_layout(target)
     mm = QgsUnitTypes.LayoutUnit.LayoutMillimeters if hasattr(QgsUnitTypes, "LayoutUnit") else Qgis.LayoutUnit.Millimeters
 
     # Normalize data
@@ -1380,11 +1395,10 @@ def add_layout_infographic_chart(layout, x, y, width, height, title, subtitle=""
        "min_val": S("string", "minimum label e.g. '-3' or '0 Rendah'"),
        "max_val": S("string", "maximum label e.g. '2.945' or '1 Tinggi'"),
        "invert_ramp": S("boolean", "invert color direction")})
-def add_layout_gradient_legend(layout, x, y, width, height, title, ramp="Spectral", min_val="0", max_val="100", invert_ramp=False, **kwargs):
+def add_layout_gradient_legend(layout=None, x=0, y=0, width=55, height=18, title="", ramp="Spectral", min_val="0", max_val="100", invert_ramp=False, **kwargs):
     import html as _html
-    lay = QgsProject.instance().layoutManager().layoutByName(layout)
-    if not lay:
-        raise ValueError(f"No layout {layout}")
+    target = layout or kwargs.get("layout_name") or kwargs.get("name")
+    lay = _get_layout(target)
     mm = QgsUnitTypes.LayoutUnit.LayoutMillimeters if hasattr(QgsUnitTypes, "LayoutUnit") else Qgis.LayoutUnit.Millimeters
 
     r = _ramp(ramp)
@@ -1421,11 +1435,10 @@ def add_layout_gradient_legend(layout, x, y, width, height, title, ramp="Spectra
        "badge": S("string", "e.g. 'A', 'B', 'C'"),
        "pointer_x": S("number", "optional pointer target x in layout mm"),
        "pointer_y": S("number", "optional pointer target y in layout mm")})
-def add_layout_callout_box(layout, x, y, width, height, title, subtitle="", badge="", pointer_x=None, pointer_y=None, **kwargs):
+def add_layout_callout_box(layout=None, x=0, y=0, width=50, height=15, title="", subtitle="", badge="", pointer_x=None, pointer_y=None, **kwargs):
     import html as _html
-    lay = QgsProject.instance().layoutManager().layoutByName(layout)
-    if not lay:
-        raise ValueError(f"No layout {layout}")
+    target = layout or kwargs.get("layout_name") or kwargs.get("name")
+    lay = _get_layout(target)
     mm = QgsUnitTypes.LayoutUnit.LayoutMillimeters if hasattr(QgsUnitTypes, "LayoutUnit") else Qgis.LayoutUnit.Millimeters
 
     badge_html = (
@@ -1476,6 +1489,7 @@ def create_styled_layout(name="Map", style_theme="infographic_disaster", title="
                          extent_layer=None, page_size="A3", orientation="landscape", grid=False, **kwargs):
     import html as _html
     import math
+    name = name or kwargs.get("layout_name") or kwargs.get("layout") or "Map"
     p = QgsProject.instance()
     mgr = p.layoutManager()
     old = mgr.layoutByName(name)
@@ -1614,10 +1628,9 @@ def create_styled_layout(name="Map", style_theme="infographic_disaster", title="
 
 @tool("Change any layout item text or the map scale/extent after creation.",
       {"name": S("string", "layout"), "map_scale": S("number", ""), "replace_text": S("object", "{old: new}")})
-def edit_layout(name, map_scale=None, replace_text=None):
-    lay = QgsProject.instance().layoutManager().layoutByName(name)
-    if not lay:
-        raise ValueError(f"No layout {name}")
+def edit_layout(name=None, map_scale=None, replace_text=None, **kwargs):
+    target = name or kwargs.get("layout") or kwargs.get("layout_name")
+    lay = _get_layout(target)
     for it in lay.items():
         if isinstance(it, QgsLayoutItemMap) and map_scale:
             it.setScale(float(map_scale))
@@ -1630,10 +1643,30 @@ def edit_layout(name, map_scale=None, replace_text=None):
 @tool("Export a layout to PDF, PNG, JPG or SVG (by file extension). Set preview=true to also get the PNG back as an image for verification.",
       {"name": S("string", "layout"), "path": S("string", "absolute output path"),
        "dpi": S("integer", "default 300"), "preview": S("boolean", "")})
-def export_layout(name, path, dpi=300, preview=False):
-    lay = QgsProject.instance().layoutManager().layoutByName(name)
+def export_layout(name=None, path=None, dpi=300, preview=False, **kwargs):
+    target_name = name or kwargs.get("layout") or kwargs.get("layout_name")
+    target_path = path or kwargs.get("output_path") or kwargs.get("file_path") or kwargs.get("output")
+    mgr = QgsProject.instance().layoutManager()
+    if not target_name:
+        layouts = mgr.printLayouts()
+        if layouts:
+            target_name = layouts[0].name()
+        else:
+            raise ValueError("No layout name provided and active project has no layouts.")
+    lay = mgr.layoutByName(str(target_name))
     if not lay:
-        raise ValueError(f"No layout {name}")
+        for l in mgr.printLayouts():
+            if l.name().lower() == str(target_name).lower():
+                lay = l
+                break
+    if not lay:
+        avail = [l.name() for l in mgr.printLayouts()]
+        raise ValueError(f"No layout {target_name!r}. Available: {avail}")
+    if not target_path:
+        out_dir = os.path.expanduser("~/qgis-ai-maps")
+        os.makedirs(out_dir, exist_ok=True)
+        target_path = os.path.join(out_dir, f"{target_name}.png")
+    path = target_path
     ex = QgsLayoutExporter(lay)
     ext = os.path.splitext(path)[1].lower()
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -1657,10 +1690,11 @@ def export_layout(name, path, dpi=300, preview=False):
 
 
 @tool("Open the layout designer window for the user.", {"name": S("string", "")})
-def open_layout_designer(name):
-    lay = QgsProject.instance().layoutManager().layoutByName(name)
+def open_layout_designer(name=None, **kwargs):
+    target = name or kwargs.get("layout") or kwargs.get("layout_name")
+    lay = _get_layout(target)
     _iface().openLayoutDesigner(lay)
-    return {"opened": name}
+    return {"opened": target}
 
 
 # ---------------------------------------------------------------- skills

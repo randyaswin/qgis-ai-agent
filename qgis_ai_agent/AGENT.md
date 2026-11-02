@@ -88,6 +88,9 @@ Rules:
   * For thematic and infographic maps, NEVER force a coordinate grid (`grid=False` by default in `create_styled_layout`).
   * If a grid is explicitly requested, coordinates must stay INSIDE the map frame (`InsideMapFrame`) and only display on Left & Bottom edges so numbers never collide with title headers, metrics sidecards, or bottom summaries.
   * Keep visual hierarchy neat: maintain clear 3-5mm gutters between map frames, legends, cards, and scalebars.
+  * Always prefer dedicated layout tools (`create_styled_layout`, `create_layout`, `add_layout_*`, `list_layout_items`, `update_layout_item`) over raw `exec_pyqgis`.
+  * If writing PyQGIS layout code: `attemptSetSceneRect(QRectF(x, y, w, h))` takes `QRectF`, NEVER `QgsRectangle` (`QgsRectangle` is spatial extent, not page rect). Prefer `attemptMove(QgsLayoutPoint(x, y, mm))` and `attemptResize(QgsLayoutSize(w, h, mm))`.
+  * When iterating over `layout.items()`, check `isinstance(it, QgsLayoutItem)` or `hasattr(it, 'uuid')` to safely skip internal `QGraphicsRectItem` nodes.
 - QGIS API & Symbology Compatibility:
   * For categorized and graduated renderers, use `renderer.setSourceSymbol(sym)` (not `setSymbol()`).
   * `add_layout_text()` supports `padding` or `margin_mm`.

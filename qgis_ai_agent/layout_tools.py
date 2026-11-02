@@ -42,9 +42,19 @@ THEMES = {
 
 # ---------------------------------------------------------------- helpers
 def _lay(name):
-    lay = QgsProject.instance().layoutManager().layoutByName(name)
+    mgr = QgsProject.instance().layoutManager()
+    if not name:
+        layouts = mgr.printLayouts()
+        if layouts:
+            return layouts[0]
+        raise ValueError("No layout name provided and active project has no layouts. Create one with create_blank_layout / create_layout first.")
+    lay = mgr.layoutByName(str(name))
     if not lay:
-        raise ValueError(f"No layout {name!r}. Create it with create_blank_layout / create_layout first.")
+        for l in mgr.printLayouts():
+            if l.name().lower() == str(name).lower():
+                return l
+        avail = [l.name() for l in mgr.printLayouts()]
+        raise ValueError(f"No layout {name!r}. Available layouts: {avail}. Create it with create_blank_layout / create_layout first.")
     return lay
 
 
@@ -199,10 +209,10 @@ def create_blank_layout(name="Map", page_size="A3", orientation="landscape", wid
        "background": S("string", "map background colour"),
        "grid": S("boolean", "draw a coordinate grid"), "grid_interval": S("number", "grid interval in map units"),
        "rotation": S("number", "map rotation degrees")})
-def add_layout_map(layout, x, y, width, height, item_id=None, extent_layer=None, bbox=None, bbox_crs=None, scale=None,
+def add_layout_map(layout=None, x=0, y=0, width=100, height=100, item_id=None, extent_layer=None, bbox=None, bbox_crs=None, scale=None,
                    margin=0.05, layers=None, overview_of=None, overview_color="#c62828", frame_color="#333333",
                    frame_width=0.3, background=None, grid=False, grid_interval=None, rotation=None, **kwargs):
-    lay = _lay(layout)
+    lay = _lay(layout or kwargs.get("layout_name") or kwargs.get("name"))
     mp = QgsLayoutItemMap(lay)
     mp.setRect(0, 0, 10, 10)
     _place(lay, mp, x, y, width, height, item_id)
@@ -269,9 +279,9 @@ def add_layout_map(layout, x, y, width, height, item_id=None, extent_layer=None,
        "fill": S("string", "fill colour, 'none' for transparent"), "stroke": S("string", "outline colour, 'none' for no outline"),
        "stroke_width": S("number", "mm, default 0.3"), "corner_radius": S("number", "mm, rounded corners for rectangles"),
        "opacity": S("number", "0..1")})
-def add_layout_shape(layout, x, y, width, height, item_id=None, shape="rectangle", fill="#ffffff", stroke="none",
+def add_layout_shape(layout=None, x=0, y=0, width=10, height=10, item_id=None, shape="rectangle", fill="#ffffff", stroke="none",
                      stroke_width=0.3, corner_radius=0, opacity=None, **kwargs):
-    lay = _lay(layout)
+    lay = _lay(layout or kwargs.get("layout_name") or kwargs.get("name"))
     it = QgsLayoutItemShape(lay)
     kinds = {"rectangle": QgsLayoutItemShape.Shape.Rectangle, "ellipse": QgsLayoutItemShape.Shape.Ellipse,
              "triangle": QgsLayoutItemShape.Shape.Triangle}
@@ -299,7 +309,7 @@ def add_layout_shape(layout, x, y, width, height, item_id=None, shape="rectangle
        "background": S("string", "fill colour behind text"), "frame_color": S("string", "outline colour"),
        "padding": S("number", "mm, default 1"), "html": S("boolean", "allow inline HTML formatting"),
        "halo_color": S("string", "text halo colour"), "halo_size": S("number", "halo mm")})
-def add_layout_text(layout, x, y, width, height, text, item_id=None, size=10, color="#000000", font=None, bold=False,
+def add_layout_text(layout=None, x=0, y=0, width=50, height=10, text="", item_id=None, size=10, color="#000000", font=None, bold=False,
                     italic=False, align="left", valign="middle", background=None, frame_color=None, padding=1.0,
                     html=False, halo_color=None, halo_size=0, **kwargs):
     if "margin_mm" in kwargs:
@@ -312,7 +322,7 @@ def add_layout_text(layout, x, y, width, height, text, item_id=None, size=10, co
     margin_x = float(kwargs.get("margin_x", padding))
     margin_y = float(kwargs.get("margin_y", padding))
 
-    lay = _lay(layout)
+    lay = _lay(layout or kwargs.get("layout_name") or kwargs.get("name"))
     it = QgsLayoutItemLabel(lay)
     it.setText(text)
     it.setTextFormat(_fmt(size, color, bold, font, italic, halo_color, halo_size, html))
@@ -335,8 +345,8 @@ def add_layout_text(layout, x, y, width, height, text, item_id=None, size=10, co
        "path": S("string", "file path, URL, or QGIS SVG name (see list_svg_icons)"), "item_id": S("string", ""),
        "fit": S("string", "zoom (keep aspect, default) | stretch | clip | zoom_resize"),
        "frame_color": S("string", "optional border colour"), "svg_fill": S("string", "fill colour for parametrised SVGs")})
-def add_layout_picture(layout, x, y, width, height, path, item_id=None, fit="zoom", frame_color=None, svg_fill=None, **kwargs):
-    lay = _lay(layout)
+def add_layout_picture(layout=None, x=0, y=0, width=10, height=10, path="", item_id=None, fit="zoom", frame_color=None, svg_fill=None, **kwargs):
+    lay = _lay(layout or kwargs.get("layout_name") or kwargs.get("name"))
     it = QgsLayoutItemPicture(lay)
     src = path
     if not path.startswith(("http://", "https://", ":/")) and not os.path.isfile(path):
@@ -368,11 +378,11 @@ def add_layout_picture(layout, x, y, width, height, path, item_id=None, fit="zoo
        "text_color": S("string", ""), "background": S("string", "fill colour, 'none' for transparent"),
        "frame_color": S("string", "outline colour, 'none' for no frame"),
        "filter_by_map": S("boolean", "only show symbols visible in the map extent")})
-def add_layout_legend(layout, x, y, width=None, height=None, item_id=None, map_id=None, title="Legend", layers=None,
+def add_layout_legend(layout=None, x=0, y=0, width=None, height=None, item_id=None, map_id=None, title="Legend", layers=None,
                       columns=1, title_size=12, item_size=9, layer_title_size=10, hide_layer_titles=False,
                       symbol_width=6, symbol_height=4, text_color="#222222", background="#ffffff", frame_color="#999999",
                       filter_by_map=False, **kwargs):
-    lay = _lay(layout)
+    lay = _lay(layout or kwargs.get("layout_name") or kwargs.get("name"))
     lg = QgsLayoutItemLegend(lay)
     lg.setTitle(title or "")
     lay.addLayoutItem(lg)
@@ -427,9 +437,9 @@ def add_layout_legend(layout, x, y, width=None, height=None, item_id=None, map_i
        "segments": S("integer", "right segments, default 4"), "units_per_segment": S("number", "e.g. 100 for 100 m steps"),
        "height": S("number", "bar height mm, default 2"), "font_size": S("number", "pt, default 8"),
        "color": S("string", "bar and text colour, default '#222222'"), "background": S("string", "optional fill behind bar")})
-def add_layout_scalebar(layout, x, y, item_id=None, map_id=None, style="Line Ticks Up", units=None, segments=4,
+def add_layout_scalebar(layout=None, x=0, y=0, item_id=None, map_id=None, style="Line Ticks Up", units=None, segments=4,
                         units_per_segment=None, height=2, font_size=8, color="#222222", background=None, **kwargs):
-    lay = _lay(layout)
+    lay = _lay(layout or kwargs.get("layout_name") or kwargs.get("name"))
     mp = _map(lay, map_id)
     sb = QgsLayoutItemScaleBar(lay)
     sb.setStyle(style)
@@ -465,8 +475,8 @@ def add_layout_scalebar(layout, x, y, item_id=None, map_id=None, style="Line Tic
        "item_id": S("string", ""), "map_id": S("string", "default first map"),
        "style": S("string", "'default' | 'circle' | 'simple' | path/name of an SVG arrow"),
        "color": S("string", "fill colour for parametrised arrows, default '#222222'")})
-def add_layout_north_arrow(layout, x, y, size=12, item_id=None, map_id=None, style="default", color="#222222", **kwargs):
-    lay = _lay(layout)
+def add_layout_north_arrow(layout=None, x=0, y=0, size=12, item_id=None, map_id=None, style="default", color="#222222", **kwargs):
+    lay = _lay(layout or kwargs.get("layout_name") or kwargs.get("name"))
     presets = {"default": ":/images/north_arrows/layout_default_north_arrow.svg",
                "circle": "arrows/NorthArrow_04.svg", "simple": "arrows/NorthArrow_02.svg"}
     path = presets.get(style, style)
@@ -484,14 +494,15 @@ def add_layout_north_arrow(layout, x, y, size=12, item_id=None, map_id=None, sty
 # ---------------------------------------------------------------- inspect & edit
 @tool("List all items in a layout with id, type, position and size (mm) and text excerpt, to plan edits or check overlaps.",
       {"layout": S("string", "")})
-def list_layout_items(layout):
-    lay = _lay(layout)
+def list_layout_items(layout=None, **kwargs):
+    target = layout or kwargs.get("layout_name") or kwargs.get("name")
+    lay = _lay(target)
     page = lay.pageCollection().page(0).pageSize()
     out = []
     for it in lay.items():
-        if not hasattr(it, "positionWithUnits") or it.type() == QgsLayoutItemPage.Type if hasattr(QgsLayoutItemPage, "Type") else False:
+        if not hasattr(it, "positionWithUnits") or not hasattr(it, "uuid"):
             continue
-        if isinstance(it, QgsLayoutItemPage) or not hasattr(it, "uuid"):
+        if isinstance(it, QgsLayoutItemPage):
             continue
         pos, sz = it.positionWithUnits(), it.sizeWithUnits()
         d = {"id": it.id() or "", "uuid": it.uuid(), "type": type(it).__name__.replace("QgsLayoutItem", ""),
@@ -512,12 +523,16 @@ def list_layout_items(layout):
        "background": S("string", "background colour"), "visible": S("boolean", ""), "delete": S("boolean", ""),
        "z": S("number", "stacking order (higher = on top)"), "scale": S("number", "map scale denominator"),
        "extent_layer": S("string", "map: fit to layer"), "bbox": S("array", "map: [xmin,ymin,xmax,ymax] project CRS", items={"type": "number"})})
-def update_layout_item(layout, item_id, x=None, y=None, width=None, height=None, text=None, size=None, color=None,
+def update_layout_item(layout=None, item_id=None, x=None, y=None, width=None, height=None, text=None, size=None, color=None,
                        background=None, visible=None, delete=False, z=None, scale=None, extent_layer=None, bbox=None, **kwargs):
-    lay = _lay(layout)
-    it = lay.itemById(str(item_id)) or lay.itemByUuid(str(item_id))
+    target = layout or kwargs.get("layout_name") or kwargs.get("name")
+    lay = _lay(target)
+    target_item_id = item_id or kwargs.get("id") or kwargs.get("item")
+    if not target_item_id:
+        raise ValueError("Missing item_id parameter.")
+    it = lay.itemById(str(target_item_id)) or lay.itemByUuid(str(target_item_id))
     if not it:
-        raise ValueError(f"No item {item_id!r}. Use list_layout_items.")
+        raise ValueError(f"No item {target_item_id!r}. Use list_layout_items.")
     if delete:
         lay.removeLayoutItem(it)
         return {"deleted": item_id}
