@@ -266,6 +266,7 @@ class SessionManager:
     # ------------------------------------------------------------ project binding
     def _init_project(self, trigger_callback=True):
         p = QgsProject.instance()
+        was_dirty = p.isDirty()
         # Bind QGIS project lifecycle signals
         try:
             p.readProject.connect(self.on_project_loaded)
@@ -274,6 +275,9 @@ class SessionManager:
         except Exception:
             pass
         self.load_project_sessions(trigger_callback=trigger_callback)
+        # Guarantee plugin activation never dirties a blank/unmodified project
+        if not was_dirty and not p.fileName() and p.count() == 0 and p.isDirty():
+            p.setDirty(False)
 
     def _trigger_on_change(self):
         if callable(self.on_change):
@@ -303,11 +307,13 @@ class SessionManager:
         self.on_change = None
 
     def get_project_id(self):
+        if self.project_id:
+            return self.project_id
         p = QgsProject.instance()
         pid, ok = p.readEntry("qgis_ai_agent", "project_id")
         if not ok or not pid:
             pid = f"proj_{uuid.uuid4().hex[:12]}"
-            p.writeEntry("qgis_ai_agent", "project_id", pid)
+            # DO NOT call p.writeEntry() here! Calling writeEntry sets p.setDirty(True) on blank projects!
         self.project_id = pid
         return pid
 
@@ -394,15 +400,17 @@ class SessionManager:
 
     def save_project_sessions(self):
         pid = self.get_project_id()
+        p = QgsProject.instance()
+        cur_file = p.fileName()
         data = {
             "project_id": pid,
-            "project_file": QgsProject.instance().fileName(),
+            "project_file": cur_file or "",
             "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "active_session_id": self.active_session_id,
             "sessions": [s.to_dict() for s in self.sessions.values()],
         }
 
-        # 1. Write to local project store
+        # 1. Write to local project store on disk
         sfile = self.get_sessions_file()
         try:
             with open(sfile, "w", encoding="utf-8") as f:
@@ -410,17 +418,21 @@ class SessionManager:
         except Exception:
             pass
 
-        # 2. Embed into QGIS Project entry
-        try:
-            manifest_json = json.dumps(data, ensure_ascii=False)
-            # Limit embedded JSON size if needed; QGIS can store large strings in project XML
-            p = QgsProject.instance()
-            p.writeEntry("qgis_ai_agent", "project_id", pid)
-            p.writeEntry("qgis_ai_agent", "session_manifest", manifest_json)
-        except Exception:
-            pass
+        # 2. Embed into QGIS Project entry ONLY if project is already a saved file on disk
+        # NEVER call writeEntry on unsaved/empty projects, as it sets setDirty(True)
+        # which triggers the "Do you want to save the current project?" popup!
+        if cur_file and os.path.isabs(cur_file):
+            try:
+                was_dirty = p.isDirty()
+                manifest_json = json.dumps(data, ensure_ascii=False)
+                p.writeEntry("qgis_ai_agent", "project_id", pid)
+                p.writeEntry("qgis_ai_agent", "session_manifest", manifest_json)
+                if not was_dirty:
+                    p.setDirty(False)
+            except Exception:
+                pass
 
-        # 3. Auto-save QGIS project to disk across iterations
+        # 3. Auto-save QGIS project to disk across iterations (only if already saved on disk)
         self.autosave_qgis_project()
 
     # ------------------------------------------------------------ session lifecycle
@@ -504,3 +516,6 @@ class SessionManager:
         """Called when QGIS creates a new project or clears canvas."""
         self.project_id = None
         self.load_project_sessions()
+        p = QgsProject.instance()
+        if not p.fileName() and p.count() == 0 and p.isDirty():
+            p.setDirty(False)
