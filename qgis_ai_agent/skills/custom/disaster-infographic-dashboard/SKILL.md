@@ -1,7 +1,7 @@
 ---
 name: disaster-infographic-dashboard
 description: Comprehensive guide for constructing multi-hazard disaster situational reports (SITREPs) and emergency management dashboards. Covers incident point classification, terrain relief overlays, Kernel Density Estimation (KDE) heatmaps, 10km buffer hazard clusters, urban detail insets, analytical ranking charts, continuous gradient bars, and cluster callout cards.
-keywords: disaster, hazard, emergency, incident, sitrep, situational map, flood, landslide, wildfire, earthquake, storm, callout, cluster, inset, bar chart, heatmap, relief, composite map, dashboard
+keywords: disaster, hazard, emergency, incident, sitrep, situational map, flood, landslide, wildfire, earthquake, storm, callout, cluster, inset, bar chart, heatmap, relief, composite map, dashboard, asap, kabut asap, kebakaran, terdampak, smoke, haze, fire, air quality, pollution, affected population
 license: MIT
 ---
 

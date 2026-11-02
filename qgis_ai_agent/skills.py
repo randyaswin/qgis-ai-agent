@@ -24,6 +24,7 @@ USER_DIR = os.path.expanduser("~/.qgis_ai_agent/skills")
 STOP = set("""a an the and or of to in on for with from by is are be this that it as at into per use using make
 create build buat bikin dan atau yang untuk dengan dari di ke pada ini itu saya aku tolong mohon agar supaya
 sebuah dalam oleh jadi lalu kemudian juga serta buatkan tampilkan lakukan data layer lapisan
+based base saja hanya perlu ada cuma mau inginkan need only just
 ください 作成 作って 表示 追加 お願い おねがい したい して です ます だった こと もの よう""".split())
 
 
@@ -239,11 +240,26 @@ class Registry:
         if any(p in low for p in e2e_phrases):
             return True
 
-        # 2. Regex action patterns (verbs + target map/atlas/layout)
-        if re.search(r"\b(make|create|generate|produce|build|design|export|render)\b.{0,30}\b(map|atlas|layout|dashboard)\b", low):
+        # 2. Environmental, disaster, or thematic hazard requests (always an end-to-end mapping task in QGIS)
+        hazard_terms = (
+            "terdampak", "asap", "kualitas udara", "kebakaran", "polusi", "banjir", "longsor",
+            "gempa", "tsunami", "kekeringan", "titik panas", "hotspot", "smoke", "haze", "air quality",
+            "wildfire", "burn severity", "hazard", "susceptibility", "inundation"
+        )
+        has_hazard = any(h in low for h in hazard_terms)
+
+        # 3. Action verbs combined with spatial/GIS deliverable nouns
+        action_match_en = re.search(r"\b(make|create|generate|produce|build|design|export|render|map|visualize|model|analyze)\b.{0,30}\b(map|atlas|layout|dashboard|raster|surface|heatmap|impact|affected|hazard|susceptibility|risk|air quality|smoke|fire)\b", low)
+        if action_match_en:
             return True
-        if re.search(r"\b(buat|bikin|buatkan|bikinkan|susun|rancang|cetak)\b.{0,30}\b(peta|atlas|layout)\b", low):
+
+        action_match_id = re.search(r"\b(buat|bikin|buatkan|bikinkan|susun|rancang|cetak|petakan|tampilkan|visualisasikan|analisis|modelkan)\b.{0,30}\b(peta|atlas|layout|raster|sebaran|dampak|terdampak|rawan|risiko|kualitas udara|asap|kebakaran|polusi|zonasi|dashboard|layer)\b", low)
+        if action_match_id:
             return True
+
+        if has_hazard and any(w in low for w in ("buat", "bikin", "make", "create", "raster", "peta", "map", "layout", "analisis", "tampilkan")):
+            return True
+
         if re.search(r"\b(map of|peta dari|peta untuk|peta wilayah)\b", low):
             return True
 
