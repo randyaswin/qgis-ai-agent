@@ -1797,21 +1797,28 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
     t_name = theme.lower()
     t_type = (type or default_types.get(t_name, t_name)).lower()
 
-    if not bbox:
+    if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
         c = _canvas()
         tr = QgsCoordinateTransform(QgsProject.instance().crs(), QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance())
         wgs_ext = tr.transformBoundingBox(c.extent())
         bbox = [round(wgs_ext.xMinimum(), 5), round(wgs_ext.yMinimum(), 5),
                 round(wgs_ext.xMaximum(), 5), round(wgs_ext.yMaximum(), 5)]
 
-    xmin, ymin, xmax, ymax = bbox
+    raw_xmin, raw_ymin, raw_xmax, raw_ymax = bbox
+    xmin = min(raw_xmin, raw_xmax)
+    xmax = max(raw_xmin, raw_xmax)
+    ymin = min(raw_ymin, raw_ymax)
+    ymax = max(raw_ymin, raw_ymax)
+
     # Select key attributes based on theme
     if t_name == "places":
         select_clause = "id, names.primary as name, taxonomy.primary as category, geometry"
     elif t_name == "buildings":
         select_clause = "id, names.primary as name, height, num_floors, geometry"
     elif t_name == "transportation":
-        select_clause = "id, class, subtype, surface, geometry"
+        select_clause = "id, names.primary as name, class, subtype, subclass, geometry"
+    elif t_name == "base":
+        select_clause = "id, names.primary as name, subtype, class, geometry"
     else:
         select_clause = "id, subtype, geometry"
 
@@ -1838,7 +1845,13 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
         LIMIT {int(limit)}
     ) TO '{out_file}' WITH (FORMAT GDAL, DRIVER 'GeoJSON');
     """
-    con.execute(copy_query)
+    try:
+        con.execute(copy_query)
+    except Exception as e:
+        raise RuntimeError(
+            f"Overture Maps query failed for theme='{t_name}', type='{t_type}'. Error: {e}. "
+            f"Tip: If a column or filter fails, adjust parameters or use `query_duckdb_spatial` for custom SQL against '{s3_path}'."
+        ) from e
 
     layer_label = output_name or f"Overture_{t_name.capitalize()}"
     lyr = QgsVectorLayer(out_file, layer_label, "ogr")
@@ -1860,7 +1873,10 @@ def query_duckdb_spatial(query, layer_name="DuckDB_Layer"):
     con.execute("SET geometry_always_xy=true;")
 
     copy_query = f"COPY ({query}) TO '{out_file}' WITH (FORMAT GDAL, DRIVER 'GeoJSON');"
-    con.execute(copy_query)
+    try:
+        con.execute(copy_query)
+    except Exception as e:
+        raise RuntimeError(f"DuckDB spatial query failed. Query: {query}. Error: {e}") from e
 
     lyr = QgsVectorLayer(out_file, layer_name, "ogr")
     if not lyr.isValid():
