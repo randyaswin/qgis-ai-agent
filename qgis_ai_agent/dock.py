@@ -1094,7 +1094,7 @@ class AgentDock(QDockWidget):
         self.iface.mapCanvas().refresh()
         self._last_event_time = time.time()
 
-        # Persist into active project session
+        # Persist into active project session and autosave across iterations
         active_sess = self.session_manager.get_active_session()
         active_sess.add_tool_record(
             name=name,
@@ -1103,6 +1103,7 @@ class AgentDock(QDockWidget):
             success=True,
             html_card=full_node_html
         )
+        self.session_manager.save_project_sessions()
 
     def _on_tool_failed(self, name, err_msg):
         cat = self._last_tool_call.get("category", "QGIS")
@@ -1121,6 +1122,7 @@ class AgentDock(QDockWidget):
             success=False,
             html_card=full_node_html
         )
+        self.session_manager.save_project_sessions()
 
     def _register(self):
         argv = self._adapter()["register"]
@@ -1370,6 +1372,7 @@ class AgentDock(QDockWidget):
         full_user_html = user_card_html + badge_html
         self._append_html(full_user_html)
         active_sess.add_user_message(user, full_user_html)
+        self.session_manager.save_project_sessions()
 
         self._active_tool_pos = None
         self._last_event_time = time.time()

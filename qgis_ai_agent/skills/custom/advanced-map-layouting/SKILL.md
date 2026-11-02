@@ -15,22 +15,62 @@ This skill provides comprehensive instructions for designing publication-grade c
 
 A professional map layout follows strict proportions, balanced whitespace, and an intuitive visual path for the viewer.
 
-### Standard Layout Archetypes
-1. **Classic Cartographic Poster (Single Map + Margin Collateral):**
-   - Main map occupies 75–85% of page canvas.
-   - Top or bottom title block with neatline frame.
-   - Floating or docked legend, scale bar, north arrow, and credits block.
-2. **Wayfinding & Municipal Information Board (Multi-Panel Composition):**
-   - High-contrast header banner across the entire top edge (title, badge, multilingual subtitles).
-   - Left column (15–22% width): categorized POI symbols and road hierarchy legend.
-   - Center main frame (45–60% width): high-resolution street/facility detail map with "You Are Here" callout.
-   - Right column (25–35% width): regional key/overview map showing wider context, plus photographic attraction cards with numbered badges.
-   - Bottom footer banner: physical address, orientation statement, and publication metadata.
-3. **Situational Dashboard / Thematic Infographic:**
-   - Central thematic map.
-   - Inset detail map in top-left or top-right.
-   - Continuous horizontal gradient bars along bottom dock.
-   - Summary ranking bar charts on right panel.
+### Standard Layout Archetypes (Strict Rule: Layout Style MUST Vary by Map Theme)
+
+Cartographic layouts must NEVER look identical across different themes. Choose the archetype that strictly matches the map's domain purpose:
+
+1. **Official Spatial Planning & Master Plan (`planning_official` / "Kop Peta"):**
+   - **Use For:** City planning, RTRW/RDTR, zoning schemes, land use allocation, municipal master plans (e.g. 都市計画図).
+   - **Visual Structure:**
+     * Clean outer neatline frame around the entire page.
+     * Large Main Map Frame occupying 72–76% width on the left.
+     * Full-height structured "Kop Peta" column (24–28% width) on the right:
+       1. Agency / Municipal Department Header Box
+       2. Formal Map Title & Administrative Subtitle Box
+       3. North Arrow & Graphic Scale Bar block
+       4. Regional Locator / Inset Key Map with red overview footprint
+       5. Categorized Zoning / Land Use Legend
+       6. Coordinate System, Datum, & UTM Grid Specifications Box
+       7. Official Approval & Data Provenance Box
+     * Coordinate grid cross-ticks along map borders.
+   - **Tool Call:** `create_styled_layout(name="City_Plan", style_theme="planning_official", title="...", subtitle="...", credits="...", extent_layer="...", key_extent_layer="...")`
+
+2. **Situational Crisis & Hazard Dashboard (`infographic_disaster`):**
+   - **Use For:** Flood susceptibility, earthquake risk, wildfire hotspots, emergency management, disaster impact.
+   - **Visual Structure:**
+     * Dark/High-contrast Top Alert Header with emergency severity indicator badge.
+     * Central Hazard Map (70–75% width).
+     * Right KPI Metrics Cards (e.g., Total Area Flooded, Vulnerable Population, Evacuation Shelters).
+     * Bottom Severity Ramp Dock (color gradient from Low to Extreme) + Emergency Call Center info.
+   - **Tool Call:** `create_styled_layout(name="Hazard_Map", style_theme="infographic_disaster", title="...", subtitle="...", credits="...", extent_layer="...")`
+
+3. **National Geographic Classic Editorial (`natgeo`):**
+   - **Use For:** Natural reserves, physical geography, environmental conservation, historical atlases.
+   - **Visual Structure:**
+     * Warm parchment canvas tint (`#fcfbf7`).
+     * Elegant double neatline border (thick outer line 0.8mm + thin inner line 0.25mm).
+     * Centered classic serif typography (Georgia / Times) with decorative divider line.
+     * Floating framed legend inside map with parchment background.
+     * Classic single-box scale bar and traditional compass rose.
+   - **Tool Call:** `create_styled_layout(name="Nature_Map", style_theme="natgeo", title="...", subtitle="...", credits="...", extent_layer="...")`
+
+4. **Statistical & Demographic Choropleth (`statistical_thematic`):**
+   - **Use For:** Population density, census demographics, economic indices, health statistics.
+   - **Visual Structure:**
+     * Clean, modern minimalist white canvas.
+     * Clean sans-serif typography (Arial / Helvetica).
+     * Main choropleth map frame (76% width).
+     * Right statistical sidebar: Distribution card (Min, Mean, Median, Max) and class break chips (Quantiles / Natural Breaks).
+   - **Tool Call:** `create_styled_layout(name="Demographic_Map", style_theme="statistical_thematic", title="...", subtitle="...", credits="...", extent_layer="...")`
+
+5. **Public Transit & Wayfinding Information Board (`wayfinding_transit`):**
+   - **Use For:** Railway/bus transit maps, pedestrian wayfinding, tourist boards, university/park navigation.
+   - **Visual Structure:**
+     * Full-width header banner with transit/directional badge and multilingual subtitles.
+     * Left POI Directory / Legend column.
+     * Center detail street/station map with "You Are Here" callout marker.
+     * Right locator key map and landmark attraction cards.
+   - **Tool Call:** `create_wayfinding_layout(...)`
 
 ---
 

@@ -171,7 +171,7 @@ def marker_symbol(color="#c62828", size=4.0, shape="circle", svg=None, outline_c
        "width": S("number", "page width mm (only with page_size='custom')"),
        "height": S("number", "page height mm (only with page_size='custom')"),
        "background": S("string", "page colour, default white")})
-def create_blank_layout(name="Map", page_size="A3", orientation="landscape", width=None, height=None, background="#ffffff"):
+def create_blank_layout(name="Map", page_size="A4", orientation="landscape", width=None, height=None, background="#ffffff"):
     p = QgsProject.instance()
     mgr = p.layoutManager()
     old = mgr.layoutByName(name)

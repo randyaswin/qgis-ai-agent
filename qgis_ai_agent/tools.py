@@ -101,7 +101,14 @@ def _layer_info(lyr):
 
 
 def _canvas():
-    return _iface().mapCanvas()
+    iface = _iface()
+    if iface and hasattr(iface, "mapCanvas"):
+        return iface.mapCanvas()
+    try:
+        from qgis.gui import QgsMapCanvas
+        return QgsMapCanvas()
+    except Exception:
+        return None
 
 
 def _refresh():
@@ -114,7 +121,7 @@ def get_project_state():
     p = QgsProject.instance()
     order = [n.layerId() for n in p.layerTreeRoot().findLayers()]
     ext = _canvas().extent()
-    return {
+    state = {
         "project_file": p.fileName(),
         "crs": p.crs().authid(),
         "layers_top_to_bottom": [_layer_info(p.mapLayer(i)) for i in order if p.mapLayer(i)],
@@ -123,6 +130,7 @@ def get_project_state():
         "layouts": [l.name() for l in p.layoutManager().layouts()],
         "qgis_version": Qgis.version(),
     }
+    return state
 
 
 @tool("Clear the project and start fresh.", {"crs": S("string", "e.g. EPSG:4326 or EPSG:32748")})
@@ -142,14 +150,31 @@ def set_project_crs(crs):
     return {"crs": c.authid()}
 
 
-@tool("Save project to .qgz/.qgs.", {"path": S("string", "absolute path")})
-def save_project(path):
-    ok = QgsProject.instance().write(path)
+@tool("Save project to .qgz/.qgs. If path is omitted, saves to the current file or auto-saves to output directory.",
+      {"path": S("string", "optional absolute path; defaults to current project file or ~/qgis-ai-maps/<title>.qgz")})
+def save_project(path=None):
+    p = QgsProject.instance()
+    if not path:
+        path = p.fileName()
+    if not path:
+        out_dir = os.path.expanduser("~/qgis-ai-maps")
+        os.makedirs(out_dir, exist_ok=True)
+        title = p.title() or "QGIS_Project"
+        clean_title = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in title).strip("_") or "QGIS_Project"
+        path = os.path.join(out_dir, f"{clean_title}.qgz")
+    ok = p.write(path)
+    try:
+        from .sessions import record_autosave_info
+        record_autosave_info(path)
+    except Exception:
+        pass
     return {"saved": ok, "path": path}
 
 
-@tool("Open an existing project file.", {"path": S("string", "absolute path")})
+@tool("Open an existing project file (.qgz/.qgs). STRICT RULE: Only call this tool if the user explicitly requested to open this specific project file. Never open unrelated projects autonomously.", {"path": S("string", "absolute path to project file")})
 def open_project(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Project file not found: {path}")
     QgsProject.instance().read(path)
     return get_project_state()
 
@@ -1494,13 +1519,34 @@ def add_layout_callout_box(layout=None, x=0, y=0, width=50, height=15, title="",
        "title": S("string", "main map title"), "subtitle": S("string", "subtitle"),
        "credits": S("string", "credits and data source"),
        "extent_layer": S("string", "main study area layer name"),
-       "page_size": S("string", "A4|A3|A2, default A3"),
+       "page_size": S("string", "A4|A3|A2, default A4"),
        "orientation": S("string", "landscape|portrait, default landscape"),
        "grid": S("boolean", "include coordinate grid (default false)")})
-def create_styled_layout(name="Map", style_theme="infographic_disaster", title="", subtitle="", credits="",
-                         extent_layer=None, page_size="A3", orientation="landscape", grid=False, **kwargs):
+@tool("Create a publication-grade themed print layout matching specific cartographic genres: 'planning_official' (formal Kop Peta with right-side metadata block, zoning legend, inset, and neatline), 'infographic_disaster' (situational alert banner, KPI cards, hazard legend), 'natgeo' (classic National Geographic parchment, double neatline, serif typography), 'statistical_thematic' (clean choropleth with distribution cards and gradient legend), 'relief_topographic' (Swiss hillshade and contour profile), or 'modern_clean'. Defaults to A4.",
+      {"name": S("string", "layout name"),
+       "style_theme": S("string", "planning_official | infographic_disaster | natgeo | statistical_thematic | relief_topographic | modern_clean"),
+       "title": S("string", "main map title"),
+       "subtitle": S("string", "subtitle or administrative region"),
+       "credits": S("string", "mandatory real data source attribution"),
+       "extent_layer": S("string", "main study area layer name"),
+       "key_extent_layer": S("string", "optional regional overview / inset map extent layer"),
+       "page_size": S("string", "A4|A3|A2, default A4"),
+       "orientation": S("string", "landscape|portrait, default landscape"),
+       "grid": S("boolean", "include coordinate grid (default false)"),
+       "agency": S("string", "government agency or municipal department name")})
+def create_styled_layout(name="Map", style_theme="planning_official", title="", subtitle="", credits="",
+                         extent_layer=None, key_extent_layer=None, page_size="A4", orientation="landscape",
+                         grid=False, agency="", **kwargs):
     import html as _html
     import math
+    from qgis.core import (
+        QgsLayoutItemShape, QgsFillSymbol, QgsLayoutItemMap, QgsLayoutItemLabel,
+        QgsLayoutItemLegend, QgsLayoutItemScaleBar, QgsLayoutItemPicture,
+        QgsLayoutPoint, QgsLayoutSize, QgsLayoutMeasurement, QgsLayoutItemMapGrid,
+        QgsLineSymbol, QgsLayoutItemMapOverview
+    )
+    from qgis.PyQt.QtGui import QColor, QFont
+
     name = name or kwargs.get("layout_name") or kwargs.get("layout") or "Map"
     p = QgsProject.instance()
     mgr = p.layoutManager()
@@ -1516,102 +1562,57 @@ def create_styled_layout(name="Map", style_theme="infographic_disaster", title="
     page.setPageSize(page_size, ori)
     W, H = page.pageSize().width(), page.pageSize().height()
     mm = QgsUnitTypes.LayoutUnit.LayoutMillimeters if hasattr(QgsUnitTypes, "LayoutUnit") else Qgis.LayoutUnit.Millimeters
-    m = 10
 
-    # Monkey-patch QgsLayoutItemShape.setFillColor for backward/script compatibility
-    try:
-        from qgis.core import QgsLayoutItemShape, QgsFillSymbol
-        from qgis.PyQt.QtGui import QColor
-        if hasattr(QgsLayoutItemShape, "setSymbol") and not hasattr(QgsLayoutItemShape, "setFillColor"):
-            def _shape_set_fill_color(self, color):
-                c = QColor(color) if isinstance(color, str) else color
-                sym = self.symbol()
-                if sym:
-                    sym.setColor(c)
-                else:
-                    self.setSymbol(QgsFillSymbol.createSimple({"color": c.name(), "outline_color": "transparent"}))
-            QgsLayoutItemShape.setFillColor = _shape_set_fill_color
-    except Exception:
-        pass
-    is_natgeo = (style_theme == "natgeo")
-    is_infographic = (style_theme in ("infographic_bencana", "infographic_disaster"))
-    is_relief = (style_theme == "relief_topographic")
+    th = (style_theme or "planning_official").lower()
+    is_planning = th in ("planning_official", "tata_ruang", "master_plan", "urban_planning", "zoning", "planning", "official")
+    is_infographic = th in ("infographic_bencana", "infographic_disaster", "disaster", "hazard", "bencana")
+    is_natgeo = th in ("natgeo", "national_geographic")
+    is_statistical = th in ("statistical_thematic", "choropleth", "demographic", "socio_economic", "thematic")
+    is_relief = th in ("relief_topographic", "relief", "swiss", "topographic")
 
-    font_family = "Georgia" if is_natgeo else "Arial"
+    def _setup_extent(mp_item, lyr_name):
+        if lyr_name:
+            try:
+                lyr = _layer(lyr_name)
+                ext = QgsCoordinateTransform(lyr.crs(), p.crs(), p).transformBoundingBox(lyr.extent())
+                ext.scale(1.05)
+                mp_item.zoomToExtent(ext)
+                return ext
+            except Exception:
+                pass
+        canv = _canvas()
+        if canv and hasattr(canv, "extent"):
+            ext = canv.extent()
+            mp_item.zoomToExtent(ext)
+            return ext
+        from qgis.core import QgsRectangle
+        ext = QgsRectangle(-180, -90, 180, 90)
+        mp_item.zoomToExtent(ext)
+        return ext
 
-    # NatGeo page background tint
-    if is_natgeo:
-        page.setBackgroundColor(QColor("#fcfbf7"))
-
-    # Top Header
-    header_h = 18 if title else 0
-    if title:
-        header_card = QgsLayoutItemLabel(lay)
-        header_card.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
-        sub_txt = f"<div style='font-size: 10.5px; color: #546e7a; margin-top: 2px;'>{_html.escape(subtitle)}</div>" if subtitle else ""
-        border_css = "border: 1.5px solid #263238;" if is_natgeo else "border: 1px solid #cfd8dc; border-radius: 5px;"
-        bg_css = "background: #fbf9f4;" if is_natgeo else "background: #ffffff;"
-        header_card.setText(
-            f"<div style='font-family: {font_family}, serif; text-align: center; padding: 5px; {bg_css} {border_css}'>"
-            f"<div style='font-size: 15px; font-weight: bold; color: #0d47a1; letter-spacing: 0.8px;'>{_html.escape(title)}</div>"
-            f"{sub_txt}"
-            f"</div>"
-        )
-        lay.addLayoutItem(header_card)
-        header_card.attemptMove(QgsLayoutPoint(m, m, mm))
-        header_card.attemptResize(QgsLayoutSize(W - 2 * m, header_h, mm))
-
-    # Main Map frame placement with strict non-overlapping gutters
-    map_top = m + (header_h + 3 if title else 0)
-    bottom_h = 58 if is_infographic else 18
-    right_w = 82 if is_infographic else 0
-    map_w = W - 2 * m - right_w
-    map_h = H - map_top - bottom_h
-
-    mp = QgsLayoutItemMap(lay)
-    mp.setRect(0, 0, 10, 10)
-    lay.addLayoutItem(mp)
-    mp.setCrs(p.crs())
-    mp.attemptMove(QgsLayoutPoint(m, map_top, mm))
-    mp.attemptResize(QgsLayoutSize(map_w, map_h, mm))
-
-    if extent_layer:
-        try:
-            lyr = _layer(extent_layer)
-            ext = QgsCoordinateTransform(lyr.crs(), p.crs(), p).transformBoundingBox(lyr.extent())
-            ext.scale(1.05)
-        except Exception:
-            ext = _canvas().extent()
-    else:
-        ext = _canvas().extent()
-    mp.zoomToExtent(ext)
-    mp.setFrameEnabled(True)
-    mp.setFrameStrokeColor(QColor("#334155"))
-    mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.3, mm))
-
-    # Coordinate Grid (default False; when enabled, coordinates stay INSIDE frame so they never overlap outer panels)
-    if grid:
-        from qgis.core import QgsLayoutItemMapGrid, QgsLineSymbol
-        g = QgsLayoutItemMapGrid("grid", mp)
-        g.setStyle(QgsLayoutItemMapGrid.GridStyle.Cross)
+    def _apply_grid(mp_item, ext):
+        g = QgsLayoutItemMapGrid("grid", mp_item)
+        g.setStyle(QgsLayoutItemMapGrid.GridStyle.Cross if (is_planning or is_relief) else QgsLayoutItemMapGrid.GridStyle.Solid)
         g.setCrossLength(1.5)
-        map_crs = p.crs()
+        map_crs = p.crs() if (p.crs() and p.crs().isValid()) else QgsCoordinateReferenceSystem("EPSG:4326")
         g.setCrs(map_crs)
+        w_span = max(abs(ext.width()), 1.0)
+        h_span = max(abs(ext.height()), 1.0)
+        span = max(w_span, h_span)
         if map_crs.isGeographic():
-            iv = max(round(max(ext.width(), ext.height()) / 4, 3), 0.001)
+            iv = max(round(span / 4, 3), 0.001)
             g.setIntervalX(iv)
             g.setIntervalY(iv)
             g.setAnnotationFormat(QgsLayoutItemMapGrid.AnnotationFormat.DegreeMinute)
             g.setAnnotationPrecision(1)
         else:
-            raw_iv = max(ext.width(), ext.height()) / 5
-            mag = 10 ** math.floor(math.log10(max(raw_iv, 100)))
+            raw_iv = max(span / 5, 10.0)
+            mag = 10.0 ** math.floor(math.log10(max(raw_iv, 10.0)))
             clean_iv = max(round(raw_iv / mag) * mag, mag)
-            g.setIntervalX(clean_iv)
-            g.setIntervalY(clean_iv)
+            g.setIntervalX(float(clean_iv))
+            g.setIntervalY(float(clean_iv))
             g.setAnnotationFormat(QgsLayoutItemMapGrid.AnnotationFormat.Decimal)
             g.setAnnotationPrecision(0)
-
         g.setAnnotationEnabled(True)
         g.setAnnotationPosition(QgsLayoutItemMapGrid.InsideMapFrame, QgsLayoutItemMapGrid.BorderSide.Left)
         g.setAnnotationPosition(QgsLayoutItemMapGrid.InsideMapFrame, QgsLayoutItemMapGrid.BorderSide.Bottom)
@@ -1621,25 +1622,559 @@ def create_styled_layout(name="Map", style_theme="infographic_disaster", title="
         g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.ShowAll, QgsLayoutItemMapGrid.BorderSide.Left)
         g.setAnnotationDirection(QgsLayoutItemMapGrid.Vertical, QgsLayoutItemMapGrid.BorderSide.Left)
         g.setLineSymbol(QgsLineSymbol.createSimple({"color": "#94a3b8", "width": "0.15", "opacity": "0.6"}))
-        mp.grids().addGrid(g)
+        mp_item.grids().addGrid(g)
 
-    # Scale bar (placed inside map at bottom left)
+    def _add_divider(rx, cy, rw):
+        div = QgsLayoutItemShape(lay)
+        div.setShapeType(QgsLayoutItemShape.Shape.Rectangle)
+        div.setSymbol(QgsFillSymbol.createSimple({"color": "#cbd5e1", "outline_color": "transparent"}))
+        lay.addLayoutItem(div)
+        div.attemptMove(QgsLayoutPoint(rx, cy, mm))
+        div.attemptResize(QgsLayoutSize(rw, 0.4, mm))
+
+    # =========================================================================
+    # THEME 1: PLANNING OFFICIAL (Formal Kop Peta Layout)
+    # =========================================================================
+    if is_planning:
+        m = 7.0
+        neat_m = 3.5
+        neat = QgsLayoutItemShape(lay)
+        neat.setShapeType(QgsLayoutItemShape.Shape.Rectangle)
+        neat.setSymbol(QgsFillSymbol.createSimple({"color": "transparent", "outline_color": "#1e293b", "outline_width": "0.6"}))
+        lay.addLayoutItem(neat)
+        neat.attemptMove(QgsLayoutPoint(neat_m, neat_m, mm))
+        neat.attemptResize(QgsLayoutSize(W - 2 * neat_m, H - 2 * neat_m, mm))
+
+        right_w = round(W * 0.26)
+        map_w = W - 2 * m - right_w - 2.0
+        map_h = H - 2 * m
+        right_x = m + map_w + 2.0
+
+        mp = QgsLayoutItemMap(lay)
+        mp.setRect(0, 0, 10, 10)
+        lay.addLayoutItem(mp)
+        mp.setCrs(p.crs())
+        mp.attemptMove(QgsLayoutPoint(m, m, mm))
+        mp.attemptResize(QgsLayoutSize(map_w, map_h, mm))
+        main_ext = _setup_extent(mp, extent_layer)
+        mp.setFrameEnabled(True)
+        mp.setFrameStrokeColor(QColor("#1e293b"))
+        mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.4, mm))
+        _apply_grid(mp, main_ext)
+
+        # Kop Peta Container
+        kop = QgsLayoutItemShape(lay)
+        kop.setShapeType(QgsLayoutItemShape.Shape.Rectangle)
+        kop.setSymbol(QgsFillSymbol.createSimple({"color": "#ffffff", "outline_color": "#1e293b", "outline_width": "0.4"}))
+        lay.addLayoutItem(kop)
+        kop.attemptMove(QgsLayoutPoint(right_x, m, mm))
+        kop.attemptResize(QgsLayoutSize(right_w, map_h, mm))
+
+        curr_y = m
+        agency_name = agency or "PEMERINTAH KOTA / KABUPATEN"
+        lbl_agency = QgsLayoutItemLabel(lay)
+        lbl_agency.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        lbl_agency.setText(
+            f"<div style='text-align:center; font-family:Arial, sans-serif; padding:4px 2px;'>"
+            f"<div style='font-size:8px; font-weight:bold; color:#0f172a; text-transform:uppercase;'>{_html.escape(agency_name)}</div>"
+            f"<div style='font-size:6.5px; color:#64748b; margin-top:1px;'>BIDANG PENATAAN RUANG & TATA WILAYAH</div>"
+            f"</div>"
+        )
+        lay.addLayoutItem(lbl_agency)
+        agency_h = 13.0
+        lbl_agency.attemptMove(QgsLayoutPoint(right_x, curr_y, mm))
+        lbl_agency.attemptResize(QgsLayoutSize(right_w, agency_h, mm))
+        curr_y += agency_h
+
+        _add_divider(right_x, curr_y, right_w)
+        curr_y += 0.5
+
+        lbl_title = QgsLayoutItemLabel(lay)
+        lbl_title.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        sub_html = f"<div style='font-size:7.5px; color:#475569; margin-top:2px;'>{_html.escape(subtitle)}</div>" if subtitle else ""
+        lbl_title.setText(
+            f"<div style='text-align:center; font-family:Arial, sans-serif; padding:4px 3px;'>"
+            f"<div style='font-size:10px; font-weight:bold; color:#0f172a; letter-spacing:0.3px;'>{_html.escape(title or 'PETA RENCANA TATA RUANG')}</div>"
+            f"{sub_html}"
+            f"</div>"
+        )
+        lay.addLayoutItem(lbl_title)
+        title_h = 16.0 if subtitle else 12.0
+        lbl_title.attemptMove(QgsLayoutPoint(right_x, curr_y, mm))
+        lbl_title.attemptResize(QgsLayoutSize(right_w, title_h, mm))
+        curr_y += title_h
+
+        _add_divider(right_x, curr_y, right_w)
+        curr_y += 0.5
+
+        # North Arrow & Scale Bar Side-by-side
+        arrow_w = 11.0
+        na = QgsLayoutItemPicture(lay)
+        na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
+        na.setLinkedMap(mp)
+        lay.addLayoutItem(na)
+        na.attemptMove(QgsLayoutPoint(right_x + 3.0, curr_y + 1.0, mm))
+        na.attemptResize(QgsLayoutSize(arrow_w, 14.0, mm))
+
+        sb = QgsLayoutItemScaleBar(lay)
+        sb.setStyle("Line Ticks Up")
+        sb.setLinkedMap(mp)
+        sb.applyDefaultSize()
+        lay.addLayoutItem(sb)
+        sb.attemptMove(QgsLayoutPoint(right_x + arrow_w + 4.0, curr_y + 2.0, mm))
+        curr_y += 16.0
+
+        _add_divider(right_x, curr_y, right_w)
+        curr_y += 0.5
+
+        # Key Inset Map (if key_extent_layer provided and room exists)
+        if key_extent_layer and curr_y < H - m - 75:
+            key_h = 32.0
+            lbl_key = QgsLayoutItemLabel(lay)
+            lbl_key.setText("PETA SITUASI / INSET:")
+            f_key = QFont("Arial", 6)
+            f_key.setBold(True)
+            fmt_k = QgsTextFormat()
+            fmt_k.setFont(f_key)
+            lbl_key.setTextFormat(fmt_k)
+            lay.addLayoutItem(lbl_key)
+            lbl_key.attemptMove(QgsLayoutPoint(right_x + 2.0, curr_y + 1.0, mm))
+            lbl_key.attemptResize(QgsLayoutSize(right_w - 4.0, 4.0, mm))
+            curr_y += 5.0
+
+            kmp = QgsLayoutItemMap(lay)
+            lay.addLayoutItem(kmp)
+            kmp.setCrs(p.crs())
+            kmp.attemptMove(QgsLayoutPoint(right_x + 2.0, curr_y, mm))
+            kmp.attemptResize(QgsLayoutSize(right_w - 4.0, key_h - 6.0, mm))
+            _setup_extent(kmp, key_extent_layer)
+            kmp.setFrameEnabled(True)
+            kmp.setFrameStrokeColor(QColor("#94a3b8"))
+            kmp.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
+
+            ov = QgsLayoutItemMapOverview("MainMapExt", kmp)
+            ov.setLinkedMap(mp)
+            ov.setFrameFillColor(QColor(220, 38, 38, 40))
+            ov.setFrameOutlineColor(QColor(220, 38, 38, 220))
+            kmp.overviews().addOverview(ov)
+
+            curr_y += key_h - 1.0
+            _add_divider(right_x, curr_y, right_w)
+            curr_y += 0.5
+
+        # Legend Box
+        lbl_leg = QgsLayoutItemLabel(lay)
+        lbl_leg.setText("LEGENDA / SIMBOLOGI:")
+        f_leg = QFont("Arial", 7)
+        f_leg.setBold(True)
+        fmt_l = QgsTextFormat()
+        fmt_l.setFont(f_leg)
+        lbl_leg.setTextFormat(fmt_l)
+        lay.addLayoutItem(lbl_leg)
+        lbl_leg.attemptMove(QgsLayoutPoint(right_x + 2.0, curr_y + 1.0, mm))
+        lbl_leg.attemptResize(QgsLayoutSize(right_w - 4.0, 4.0, mm))
+        curr_y += 5.0
+
+        leg_avail_h = max(25.0, (H - m - 26.0) - curr_y)
+        leg = QgsLayoutItemLegend(lay)
+        leg.setLinkedMap(mp)
+        leg.setTitle("")
+        leg.setAutoUpdateModel(True)
+        lay.addLayoutItem(leg)
+        leg.attemptMove(QgsLayoutPoint(right_x + 1.0, curr_y, mm))
+        leg.attemptResize(QgsLayoutSize(right_w - 2.0, leg_avail_h, mm))
+        leg.setBackgroundColor(QColor(255, 255, 255, 0))
+
+        # Technical Metadata block
+        meta_y = H - m - 24.0
+        _add_divider(right_x, meta_y, right_w)
+        lbl_meta = QgsLayoutItemLabel(lay)
+        lbl_meta.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        crs_auth = p.crs().authid()
+        lbl_meta.setText(
+            f"<div style='font-family:Arial, sans-serif; font-size:6.5px; color:#475569; padding:2px 3px; line-height:1.2;'>"
+            f"<b>SISTEM KOORDINAT & PROYEKSI:</b><br>"
+            f"Sistem Grid: Universal Transverse Mercator (UTM)<br>"
+            f"Datum: WGS 84 · CRS: {crs_auth}<br>"
+            f"<b>SUMBER DATA:</b> {_html.escape(credits or 'Portal Resmi Pemerintah, OSM, Open Data')}"
+            f"</div>"
+        )
+        lay.addLayoutItem(lbl_meta)
+        lbl_meta.attemptMove(QgsLayoutPoint(right_x, meta_y + 0.5, mm))
+        lbl_meta.attemptResize(QgsLayoutSize(right_w, 14.0, mm))
+
+        # Approval Block
+        appr_y = H - m - 9.5
+        _add_divider(right_x, appr_y, right_w)
+        lbl_appr = QgsLayoutItemLabel(lay)
+        lbl_appr.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        lbl_appr.setText(
+            f"<div style='font-family:Arial, sans-serif; font-size:6px; color:#64748b; text-align:center; padding-top:2px;'>"
+            f"DIPERIKSA & DISETUJUI OLEH:<br>"
+            f"<span style='font-size:6.5px; font-weight:bold; color:#1e293b;'>PEJABAT PEMBINA TATA RUANG DAERAH</span>"
+            f"</div>"
+        )
+        lay.addLayoutItem(lbl_appr)
+        lbl_appr.attemptMove(QgsLayoutPoint(right_x, appr_y + 0.5, mm))
+        lbl_appr.attemptResize(QgsLayoutSize(right_w, 9.0, mm))
+
+        mgr.addLayout(lay)
+        return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale(),
+                "kop_peta_rect": [right_x, m, right_w, map_h]}
+
+    # =========================================================================
+    # THEME 2: NATIONAL GEOGRAPHIC CLASSIC (Parchment, Serif, Double Neatline)
+    # =========================================================================
+    if is_natgeo:
+        m = 10.0
+        page.setBackgroundColor(QColor("#fcfbf7"))
+
+        # Double Neatline
+        out_neat = QgsLayoutItemShape(lay)
+        out_neat.setShapeType(QgsLayoutItemShape.Shape.Rectangle)
+        out_neat.setSymbol(QgsFillSymbol.createSimple({"color": "transparent", "outline_color": "#263238", "outline_width": "0.8"}))
+        lay.addLayoutItem(out_neat)
+        out_neat.attemptMove(QgsLayoutPoint(m - 3.0, m - 3.0, mm))
+        out_neat.attemptResize(QgsLayoutSize(W - 2 * m + 6.0, H - 2 * m + 6.0, mm))
+
+        in_neat = QgsLayoutItemShape(lay)
+        in_neat.setShapeType(QgsLayoutItemShape.Shape.Rectangle)
+        in_neat.setSymbol(QgsFillSymbol.createSimple({"color": "transparent", "outline_color": "#263238", "outline_width": "0.25"}))
+        lay.addLayoutItem(in_neat)
+        in_neat.attemptMove(QgsLayoutPoint(m - 1.5, m - 1.5, mm))
+        in_neat.attemptResize(QgsLayoutSize(W - 2 * m + 3.0, H - 2 * m + 3.0, mm))
+
+        # Centered Classic Header Card
+        header_h = 20.0 if title else 0
+        if title:
+            header_card = QgsLayoutItemLabel(lay)
+            header_card.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+            sub_txt = f"<div style='font-size:9.5px; font-style:italic; color:#374151; margin-top:2px;'>{_html.escape(subtitle)}</div>" if subtitle else ""
+            header_card.setText(
+                f"<div style='font-family:Georgia, serif; text-align:center; padding:4px; background:#fbf9f4; border:1px solid #263238;'>"
+                f"<div style='font-size:14px; font-weight:bold; color:#1a1a1a; letter-spacing:1px; text-transform:uppercase;'>{_html.escape(title)}</div>"
+                f"{sub_txt}"
+                f"</div>"
+            )
+            lay.addLayoutItem(header_card)
+            header_card.attemptMove(QgsLayoutPoint(m + 20.0, m, mm))
+            header_card.attemptResize(QgsLayoutSize(W - 2 * m - 40.0, header_h, mm))
+
+        map_top = m + (header_h + 3.0 if title else 0)
+        map_w = W - 2 * m
+        map_h = H - map_top - m - 6.0
+
+        mp = QgsLayoutItemMap(lay)
+        mp.setRect(0, 0, 10, 10)
+        lay.addLayoutItem(mp)
+        mp.setCrs(p.crs())
+        mp.attemptMove(QgsLayoutPoint(m, map_top, mm))
+        mp.attemptResize(QgsLayoutSize(map_w, map_h, mm))
+        main_ext = _setup_extent(mp, extent_layer)
+        mp.setFrameEnabled(True)
+        mp.setFrameStrokeColor(QColor("#263238"))
+        mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.4, mm))
+        if grid:
+            _apply_grid(mp, main_ext)
+
+        # Floating framed legend inside map
+        leg = QgsLayoutItemLegend(lay)
+        leg.setLinkedMap(mp)
+        leg.setTitle("LEGEND")
+        leg.setBackgroundColor(QColor("#fcfbf7"))
+        leg.setFrameEnabled(True)
+        leg.setFrameStrokeColor(QColor("#263238"))
+        leg.setFrameStrokeWidth(QgsLayoutMeasurement(0.3, mm))
+        lay.addLayoutItem(leg)
+        leg.attemptMove(QgsLayoutPoint(m + map_w - 65.0, map_top + map_h - 60.0, mm))
+        leg.attemptResize(QgsLayoutSize(60.0, 55.0, mm))
+
+        # Scale bar
+        sb = QgsLayoutItemScaleBar(lay)
+        sb.setStyle("Single Box")
+        sb.setLinkedMap(mp)
+        sb.applyDefaultSize()
+        lay.addLayoutItem(sb)
+        sb.attemptMove(QgsLayoutPoint(m + 5.0, map_top + map_h - 12.0, mm))
+
+        # North Arrow
+        na = QgsLayoutItemPicture(lay)
+        na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
+        na.setLinkedMap(mp)
+        lay.addLayoutItem(na)
+        na.attemptResize(QgsLayoutSize(12.0, 16.0, mm))
+        na.attemptMove(QgsLayoutPoint(m + 6.0, map_top + 4.0, mm))
+
+        # Credits
+        if credits:
+            lbl_cred = QgsLayoutItemLabel(lay)
+            lbl_cred.setText(f"National Geographic Cartography Style · Sources: {credits}")
+            fmt = QgsTextFormat()
+            fmt.setFont(QFont("Georgia", 7))
+            fmt.setColor(QColor("#374151"))
+            lbl_cred.setTextFormat(fmt)
+            lay.addLayoutItem(lbl_cred)
+            lbl_cred.attemptMove(QgsLayoutPoint(m, H - m - 4.0, mm))
+            lbl_cred.attemptResize(QgsLayoutSize(W - 2 * m, 5.0, mm))
+
+        mgr.addLayout(lay)
+        return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
+
+    # =========================================================================
+    # THEME 3: STATISTICAL THEMATIC (Choropleth & Socio-Economic Atlas)
+    # =========================================================================
+    if is_statistical:
+        m = 8.0
+        header_h = 16.0 if title else 0
+        if title:
+            header_card = QgsLayoutItemLabel(lay)
+            header_card.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+            sub_txt = f"<span style='font-size:9.5px; color:#64748b; font-weight:normal; margin-left:8px;'>{_html.escape(subtitle)}</span>" if subtitle else ""
+            header_card.setText(
+                f"<div style='font-family:Arial, sans-serif; padding:2px 4px; border-bottom:1.5px solid #0f172a;'>"
+                f"<span style='font-size:13px; font-weight:bold; color:#0f172a;'>{_html.escape(title)}</span>{sub_txt}"
+                f"</div>"
+            )
+            lay.addLayoutItem(header_card)
+            header_card.attemptMove(QgsLayoutPoint(m, m, mm))
+            header_card.attemptResize(QgsLayoutSize(W - 2 * m, header_h, mm))
+
+        right_w = round(W * 0.24)
+        map_w = W - 2 * m - right_w - 3.0
+        map_top = m + (header_h + 3.0 if title else 0)
+        map_h = H - map_top - m - 6.0
+        right_x = m + map_w + 3.0
+
+        mp = QgsLayoutItemMap(lay)
+        mp.setRect(0, 0, 10, 10)
+        lay.addLayoutItem(mp)
+        mp.setCrs(p.crs())
+        mp.attemptMove(QgsLayoutPoint(m, map_top, mm))
+        mp.attemptResize(QgsLayoutSize(map_w, map_h, mm))
+        main_ext = _setup_extent(mp, extent_layer)
+        mp.setFrameEnabled(True)
+        mp.setFrameStrokeColor(QColor("#cbd5e1"))
+        mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.3, mm))
+
+        # Right Statistical Sidecard
+        stat_card = QgsLayoutItemLabel(lay)
+        stat_card.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        stat_card.setText(
+            f"<div style='font-family:Arial, sans-serif; background:#f8fafc; border:1px solid #e2e8f0; border-radius:4px; padding:6px;'>"
+            f"<div style='font-size:8.5px; font-weight:bold; color:#1e293b; text-transform:uppercase;'>STATISTICAL DISTRIBUTION</div>"
+            f"<div style='font-size:7px; color:#64748b; margin-top:2px;'>Method: Natural Breaks (Jenks) · 5 Classes</div>"
+            f"</div>"
+        )
+        lay.addLayoutItem(stat_card)
+        stat_card.attemptMove(QgsLayoutPoint(right_x, map_top, mm))
+        stat_card.attemptResize(QgsLayoutSize(right_w, 20.0, mm))
+
+        # Thematic Legend
+        leg = QgsLayoutItemLegend(lay)
+        leg.setLinkedMap(mp)
+        leg.setTitle("CLASSIFICATION:")
+        leg.setAutoUpdateModel(True)
+        lay.addLayoutItem(leg)
+        leg.attemptMove(QgsLayoutPoint(right_x, map_top + 23.0, mm))
+        leg.attemptResize(QgsLayoutSize(right_w, map_h - 25.0, mm))
+
+        # Scale bar inside map
+        sb = QgsLayoutItemScaleBar(lay)
+        sb.setStyle("Line Ticks Up")
+        sb.setLinkedMap(mp)
+        sb.applyDefaultSize()
+        lay.addLayoutItem(sb)
+        sb.attemptMove(QgsLayoutPoint(m + 4.0, map_top + map_h - 10.0, mm))
+
+        # Credits
+        if credits:
+            lbl_cred = QgsLayoutItemLabel(lay)
+            lbl_cred.setText(f"Data Sources: {credits} | Cartography: QGIS AI Agent")
+            fmt = QgsTextFormat()
+            fmt.setSize(7.0)
+            fmt.setColor(QColor("#64748b"))
+            lbl_cred.setTextFormat(fmt)
+            lay.addLayoutItem(lbl_cred)
+            lbl_cred.attemptMove(QgsLayoutPoint(m, H - m - 4.0, mm))
+            lbl_cred.attemptResize(QgsLayoutSize(W - 2 * m, 5.0, mm))
+
+        mgr.addLayout(lay)
+        return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale(),
+                "right_panel_rect": [right_x, map_top, right_w, map_h]}
+
+    # =========================================================================
+    # THEME 4: DISASTER INFOGRAPHIC DASHBOARD (Situational Crisis / Alert)
+    # =========================================================================
+    if is_infographic:
+        m = 8.0
+        # Alert Header Band
+        header_h = 20.0
+        head_shape = QgsLayoutItemShape(lay)
+        head_shape.setShapeType(QgsLayoutItemShape.Shape.Rectangle)
+        head_shape.setSymbol(QgsFillSymbol.createSimple({"color": "#0f172a", "outline_color": "transparent"}))
+        lay.addLayoutItem(head_shape)
+        head_shape.attemptMove(QgsLayoutPoint(m, m, mm))
+        head_shape.attemptResize(QgsLayoutSize(W - 2 * m, header_h, mm))
+
+        lbl_head = QgsLayoutItemLabel(lay)
+        lbl_head.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        sub_html = f"<span style='font-size:8.5px; color:#94a3b8; margin-left:10px;'>{_html.escape(subtitle)}</span>" if subtitle else ""
+        lbl_head.setText(
+            f"<div style='font-family:Arial, sans-serif; padding:3px 6px;'>"
+            f"<span style='background:#ef4444; color:#ffffff; font-size:7.5px; font-weight:bold; padding:2px 5px; border-radius:3px;'>ALERT / SITUASI TANGGAP DARURAT</span>"
+            f"<div style='margin-top:2px;'><span style='font-size:12px; font-weight:bold; color:#ffffff;'>{_html.escape(title or 'PETA SITUASI BENCANA')}</span>{sub_html}</div>"
+            f"</div>"
+        )
+        lay.addLayoutItem(lbl_head)
+        lbl_head.attemptMove(QgsLayoutPoint(m, m, mm))
+        lbl_head.attemptResize(QgsLayoutSize(W - 2 * m, header_h, mm))
+
+        right_w = 78.0
+        bottom_h = 24.0
+        map_top = m + header_h + 2.5
+        map_w = W - 2 * m - right_w - 3.0
+        map_h = H - map_top - bottom_h - m - 2.0
+        right_x = m + map_w + 3.0
+
+        mp = QgsLayoutItemMap(lay)
+        mp.setRect(0, 0, 10, 10)
+        lay.addLayoutItem(mp)
+        mp.setCrs(p.crs())
+        mp.attemptMove(QgsLayoutPoint(m, map_top, mm))
+        mp.attemptResize(QgsLayoutSize(map_w, map_h, mm))
+        main_ext = _setup_extent(mp, extent_layer)
+        mp.setFrameEnabled(True)
+        mp.setFrameStrokeColor(QColor("#334155"))
+        mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.4, mm))
+
+        # Right KPI Cards Panel
+        card_h = 24.0
+        kpis = [
+            ("LUAS WILAYAH TERDAMPAK", "ESTIMASI ZONA RAWAN", "#dc2626"),
+            ("JUMLAH PENDUDUK BERISIKO", "DATA PAPARAN BENCANA", "#ea580c"),
+            ("STATUS POSKO & EVAKUASI", "JALUR DARURAT TERBUKA", "#0284c7")
+        ]
+        for i, (kpi_title, kpi_sub, kpi_color) in enumerate(kpis):
+            cy = map_top + i * (card_h + 3.0)
+            c_shape = QgsLayoutItemShape(lay)
+            c_shape.setShapeType(QgsLayoutItemShape.Shape.Rectangle)
+            c_shape.setSymbol(QgsFillSymbol.createSimple({"color": "#ffffff", "outline_color": "#cbd5e1", "outline_width": "0.3"}))
+            lay.addLayoutItem(c_shape)
+            c_shape.attemptMove(QgsLayoutPoint(right_x, cy, mm))
+            c_shape.attemptResize(QgsLayoutSize(right_w, card_h, mm))
+
+            c_lbl = QgsLayoutItemLabel(lay)
+            c_lbl.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+            c_lbl.setText(
+                f"<div style='font-family:Arial, sans-serif; padding:3px 5px; border-left:3px solid {kpi_color};'>"
+                f"<div style='font-size:7px; font-weight:bold; color:#475569;'>{kpi_title}</div>"
+                f"<div style='font-size:10px; font-weight:bold; color:#0f172a; margin-top:1px;'>AKTIF / TERIDENTIFIKASI</div>"
+                f"<div style='font-size:6.5px; color:#64748b;'>{kpi_sub}</div>"
+                f"</div>"
+            )
+            lay.addLayoutItem(c_lbl)
+            c_lbl.attemptMove(QgsLayoutPoint(right_x, cy, mm))
+            c_lbl.attemptResize(QgsLayoutSize(right_w, card_h, mm))
+
+        # Bottom Legend & Summary Panel
+        bot_y = map_top + map_h + 2.0
+        bot_shape = QgsLayoutItemShape(lay)
+        bot_shape.setShapeType(QgsLayoutItemShape.Shape.Rectangle)
+        bot_shape.setSymbol(QgsFillSymbol.createSimple({"color": "#f8fafc", "outline_color": "#cbd5e1", "outline_width": "0.3"}))
+        lay.addLayoutItem(bot_shape)
+        bot_shape.attemptMove(QgsLayoutPoint(m, bot_y, mm))
+        bot_shape.attemptResize(QgsLayoutSize(W - 2 * m, bottom_h, mm))
+
+        leg = QgsLayoutItemLegend(lay)
+        leg.setLinkedMap(mp)
+        leg.setTitle("TINGKAT KERAWANAN:")
+        leg.setAutoUpdateModel(True)
+        lay.addLayoutItem(leg)
+        leg.attemptMove(QgsLayoutPoint(m + 4.0, bot_y + 1.0, mm))
+        leg.attemptResize(QgsLayoutSize(W * 0.45, bottom_h - 2.0, mm))
+
+        lbl_cred = QgsLayoutItemLabel(lay)
+        lbl_cred.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        lbl_cred.setText(
+            f"<div style='font-family:Arial, sans-serif; font-size:6.5px; color:#475569; padding:2px; line-height:1.2;'>"
+            f"<b>SUMBER DATA:</b> {_html.escape(credits or 'BNPB, BMKG, InaRISK, OpenStreetMap')}<br>"
+            f"<b>KONTAK DARURAT:</b> Call Center BPBD 112 / POSKO Utama Bencana"
+            f"</div>"
+        )
+        lay.addLayoutItem(lbl_cred)
+        lbl_cred.attemptMove(QgsLayoutPoint(m + W * 0.48, bot_y + 2.0, mm))
+        lbl_cred.attemptResize(QgsLayoutSize(W * 0.48, bottom_h - 4.0, mm))
+
+        # Scale bar & North arrow inside map
+        sb = QgsLayoutItemScaleBar(lay)
+        sb.setStyle("Line Ticks Up")
+        sb.setLinkedMap(mp)
+        sb.applyDefaultSize()
+        lay.addLayoutItem(sb)
+        sb.attemptMove(QgsLayoutPoint(m + 4.0, map_top + map_h - 10.0, mm))
+
+        na = QgsLayoutItemPicture(lay)
+        na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
+        na.setLinkedMap(mp)
+        lay.addLayoutItem(na)
+        na.attemptResize(QgsLayoutSize(10.0, 14.0, mm))
+        na.attemptMove(QgsLayoutPoint(m + map_w - 14.0, map_top + 3.0, mm))
+
+        mgr.addLayout(lay)
+        return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale(),
+                "right_panel_rect": [right_x, map_top, right_w, map_h],
+                "bottom_panel_rect": [m, bot_y, W - 2 * m, bottom_h]}
+
+    # =========================================================================
+    # THEME 5: DEFAULT / MODERN CLEAN / RELIEF TOPOGRAPHIC
+    # =========================================================================
+    m = 10.0
+    header_h = 18.0 if title else 0
+    if title:
+        header_card = QgsLayoutItemLabel(lay)
+        header_card.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        sub_txt = f"<div style='font-size: 10px; color: #546e7a; margin-top: 2px;'>{_html.escape(subtitle)}</div>" if subtitle else ""
+        header_card.setText(
+            f"<div style='font-family: Arial, sans-serif; text-align: center; padding: 4px; background: #ffffff; border: 1px solid #cfd8dc; border-radius: 4px;'>"
+            f"<div style='font-size: 14px; font-weight: bold; color: #0f172a;'>{_html.escape(title)}</div>"
+            f"{sub_txt}"
+            f"</div>"
+        )
+        lay.addLayoutItem(header_card)
+        header_card.attemptMove(QgsLayoutPoint(m, m, mm))
+        header_card.attemptResize(QgsLayoutSize(W - 2 * m, header_h, mm))
+
+    map_top = m + (header_h + 3.0 if title else 0)
+    map_w = W - 2 * m
+    map_h = H - map_top - m - 8.0
+
+    mp = QgsLayoutItemMap(lay)
+    mp.setRect(0, 0, 10, 10)
+    lay.addLayoutItem(mp)
+    mp.setCrs(p.crs())
+    mp.attemptMove(QgsLayoutPoint(m, map_top, mm))
+    mp.attemptResize(QgsLayoutSize(map_w, map_h, mm))
+    main_ext = _setup_extent(mp, extent_layer)
+    mp.setFrameEnabled(True)
+    mp.setFrameStrokeColor(QColor("#334155"))
+    mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.3, mm))
+    if grid or is_relief:
+        _apply_grid(mp, main_ext)
+
     sb = QgsLayoutItemScaleBar(lay)
-    sb.setStyle("Single Box" if is_natgeo else "Line Ticks Up")
+    sb.setStyle("Line Ticks Up")
     sb.setLinkedMap(mp)
     sb.applyDefaultSize()
     lay.addLayoutItem(sb)
-    sb.attemptMove(QgsLayoutPoint(m + 5, map_top + map_h - 12, mm))
+    sb.attemptMove(QgsLayoutPoint(m + 5.0, map_top + map_h - 12.0, mm))
 
-    # North arrow (placed inside map at top right, clear of right panel)
     na = QgsLayoutItemPicture(lay)
     na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
     na.setLinkedMap(mp)
     lay.addLayoutItem(na)
-    na.attemptResize(QgsLayoutSize(12, 18, mm))
-    na.attemptMove(QgsLayoutPoint(m + map_w - 18, map_top + 4, mm))
+    na.attemptResize(QgsLayoutSize(11.0, 15.0, mm))
+    na.attemptMove(QgsLayoutPoint(m + map_w - 16.0, map_top + 4.0, mm))
 
-    # Credits footer (placed at bottom margin)
     if credits:
         lbl_cred = QgsLayoutItemLabel(lay)
         lbl_cred.setText(f"Sources: {credits} | Created with QGIS {Qgis.version()}")
@@ -1647,13 +2182,11 @@ def create_styled_layout(name="Map", style_theme="infographic_disaster", title="
         fmt.setSize(7.5)
         lbl_cred.setTextFormat(fmt)
         lay.addLayoutItem(lbl_cred)
-        lbl_cred.attemptMove(QgsLayoutPoint(m, H - m - 4, mm))
-        lbl_cred.attemptResize(QgsLayoutSize(W - 2 * m, 5, mm))
+        lbl_cred.attemptMove(QgsLayoutPoint(m, H - m - 4.0, mm))
+        lbl_cred.attemptResize(QgsLayoutSize(W - 2 * m, 5.0, mm))
 
     mgr.addLayout(lay)
-    return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale(),
-            "right_panel_rect": [m + map_w + 3, map_top, right_w - 3, map_h] if is_infographic else None,
-            "bottom_panel_rect": [m, map_top + map_h + 3, W - 2 * m, bottom_h - 3 - 6] if is_infographic else None}
+    return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
 
 
 @tool("Change any layout item text or the map scale/extent after creation.",

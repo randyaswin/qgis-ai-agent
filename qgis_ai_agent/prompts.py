@@ -17,7 +17,7 @@ def skills_block(sel, catalog_names):
     if full:
         banner = "# Loaded skills (follow these; they were selected for this request)"
         if sel.get("is_e2e"):
-            banner += "\n> [!IMPORTANT] MANDATORY E2E MAP PIPELINE:\n> This request requires end-to-end map creation. You MUST strictly apply both the loaded Cartography skill (symbology, CVD-safe color harmony, visual hierarchy, label halos) and Layout skill (print layout composition, clean gutters, scalebar, north arrow, export deliverable)."
+            banner += "\n> [!IMPORTANT] MANDATORY E2E MAP PIPELINE:\n> This request requires end-to-end map creation. You MUST strictly apply both the loaded Cartography skill (symbology, CVD-safe color harmony, visual hierarchy, label halos) and Layout skill (print layout composition, clean gutters, scalebar, north arrow, default A4 paper size). Zero Data Fabrication: Never invent mock data — you are fully free to search the internet to find real data from official agencies and open repositories, record provenance, and mandatorily embed real sources into the layout credits (`credits='Data Sources: ...'`). Finish by saving the project (`save_project`). Do NOT export (`export_layout`) unless the user explicitly requested an export file/image."
         parts.append(banner)
         for s in full:
             tag = "pinned by user" if s in sel["pinned"] else f"auto-selected, score {sel['scores'].get(s.name, 0):.1f}"

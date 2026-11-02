@@ -22,10 +22,14 @@ SKILLS_DIR = os.path.join(HERE, "skills")
 USER_DIR = os.path.expanduser("~/.qgis_ai_agent/skills")
 
 STOP = set("""a an the and or of to in on for with from by is are be this that it as at into per use using make
-create build buat bikin dan atau yang untuk dengan dari di ke pada ini itu saya aku tolong mohon agar supaya
+create build please could would should show display get find give want will can all any some their there here
+what which who when where why how than then now just also very much more most over under between through
+buat bikin dan atau yang untuk dengan dari di ke pada ini itu saya aku tolong mohon agar supaya
 sebuah dalam oleh jadi lalu kemudian juga serta buatkan tampilkan lakukan data layer lapisan
 based base saja hanya perlu ada cuma mau inginkan need only just
-ください 作成 作って 表示 追加 お願い おねがい したい して です ます だった こと もの よう""".split())
+ください 作成 作って 表示 追加 お願い おねがい したい して です ます だった こと もの よう
+について による ため から まで における として あります あり への など また これ それ あれ どれ この その あの どの
+ような ように 描画 閲覧 確認""".split())
 
 
 def parse_frontmatter(text):
@@ -109,13 +113,20 @@ class Registry:
         "qgis-impl-print-layouts",
     )
 
+    META_SKILLS = (
+        "qgis-agents-analysis-orchestrator",
+        "qgis-core-architecture",
+        "reproducible-gis-project",
+        "open-map-stack",
+    )
+
     def __init__(self, dirs=None):
         self.dirs = dirs or [os.path.join(SKILLS_DIR, "vendor"), os.path.join(SKILLS_DIR, "custom"), USER_DIR]
         self.mode = "auto"          # auto | manual | off
         self.pinned = set()         # always injected in full
         self.disabled = set()       # never selected or loadable
-        self.max_inject = 4
-        self.budget_chars = 36000   # total body chars auto-injected
+        self.max_inject = 6
+        self.budget_chars = 75000   # total body chars auto-injected (modern LLM context friendly)
         self.skills = {}
         self.extra = {"synonyms": {}, "keywords": {}}
         self._idf = {}
@@ -193,7 +204,8 @@ class Registry:
         low = query.lower()
         for k, vals in syn.items():  # multi-word keys supported
             if k in low:
-                out.extend(vals)
+                for v in vals:
+                    out.extend(tokens(v))
         return out
 
     def rank(self, query, names=None):
@@ -201,12 +213,51 @@ class Registry:
         q = self._expand(query)
         low = query.lower()
         res = []
+
+        orchestrator_triggers = (
+            # English
+            "workflow", "orchestrat", "which algorithm", "algorithm selection",
+            "chain operations", "architecture", "reproducible", "how to start analysis",
+            "workflow plan", "pipeline design", "model builder", "processing chain",
+            # Indonesian
+            "alur kerja", "alur analisis", "pilih algoritma", "arsitektur qgis", "rantai proses",
+            # Japanese
+            "ワークフロー", "アルゴリズム選定", "どのアルゴリズム", "処理の流れ", "アーキテクチャ",
+            "処理の連鎖", "パイプライン", "モデルビルダー"
+        )
+        is_orchestrator_intent = any(trig in low for trig in orchestrator_triggers)
+
         for n in pool:
             s = self.skills[n]
             terms = self._docs.get(n, {})
             score = sum(terms[t] * self._idf.get(t, 1.0) for t in set(q) if t in terms)
-            if s.name.replace("-", " ") in low:
-                score += 6
+
+            # Direct skill name match
+            clean_name = s.name.replace("-", " ")
+            if clean_name in low:
+                score += 15.0
+
+            # Multi-word phrase matching from keywords and extra keywords
+            # Gives huge boost when exact multi-word concepts (e.g. "city planning", "tata ruang", "network accessibility") match
+            all_phrases = []
+            if s.keywords:
+                all_phrases.extend([kw.strip().lower() for kw in s.keywords.split(",") if " " in kw.strip()])
+            for extra_kw in self.extra.get("keywords", {}).get(s.name, []):
+                if " " in extra_kw.strip():
+                    all_phrases.append(extra_kw.strip().lower())
+
+            for phrase in set(all_phrases):
+                if phrase and phrase in low:
+                    score += 20.0
+
+            # Prefer purpose-built custom skills
+            if s.source == "custom" and score > 0:
+                score *= 1.4
+
+            # Down-rank generic meta-orchestrator skills if prompt isn't asking for meta orchestration
+            if n in self.META_SKILLS and not is_orchestrator_intent:
+                score *= 0.1
+
             res.append((round(score, 3), n))
         res.sort(reverse=True)
         return [(sc, n) for sc, n in res if sc > 0]
@@ -227,40 +278,83 @@ class Registry:
             "make map", "create map", "generate map", "produce map", "build map", "design map",
             "print map", "e2e map", "end-to-end map", "end to end map", "hazard map", "thematic map",
             "density map", "choropleth", "susceptibility map", "risk map", "suitability map",
+            "planning map", "zoning map", "land use map", "transport map", "transit map",
             "make a map", "create a map", "generate a map", "export map", "map layout", "print layout",
             "wayfinding map", "tourist map", "infographic map", "dashboard map", "cartography",
+            "city planning map", "urban planning map", "master plan map", "flood map", "flood risk map",
+            "inundation map", "evacuation map", "disaster map", "fire map", "wildfire map",
+            "accessibility map", "network map", "transit network map", "isochrone map", "catchment map",
+            "service area map", "buffer map", "density heatmap", "point density map", "heat map", "heatmap",
+            "terrain map", "relief map", "elevation map", "contour map", "hillshade map", "slope map",
+            "topographic map", "topo map", "satellite map", "sentinel map", "landsat map", "land cover map",
+            "landcover map", "ndvi map", "site suitability map", "cadastral map", "atlas layout", "print atlas",
             # Indonesian
             "buat peta", "bikin peta", "membuat peta", "peta baru", "desain peta", "cetak peta",
             "layout peta", "tata letak peta", "peta banjir", "peta rawan", "peta risiko", "peta sebaran",
             "peta tematik", "peta bencana", "peta kepadatan", "peta tata ruang", "peta wisata",
+            "peta transportasi", "peta jaringan", "peta zonasi", "peta permukiman", "peta fasilitas",
+            "peta aksesibilitas", "peta penggunaan lahan",
             # Japanese
             "地図作成", "マップ作成", "地図を作", "マップを作", "ハザードマップ", "コロプレス",
-            "印刷レイアウト", "マップデザイン", "地図デザイン", "レイアウト作成", "観光マップ", "案内図"
+            "印刷レイアウト", "マップデザイン", "地図デザイン", "レイアウト作成", "観光マップ", "案内図",
+            "都市計画図", "都市計画マップ", "用途地域図", "土地利用図", "土地利用マップ", "マスタープラン図",
+            "洪水ハザードマップ", "浸水想定区域図", "浸水マップ", "洪水マップ", "水害マップ", "防災マップ",
+            "土砂災害マップ", "避難マップ", "火災マップ", "森林火災マップ", "交通マップ", "路線図",
+            "鉄道マップ", "道路網図", "駅アクセスマップ", "到達圏マップ", "アクセシビリティマップ",
+            "等時線マップ", "地形図", "起伏図", "標高マップ", "陰影起伏図", "傾斜区分図",
+            "衛星画像マップ", "植生指標マップ", "土地被覆分類図", "土地被覆マップ", "ヒートマップ",
+            "点密度マップ", "密度マップ", "階級区分図", "適地マップ", "適地判定図", "立地分析マップ",
+            "地図出力", "マップ出力", "図郭作成", "地図帳作成", "カートグラフィ", "地図を作図",
+            "主題図作成", "主題図", "統計地図", "鳥瞰図"
         )
         if any(p in low for p in e2e_phrases):
             return True
 
         # 2. Environmental, disaster, or thematic hazard requests (always an end-to-end mapping task in QGIS)
         hazard_terms = (
+            # English
+            "hazard", "disaster", "susceptibility", "inundation", "vulnerability", "risk",
+            "flood", "flooding", "flash flood", "landslide", "earthquake", "tsunami", "wildfire",
+            "forest fire", "burn severity", "smoke", "haze", "air quality", "air pollution",
+            "hotspot", "active fire", "drought", "storm surge", "cyclone", "typhoon",
+            # Indonesian
             "terdampak", "asap", "kualitas udara", "kebakaran", "polusi", "banjir", "longsor",
-            "gempa", "tsunami", "kekeringan", "titik panas", "hotspot", "smoke", "haze", "air quality",
-            "wildfire", "burn severity", "hazard", "susceptibility", "inundation"
+            "gempa", "tsunami", "kekeringan", "titik panas", "rawan bencana", "bencana", "kerusakan",
+            # Japanese
+            "被災", "影響", "被害", "煙", "大気汚染", "空気質", "大気環境", "火災", "森林火災",
+            "山火事", "洪水", "浸水", "冠水", "土砂崩れ", "地すべり", "土砂災害", "地震", "津波",
+            "干ばつ", "ホットスポット", "熱異常点", "ハザード", "脆弱性", "リスク", "危険度", "災害",
+            "水害", "高潮", "台風被害"
         )
         has_hazard = any(h in low for h in hazard_terms)
 
         # 3. Action verbs combined with spatial/GIS deliverable nouns
-        action_match_en = re.search(r"\b(make|create|generate|produce|build|design|export|render|map|visualize|model|analyze)\b.{0,30}\b(map|atlas|layout|dashboard|raster|surface|heatmap|impact|affected|hazard|susceptibility|risk|air quality|smoke|fire)\b", low)
+        action_match_en = re.search(
+            r"\b(make|create|generate|produce|build|design|export|render|map|visualize|model|analyze|plot|draw|draft|compose)\b.{0,35}\b(map|atlas|layout|dashboard|raster|surface|heatmap|heat map|impact|affected|hazard|susceptibility|risk|air quality|smoke|fire|flood|zoning|land use|planning|network|transport|transit|elevation|terrain|dem|slope|satellite|ndvi|coverage|accessibility|suitability)\b",
+            low
+        )
         if action_match_en:
             return True
 
-        action_match_id = re.search(r"\b(buat|bikin|buatkan|bikinkan|susun|rancang|cetak|petakan|tampilkan|visualisasikan|analisis|modelkan)\b.{0,30}\b(peta|atlas|layout|raster|sebaran|dampak|terdampak|rawan|risiko|kualitas udara|asap|kebakaran|polusi|zonasi|dashboard|layer)\b", low)
+        action_match_id = re.search(
+            r"\b(buat|bikin|buatkan|bikinkan|susun|rancang|cetak|petakan|tampilkan|visualisasikan|analisis|modelkan)\b.{0,30}\b(peta|atlas|layout|raster|sebaran|dampak|terdampak|rawan|risiko|kualitas udara|asap|kebakaran|polusi|zonasi|dashboard|layer)\b",
+            low
+        )
         if action_match_id:
             return True
 
-        if has_hazard and any(w in low for w in ("buat", "bikin", "make", "create", "raster", "peta", "map", "layout", "analisis", "tampilkan")):
+        action_match_ja = re.search(
+            r"(作成|作図|作って|描画|出力|印刷|分析|デザイン|可視化|モデル|シミュレーション|生成).{0,20}(地図|マップ|レイアウト|ハザード|分布図|路線図|計画図|主題図|土地利用|用途地域|地形図|等時線|適地|ヒートマップ)|"
+            r"(地図|マップ|レイアウト|ハザード|分布図|路線図|計画図|主題図|土地利用|用途地域|地形図|等時線|適地|ヒートマップ).{0,20}(作成|作図|作って|描画|出力|印刷|分析|デザイン|可視化|生成|表示|整飾)",
+            low
+        )
+        if action_match_ja:
             return True
 
-        if re.search(r"\b(map of|peta dari|peta untuk|peta wilayah)\b", low):
+        if has_hazard and any(w in low for w in ("buat", "bikin", "make", "create", "raster", "peta", "map", "layout", "analisis", "tampilkan", "作成", "作図", "表示", "分析", "出力", "マップ", "地図")):
+            return True
+
+        if re.search(r"\b(map of|peta dari|peta untuk|peta wilayah)\b", low) or re.search(r"の(地図|マップ|ハザードマップ|都市計画図|分布図|レイアウト)", low):
             return True
 
         return False
@@ -315,9 +409,9 @@ class Registry:
             return out
 
         top = ranked[0][0] if ranked else 5.0
-        floor = max(1.5, 0.3 * top) if ranked else 0.0
+        floor = min(8.0, max(2.0, 0.15 * top)) if ranked else 0.0
         budget = self.budget_chars
-        max_items = self.max_inject if not is_e2e else max(self.max_inject, len(mandatory_names) + 2)
+        max_items = self.max_inject if not is_e2e else max(self.max_inject, len(mandatory_names) + 3)
 
         # Determine prioritized selection list
         selection_candidates = []
@@ -329,14 +423,12 @@ class Registry:
                 selection_candidates.append((sc, n))
                 seen.add(n)
 
-        # Build injection queue: top domain skill first, then mandatory cartography & layout, then remaining domain skills
+        # Build injection queue: top domain skills first, then mandatory cartography & layout, then remaining domain skills
         ordered_queue = []
-        if selection_candidates:
-            ordered_queue.append(selection_candidates[0])
-            cand_rest = selection_candidates[1:]
-        else:
-            cand_rest = []
+        top_domain = selection_candidates[:2]
+        cand_rest = selection_candidates[2:]
 
+        ordered_queue.extend(top_domain)
         for mn in mandatory_names:
             sc = dict(ranked).get(mn, 8.0)
             ordered_queue.append((sc, mn))

@@ -15,6 +15,70 @@ import uuid
 from qgis.core import QgsProject
 
 PROJECTS_DIR = os.path.expanduser("~/.qgis_ai_agent/projects")
+ENDPOINT_DIR = os.path.expanduser("~/.qgis_ai_agent")
+AUTOSAVE_REGISTRY_FILE = os.path.join(ENDPOINT_DIR, "project_autosaves.json")
+
+
+def record_autosave_info(project_file, project_id=None):
+    """Persists recovery metadata strictly bound to this specific saved project file.
+    Recovery/autosave is ONLY allowed for projects that have already been saved to disk.
+    """
+    if not project_file or not os.path.isabs(project_file) or not os.path.exists(project_file):
+        return
+    try:
+        p = QgsProject.instance()
+        os.makedirs(ENDPOINT_DIR, exist_ok=True)
+        pid = project_id
+        if not pid:
+            read_pid, ok = p.readEntry("qgis_ai_agent", "project_id")
+            pid = read_pid if ok else ""
+        norm_path = os.path.realpath(project_file)
+        
+        registry = {}
+        if os.path.exists(AUTOSAVE_REGISTRY_FILE):
+            try:
+                with open(AUTOSAVE_REGISTRY_FILE, "r", encoding="utf-8") as f:
+                    registry = json.load(f)
+            except Exception:
+                registry = {}
+                
+        registry[norm_path] = {
+            "project_id": pid or "",
+            "project_file": norm_path,
+            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "layer_count": p.count(),
+            "layout_count": len(p.layoutManager().printLayouts()),
+            "layers": [l.name() for l in p.mapLayers().values()],
+            "layouts": [l.name() for l in p.layoutManager().printLayouts()]
+        }
+        with open(AUTOSAVE_REGISTRY_FILE, "w", encoding="utf-8") as f:
+            json.dump(registry, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def get_autosave_info_for_current_project():
+    """Returns recovery metadata ONLY if the currently active project is already saved on disk.
+    Strictly isolated: Never returns metadata for any other project, and returns None for unsaved/new projects.
+    """
+    p = QgsProject.instance()
+    cur_file = p.fileName()
+    if not cur_file or not os.path.isabs(cur_file) or not os.path.exists(cur_file):
+        return None
+    norm_path = os.path.realpath(cur_file)
+    if os.path.exists(AUTOSAVE_REGISTRY_FILE):
+        try:
+            with open(AUTOSAVE_REGISTRY_FILE, "r", encoding="utf-8") as f:
+                registry = json.load(f)
+            return registry.get(norm_path)
+        except Exception:
+            pass
+    return None
+
+
+def get_last_autosave_info():
+    """Legacy alias that strictly resolves only for the current project."""
+    return get_autosave_info_for_current_project()
 
 
 class Message:
@@ -308,6 +372,26 @@ class SessionManager:
         if trigger_callback:
             self._trigger_on_change()
 
+    def autosave_qgis_project(self):
+        """Auto-saves the active QGIS project to disk across iterations.
+        STRICT RULE: Recovery/autosave is ONLY allowed for projects that have ALREADY been saved to disk by the user.
+        Never autosave unsaved/blank projects, and never touch/restore other projects.
+        """
+        try:
+            p = QgsProject.instance()
+            cur_file = p.fileName()
+            # Only autosave if the project has already been saved to a file on disk
+            if not cur_file or not os.path.isabs(cur_file) or not os.path.exists(cur_file):
+                return
+            # Only autosave if project has actual content
+            if p.count() == 0 and len(p.layoutManager().printLayouts()) == 0:
+                return
+            pid = self.get_project_id()
+            p.write()
+            record_autosave_info(cur_file, pid)
+        except Exception:
+            pass
+
     def save_project_sessions(self):
         pid = self.get_project_id()
         data = {
@@ -335,6 +419,9 @@ class SessionManager:
             p.writeEntry("qgis_ai_agent", "session_manifest", manifest_json)
         except Exception:
             pass
+
+        # 3. Auto-save QGIS project to disk across iterations
+        self.autosave_qgis_project()
 
     # ------------------------------------------------------------ session lifecycle
     def get_active_session(self):

@@ -1,11 +1,26 @@
 [general]
 name=QGIS AI Agent
 qgisMinimumVersion=3.34
-description=Drive end-to-end map making from AI CLIs (agy, Claude Code, Gemini CLI, Codex) through an MCP bridge.
-about=Spawns an AI coding CLI as a subprocess and exposes QGIS (layers, processing, styling, labels, print layouts, export, canvas snapshots) as MCP tools so the agent can build a finished map from a single prompt.
-version=0.1.0
+qgisMaximumVersion=3.99
+description=Autonomous AI cartography and spatial analysis copilot driven via Model Context Protocol (MCP) and AI CLIs.
+about=Connects QGIS to autonomous AI agents (Google Antigravity agy, Claude Code, Gemini CLI, OpenAI Codex) via the Model Context Protocol (MCP). Features 51+ deep QGIS tools (STAC, COG streaming, Overture Maps DuckDB spatial SQL, 440+ Processing algorithms, cartographic styling, and 5 distinct layout archetypes: Official Planning, Disaster Infographic, NatGeo, Statistical Thematic, and Relief Topographic) paired with 56 GIS domain skills.
+version=1.0.0
 author=M. Randy Aswin
 email=mrandyaswin@gmail.com
+homepage=https://github.com/randyaswin/qgis-ai-agent
+tracker=https://github.com/randyaswin/qgis-ai-agent/issues
+repository=https://github.com/randyaswin/qgis-ai-agent.git
 category=Plugins
-experimental=True
+tags=ai, agent, mcp, cartography, llm, claude, gemini, agy, layout, styling, processing, overture, stac, duckdb, spatial analysis
+experimental=False
+deprecated=False
+has_processing_provider=False
 icon=icon.svg
+changelog=1.0.0:
+    - Initial official production release.
+    - Autonomous AI map-making copilot via Model Context Protocol (MCP).
+    - 5 distinct Cartographic Layout Archetypes (planning_official, infographic_disaster, natgeo, statistical_thematic, relief_topographic).
+    - Multilingual smart skill selection across English, Japanese, and Indonesian.
+    - 51+ deep PyQGIS MCP tools & 56 cartographic/GIS domain skills.
+    - Keyless public geodata streaming (Overture Maps via DuckDB spatial, STAC, COGs, and XYZ basemaps).
+    - Zero data fabrication mandate and project-bound session auto-saving.
