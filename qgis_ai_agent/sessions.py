@@ -483,13 +483,14 @@ class SessionManager:
         STRICT RULE: Recovery/autosave is ONLY allowed for projects that have ALREADY been saved to disk by the user.
         Never autosave unsaved/blank projects, and never touch/restore other projects.
         """
+        if getattr(self, '_saving', False):
+            return
+        self._saving = True
         try:
             p = QgsProject.instance()
             cur_file = p.fileName()
-            # Only autosave if the project has already been saved to a file on disk
             if not cur_file or not os.path.isabs(cur_file) or not os.path.exists(cur_file):
                 return
-            # Only autosave if project has actual content
             if p.count() == 0 and len(p.layoutManager().printLayouts()) == 0:
                 return
             pid = self.get_project_id()
@@ -497,6 +498,8 @@ class SessionManager:
             record_autosave_info(cur_file, pid)
         except Exception:
             pass
+        finally:
+            self._saving = False
 
     def save_project_sessions(self):
         pid = self.get_project_id()
@@ -610,7 +613,13 @@ class SessionManager:
 
     def on_project_saved(self):
         """Called when a user saves the active QGIS project."""
-        self.save_project_sessions()
+        if getattr(self, '_saving', False):
+            return
+        self._saving = True
+        try:
+            self.save_project_sessions()
+        finally:
+            self._saving = False
 
     def on_project_cleared(self):
         """Called when QGIS creates a new project or clears canvas."""
