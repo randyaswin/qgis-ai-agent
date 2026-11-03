@@ -343,25 +343,40 @@ def render_user_message_html(text, attachments=None, timestamp=""):
 
 def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_success=True, is_running=False, img_base64=None, duration=None):
     """Render a sleek vertical timeline tool node matching reference design."""
+    is_python = (category == "PyQGIS" or name == "exec_pyqgis" or "python" in name.lower())
+
     if is_running:
-        dot_color = "#38bdf8"
+        dot_color = "#c084fc" if is_python else "#38bdf8"
     elif is_success:
         dot_color = "#10b981"
     else:
         dot_color = "#ef4444"
 
     dur_str = f" &bull; <span style='color: #64748b; font-size: 10px;'>{duration}s</span>" if (duration and not is_running) else ""
-    header_desc = f"{name} &bull; {primary_arg}" if primary_arg else name
+
+    if is_python:
+        header_desc = f"{name} &bull; Run Python Script" if (not primary_arg or primary_arg == name) else f"{name} &bull; {primary_arg}"
+    else:
+        header_desc = f"{name} &bull; {primary_arg}" if primary_arg else name
 
     in_val = html.escape(in_str or "()")
     if is_running:
-        out_cell = (
-            "<div style='background-color: #0c2340; border: 1px solid #1e4976; "
-            "border-radius: 4px; padding: 4px 8px; color: #38bdf8; "
-            "font-family: monospace; font-size: 10px; line-height: 1.45; font-style: italic;'>"
-            "⏳ Executing MCP tool in QGIS..."
-            "</div>"
-        )
+        if is_python:
+            out_cell = (
+                "<div style='background-color: #1e112a; border: 1px solid #6b21a8; "
+                "border-radius: 4px; padding: 4px 8px; color: #c084fc; "
+                "font-family: monospace; font-size: 10px; line-height: 1.45; font-style: italic;'>"
+                "⏳ Running Python Script in QGIS..."
+                "</div>"
+            )
+        else:
+            out_cell = (
+                "<div style='background-color: #0c2340; border: 1px solid #1e4976; "
+                "border-radius: 4px; padding: 4px 8px; color: #38bdf8; "
+                "font-family: monospace; font-size: 10px; line-height: 1.45; font-style: italic;'>"
+                "⏳ Executing MCP tool in QGIS..."
+                "</div>"
+            )
     else:
         out_bg = "#0d1117" if is_success else "#1c1418"
         out_border = "#21262d" if is_success else "#7f1d1d"
@@ -377,10 +392,11 @@ def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_succe
 
     img_html = ""
     if img_base64:
+        cap_prefix = "📄 Print Layout Preview" if ("layout" in name.lower()) else "🗺️ Canvas Preview"
         img_html = (
             f"<div style='margin-top: 6px; text-align: left;'>"
             f"<img src='data:image/png;base64,{img_base64}' style='max-width: 95%; border: 1px solid #334155; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.5);'><br>"
-            f"<span style='font-size: 10px; color: #64748b;'>🗺️ Canvas Preview ({html.escape(name)})</span>"
+            f"<span style='font-size: 10px; color: #64748b;'>{cap_prefix} ({html.escape(name)})</span>"
             f"</div>"
         )
 
@@ -572,6 +588,33 @@ class AgentDock(QDockWidget):
         """)
         btn_new_sess.clicked.connect(self._create_new_session)
 
+        # Revert Checkpoints Button & Menu (Cycle Rollback)
+        self.revert_btn = QToolButton()
+        self.revert_btn.setText("↺ Revert")
+        self.revert_btn.setToolTip("Revert QGIS project and chat history to a previous cycle checkpoint")
+        self.revert_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.revert_btn.setStyleSheet("""
+            QToolButton {
+                background-color: #232533;
+                color: #cbd5e1;
+                border: 1px solid #36394d;
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QToolButton:hover {
+                background-color: #2e3245;
+                color: #ffffff;
+            }
+            QToolButton::menu-indicator {
+                image: none;
+                width: 0px;
+            }
+        """)
+        self.revert_menu = QMenu(self.revert_btn)
+        self.revert_btn.setMenu(self.revert_menu)
+
         # Settings & Tools Dropdown Menu (Consolidates 7 buttons & 3 checkboxes into 1 neat popup!)
         self.settings_btn = QToolButton()
         self.settings_btn.setText("⚙ Settings")
@@ -602,6 +645,7 @@ class AgentDock(QDockWidget):
         row0.addWidget(lbl_sess)
         row0.addWidget(self.session_combo, 1)
         row0.addWidget(btn_new_sess)
+        row0.addWidget(self.revert_btn)
         row0.addWidget(self.settings_btn)
         lay.addLayout(row0)
 
@@ -635,6 +679,8 @@ class AgentDock(QDockWidget):
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         self.log.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        self.log.setOpenLinks(False)
+        self.log.anchorClicked.connect(self._on_log_anchor_clicked)
         self.log.setStyleSheet("""
             QTextEdit {
                 background-color: #12131a;
@@ -746,7 +792,7 @@ class AgentDock(QDockWidget):
                 font-weight: bold;
                 border: none;
                 border-radius: 4px;
-                padding: 6px 20px;
+                padding: 6px 18px;
                 font-size: 12px;
             }
             QPushButton:hover {
@@ -755,14 +801,33 @@ class AgentDock(QDockWidget):
         """)
         self.action_btn.clicked.connect(self._on_action_btn_clicked)
 
-        # Backwards compatibility handles for runner callbacks
+        self.stop_btn = QPushButton("■ Stop")
+        self.stop_btn.setToolTip("Stop active AI agent execution immediately")
+        self.stop_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc2626;
+                color: #ffffff;
+                font-weight: bold;
+                border: none;
+                border-radius: 4px;
+                padding: 6px 16px;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #ef4444;
+            }
+        """)
+        self.stop_btn.clicked.connect(self._on_stop_clicked)
+        self.stop_btn.hide()
+
+        # Backwards compatibility handle
         self.run_btn = self.action_btn
-        self.stop_btn = self.action_btn
 
         action_row.addWidget(self.attach_btn)
         action_row.addWidget(lbl_hint)
         action_row.addStretch()
         action_row.addWidget(self.action_btn)
+        action_row.addWidget(self.stop_btn)
         lay.addLayout(action_row)
 
         self.setWidget(w)
@@ -826,6 +891,7 @@ class AgentDock(QDockWidget):
             pass
         self._populate_sessions_dropdown()
         self._render_active_session_log()
+        self._update_revert_ui()
 
     def _populate_sessions_dropdown(self):
         try:
@@ -853,6 +919,7 @@ class AgentDock(QDockWidget):
         if sid and sid != self.session_manager.active_session_id:
             self.session_manager.switch_session(sid)
             self._render_active_session_log()
+            self._update_revert_ui()
 
     def _create_new_session(self):
         name, ok = QInputDialog.getText(self, "New Session", "Enter session name:")
@@ -964,10 +1031,138 @@ class AgentDock(QDockWidget):
             self._build_settings_menu()
 
     def _on_action_btn_clicked(self):
+        self._run()
+
+    def _on_stop_clicked(self):
         if self.runner.running():
             self.runner.stop()
-        else:
-            self._run()
+            self._append_html(
+                f"<div style='margin: 6px 0; padding: 4px 8px; background-color: #450a0a; "
+                f"border-left: 3px solid #ef4444; border-radius: 3px; font-size: 11px; color: #fca5a5;'>"
+                f"⏹ <b>Execution stopped by user.</b>"
+                f"</div>"
+            )
+            self._done(-9)
+
+    def _on_log_anchor_clicked(self, url):
+        u_str = url.toString() if hasattr(url, "toString") else str(url)
+        if u_str.startswith("revert:"):
+            try:
+                cycle_no = int(u_str.split(":", 1)[1])
+                self._confirm_and_revert(cycle_no)
+            except Exception as e:
+                tools.LOGGER.warning(f"Error handling revert anchor: {e}")
+
+    def _save_checkpoint(self, cycle_no, label=""):
+        try:
+            active_sess = self.session_manager.get_active_session()
+            if not active_sess:
+                return
+            chk_dir = os.path.join(self.session_manager.get_workspace_dir(active_sess.id), "checkpoints")
+            os.makedirs(chk_dir, exist_ok=True)
+            chk_filename = f"checkpoint_cycle_{cycle_no}.qgz"
+            chk_path = os.path.join(chk_dir, chk_filename)
+
+            p = QgsProject.instance()
+            orig_filename = p.fileName()
+            res = p.write(chk_path)
+            if orig_filename:
+                p.setFileName(orig_filename)
+
+            if res:
+                active_sess.add_checkpoint(
+                    cycle=cycle_no,
+                    filename=chk_filename,
+                    prompt=label,
+                    msg_count=len(active_sess.messages)
+                )
+                self.session_manager.save_project_sessions()
+                self._update_revert_ui()
+        except Exception as e:
+            tools.LOGGER.warning(f"Failed to save cycle checkpoint: {e}")
+
+    def _update_revert_ui(self):
+        try:
+            from qgis.PyQt import sip
+            if sip.isdeleted(self) or not hasattr(self, "revert_menu") or sip.isdeleted(self.revert_menu):
+                return
+        except Exception:
+            pass
+
+        self.revert_menu.clear()
+        active_sess = self.session_manager.get_active_session() if hasattr(self, "session_manager") else None
+        chks = active_sess.get_checkpoints() if active_sess else []
+        if not chks:
+            act_none = self.revert_menu.addAction("(No checkpoints yet)")
+            act_none.setEnabled(False)
+            self.revert_btn.setEnabled(False)
+            return
+
+        self.revert_btn.setEnabled(True)
+        for c in reversed(chks):
+            cyc = c.get("cycle", 0)
+            p_txt = c.get("prompt", "")
+            if len(p_txt) > 40:
+                p_txt = p_txt[:37] + "..."
+            t_str = c.get("timestamp", "")
+            label = f"↺ Revert to Cycle {cyc}: {p_txt} ({t_str})" if cyc > 0 else f"↺ Revert to Cycle 0: Initial State ({t_str})"
+            act = self.revert_menu.addAction(label)
+            act.triggered.connect(lambda checked=False, target_cycle=cyc: self._confirm_and_revert(target_cycle))
+
+    def _confirm_and_revert(self, cycle_no):
+        if self.runner.running():
+            QMessageBox.warning(self, "Agent Running", "Please stop active AI execution before reverting.")
+            return
+
+        active_sess = self.session_manager.get_active_session()
+        if not active_sess:
+            return
+        chk = active_sess.get_checkpoint(cycle_no)
+        if not chk:
+            QMessageBox.warning(self, "Checkpoint Not Found", f"Checkpoint for Cycle {cycle_no} was not found.")
+            return
+
+        label_str = chk.get("prompt") or f"Cycle {cycle_no}"
+        reply = QMessageBox.question(
+            self,
+            "Confirm Revert to Checkpoint",
+            f"Are you sure you want to revert to Cycle {cycle_no}?\n\n"
+            f"Checkpoint: \"{label_str}\" ({chk.get('timestamp', '')})\n\n"
+            "This will restore the QGIS project state (layers, styling, layouts) "
+            "and roll back all subsequent chat history in this session.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        chk_dir = os.path.join(self.session_manager.get_workspace_dir(active_sess.id), "checkpoints")
+        chk_path = os.path.join(chk_dir, chk.get("filename", f"checkpoint_cycle_{cycle_no}.qgz"))
+        if not os.path.exists(chk_path):
+            QMessageBox.critical(self, "File Missing", f"Checkpoint file not found on disk:\n{chk_path}")
+            return
+
+        orig_filename = QgsProject.instance().fileName()
+        res = QgsProject.instance().read(chk_path)
+        if orig_filename:
+            QgsProject.instance().setFileName(orig_filename)
+
+        active_sess.rollback_to_cycle(cycle_no)
+        self.session_manager.save_project_sessions()
+        self.first_turn = (active_sess.turns_count == 0)
+        self.cont.setChecked(active_sess.turns_count > 0)
+        self.iface.mapCanvas().refreshAllLayers()
+        self._render_active_session_log()
+
+        rev_html = (
+            f"<div style='margin: 8px 0; padding: 6px 10px; background-color: #1e1b4b; "
+            f"border-left: 3px solid #818cf8; border-radius: 4px; font-size: 11px; color: #c7d2fe;'>"
+            f"⏪ <b>Reverted to Cycle {cycle_no} Checkpoint:</b> {html.escape(label_str)} ({chk.get('timestamp', '')})<br>"
+            f"<span style='color: #94a3b8; font-size: 10px;'>QGIS project layers, symbology, layouts, and conversation history successfully restored.</span>"
+            f"</div>"
+        )
+        self._append_html(rev_html)
+        self._update_revert_ui()
 
     def _render_active_session_log(self):
         try:
@@ -1115,10 +1310,29 @@ class AgentDock(QDockWidget):
             self.log.setTextCursor(rep_c)
             self.log.ensureCursorVisible()
 
-    def _finalize_thinking_node(self):
-        """Replaces the live streaming thinking node with a compact 'Thought for Xs' node."""
+    def _finalize_thinking_node(self, discard_if_empty=True):
+        """Replaces the live streaming thinking node with 'Thought for Xs', or removes if empty."""
         if not self._thinking_active:
             return
+
+        has_thought_content = bool(self._thinking_text and self._thinking_text.strip())
+        if discard_if_empty and not has_thought_content:
+            # No genuine thinking text was generated; remove placeholder so it is never mistaken as thinking
+            if self._thinking_pos:
+                start_pos, end_pos = self._thinking_pos
+                doc_len = self.log.document().characterCount()
+                if start_pos <= doc_len and end_pos <= doc_len:
+                    rep_c = self.log.textCursor()
+                    rep_c.setPosition(start_pos)
+                    rep_c.setPosition(end_pos, QTextCursor.MoveMode.KeepAnchor)
+                    rep_c.removeSelectedText()
+                    self.log.setTextCursor(rep_c)
+            self._thinking_active = False
+            self._thinking_pos = None
+            self._thinking_text = ""
+            self._in_explicit_tag = False
+            return
+
         elapsed = max(1, round(time.time() - self._thinking_start_time))
         final_html = render_thinking_node_html(f"Thought for {elapsed}s")
 
@@ -1179,26 +1393,26 @@ class AgentDock(QDockWidget):
         rem = clean
         while rem:
             if not self._in_explicit_tag:
-                m_open = re.search(r"<(?:thinking|thought)>", rem, re.IGNORECASE)
+                m_open = re.search(r"<(?:thinking|thought|think)>", rem, re.IGNORECASE)
                 if m_open:
                     pre = rem[:m_open.start()]
                     if pre.strip():
-                        self._finalize_thinking_node()
+                        self._finalize_thinking_node(discard_if_empty=True)
                         self._stream_agent_text(pre)
                     rem = rem[m_open.end():]
                     self._in_explicit_tag = True
                     if not self._thinking_active:
                         self._start_thinking_node()
                 else:
-                    self._finalize_thinking_node()
+                    self._finalize_thinking_node(discard_if_empty=True)
                     self._stream_agent_text(rem)
                     rem = ""
             else:
-                m_close = re.search(r"<\/(?:thinking|thought)>", rem, re.IGNORECASE)
+                m_close = re.search(r"<\/(?:thinking|thought|think)>", rem, re.IGNORECASE)
                 if m_close:
                     thought_chunk = rem[:m_close.start()]
                     self._update_thinking_stream(thought_chunk)
-                    self._finalize_thinking_node()
+                    self._finalize_thinking_node(discard_if_empty=False)
                     self._in_explicit_tag = False
                     rem = rem[m_close.end():]
                 else:
@@ -1207,7 +1421,8 @@ class AgentDock(QDockWidget):
 
     def _on_tool_called(self, name, args):
         self.is_agent_streaming = False
-        self._finalize_thinking_node()
+        # Tool call / script execution is NOT thinking: discard empty thinking placeholder immediately
+        self._finalize_thinking_node(discard_if_empty=True)
         cat, prim = categorize_tool(name, args)
         in_str = format_in_args(args)
         now = time.time()
@@ -1240,6 +1455,10 @@ class AgentDock(QDockWidget):
 
         self._active_tool_pos = (start_pos, end_pos)
 
+        # Force Qt GUI repaint so user sees IN arguments and running state immediately!
+        from qgis.PyQt.QtWidgets import QApplication
+        QApplication.processEvents()
+
     def _on_tool_completed(self, name, result):
         clean_summary = format_out_result(name, result)
         cat = self._last_tool_call.get("category", "QGIS")
@@ -1249,10 +1468,10 @@ class AgentDock(QDockWidget):
         tool_start = self._last_tool_call.get("start_time", time.time())
         duration = max(0.1, round(time.time() - tool_start, 1))
 
-        # Check for canvas snapshot image
+        # Check for canvas snapshot or layout preview image
         img_b64 = None
-        if name == "snapshot_canvas" and isinstance(result, dict) and "image_base64" in result:
-            img_b64 = result["image_base64"]
+        if isinstance(result, dict):
+            img_b64 = result.get("__image__") or result.get("image_base64")
 
         full_node_html = render_tool_node_html(
             cat, name, prim, in_str, clean_summary, is_success=True, is_running=False, img_base64=img_b64, duration=duration
@@ -1292,8 +1511,9 @@ class AgentDock(QDockWidget):
         )
         self.session_manager.save_project_sessions()
 
-        # Start thinking for next turn
-        self._start_thinking_node()
+        # Force Qt GUI update
+        from qgis.PyQt.QtWidgets import QApplication
+        QApplication.processEvents()
 
     def _on_tool_failed(self, name, err_msg):
         cat = self._last_tool_call.get("category", "QGIS")
@@ -1338,8 +1558,9 @@ class AgentDock(QDockWidget):
         )
         self.session_manager.save_project_sessions()
 
-        # Start thinking for next turn
-        self._start_thinking_node()
+        # Force Qt GUI update
+        from qgis.PyQt.QtWidgets import QApplication
+        QApplication.processEvents()
 
     def _register(self):
         argv = self._adapter()["register"]
@@ -1558,15 +1779,16 @@ class AgentDock(QDockWidget):
 
             loaded_skills = merged_skill_names
             # If new skills were added this turn, build their full bodies; otherwise a lightweight reminder
+            avail_skills = REGISTRY.available() or REGISTRY.skills
             if added_names:
-                added_objs = [REGISTRY.load(n) for n in added_names if REGISTRY.load(n)]
+                added_objs = [avail_skills[n] for n in added_names if n in avail_skills]
                 skills_txt = (
                     f"# Active skills inherited: {', '.join(inherited_skills)}\n\n"
                     + prompts.skills_block({"pinned": [], "full": added_objs, "hint": [], "scores": new_sel.get("scores", {}), "is_e2e": False}, catalog)
                 )
             else:
                 skills_txt = f"# Active session skills: {', '.join(merged_skill_names)} (already in context)"
-            sel = {"pinned": [], "full": [REGISTRY.load(n) for n in merged_skill_names if REGISTRY.load(n)], "scores": {}}
+            sel = {"pinned": [], "full": [avail_skills[n] for n in merged_skill_names if n in avail_skills], "scores": {}}
         else:
             # First turn or fresh session
             sel = REGISTRY.select(user) if REGISTRY.mode != "off" else {"pinned": [], "full": [], "hint": [], "scores": {}}
@@ -1662,21 +1884,27 @@ class AgentDock(QDockWidget):
         self._last_event_time = time.time()
         self._start_thinking_node()
 
+        # Checkpoint Cycle 0 (initial project state) if not yet recorded
+        if not active_sess.get_checkpoint(0):
+            self._save_checkpoint(0, "Initial Project State")
+
         self.prompt.clear()
-        self.action_btn.setText("■ Stop")
-        self.action_btn.setToolTip("Stop active AI execution")
+        self.stop_btn.show()
+        self.stop_btn.setEnabled(True)
+        self.action_btn.setText("📥 Queue")
+        self.action_btn.setToolTip("Queue this message to execute next (Ctrl+Enter)")
         self.action_btn.setStyleSheet("""
             QPushButton {
-                background-color: #dc2626;
+                background-color: #0284c7;
                 color: #ffffff;
                 font-weight: bold;
                 border: none;
                 border-radius: 4px;
-                padding: 6px 20px;
+                padding: 6px 16px;
                 font-size: 12px;
             }
             QPushButton:hover {
-                background-color: #ef4444;
+                background-color: #0369a1;
             }
         """)
         self._update_queue_ui()
@@ -1690,7 +1918,7 @@ class AgentDock(QDockWidget):
             self._done(-1)
 
     def _done(self, code):
-        self._finalize_thinking_node()
+        self._finalize_thinking_node(discard_if_empty=True)
         self.indicator_timer.stop()
         self._active_tool_pos = None
         self._active_running_tool = None
@@ -1728,12 +1956,24 @@ class AgentDock(QDockWidget):
         # Re-render active session log with clean markdown and sleek cards
         self._render_active_session_log()
 
+        # Checkpoint this completed cycle
+        cycle_no = active_sess.turns_count
+        if cycle_no > 0 and code == 0:
+            last_prompt = ""
+            for m in reversed(active_sess.messages):
+                if m.role == "user":
+                    last_prompt = m.text
+                    break
+            self._save_checkpoint(cycle_no, last_prompt)
+
+        revert_link = f"<span style='float: left;'><a href='revert:{cycle_no}' style='color: #38bdf8; text-decoration: none; font-size: 11px;'>↺ Revert to Cycle {cycle_no}</a></span>" if cycle_no > 0 else ""
         done_html = (
             f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 8px 0;'>"
             f"<tr><td>"
-            f"<div style='padding: 4px 10px; background-color: #171c24; border: 1px solid #282f3d; "
+            f"<div style='padding: 5px 10px; background-color: #171c24; border: 1px solid #282f3d; "
             f"border-radius: 4px; font-size: 11px; color: {status_color}; text-align: right;'>"
-            f"🏁 <b>Finished</b> in {elapsed:.1f}s (Exit Code: {code})"
+            f"{revert_link}"
+            f"🏁 <b>Finished Cycle {cycle_no}</b> in {elapsed:.1f}s (Exit Code: {code})"
             f"</div>"
             f"</td></tr>"
             f"</table>"
@@ -1743,6 +1983,7 @@ class AgentDock(QDockWidget):
         self.is_agent_streaming = False
         self.first_turn = False
         self.cont.setChecked(True)
+        self.stop_btn.hide()
         self.action_btn.setText("▶ Send")
         self.action_btn.setToolTip("Execute map request (Ctrl+Enter)")
         self.action_btn.setStyleSheet("""
@@ -1752,13 +1993,14 @@ class AgentDock(QDockWidget):
                 font-weight: bold;
                 border: none;
                 border-radius: 4px;
-                padding: 6px 20px;
+                padding: 6px 18px;
                 font-size: 12px;
             }
             QPushButton:hover {
                 background-color: #10b981;
             }
         """)
+        self._update_revert_ui()
         self.iface.mapCanvas().refreshAllLayers()
 
         # Check if there are queued messages to execute next

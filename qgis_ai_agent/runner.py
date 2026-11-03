@@ -1,10 +1,13 @@
 """Adapters that spawn AI CLIs non-interactively and register the MCP bridge."""
 import os
 import shutil
+import signal
+import subprocess
 import sys
 
 from qgis.PyQt.QtCore import QObject, QProcess, QProcessEnvironment, pyqtSignal
 
+GUARD = os.path.join(os.path.dirname(__file__), "guard.py")
 BRIDGE = os.path.join(os.path.dirname(__file__), "mcp_bridge.py")
 PY = shutil.which("python3") or shutil.which("python") or sys.executable
 
@@ -138,10 +141,34 @@ class CliRunner(QObject):
         self.proc.errorOccurred.connect(lambda e: self.output.emit(f"\n[process error: {e}]\n"))
 
         bin_exec = shutil.which(argv[0]) or argv[0]
-        self.proc.start(bin_exec, argv[1:])
+        # Wrap CLI invocation with guard.py to guarantee termination if QGIS closes or crashes
+        qgis_pid = str(os.getpid())
+        guard_argv = [PY, GUARD, qgis_pid, cwd, bin_exec] + argv[1:]
+        self.proc.start(guard_argv[0], guard_argv[1:])
 
     def stop(self):
         if self.running():
+            pid = self.proc.processId()
+            # 1. Graceful termination
             self.proc.terminate()
-            if not self.proc.waitForFinished(3000):
+            if pid > 0 and hasattr(os, "killpg"):
+                try:
+                    os.killpg(os.getpgid(pid), signal.SIGTERM)
+                except Exception:
+                    pass
+            elif pid > 0 and sys.platform == "win32":
+                try:
+                    subprocess.call(["taskkill", "/F", "/T", "/PID", str(pid)],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+
+            if not self.proc.waitForFinished(1500):
+                # 2. Force kill process tree if still active
+                if pid > 0 and hasattr(os, "killpg"):
+                    try:
+                        os.killpg(os.getpgid(pid), signal.SIGKILL)
+                    except Exception:
+                        pass
                 self.proc.kill()
+                self.proc.waitForFinished(1000)

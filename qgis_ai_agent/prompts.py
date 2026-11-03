@@ -13,20 +13,29 @@ def system_prompt(qgis_version, output_dir, mode):
 def skills_block(sel, catalog_names):
     """sel: result of Registry.select(); catalog_names: names of other skills the agent can load."""
     parts = []
-    full = sel["pinned"] + sel["full"]
+    full = sel.get("pinned", []) + sel.get("full", [])
     if full:
         banner = "# Loaded skills (follow these; they were selected for this request)"
         if sel.get("is_e2e"):
             banner += "\n> [!IMPORTANT] MANDATORY E2E MAP PIPELINE:\n> This request requires end-to-end map creation. You MUST strictly apply both the loaded Cartography skill (symbology, CVD-safe color harmony, visual hierarchy, label halos) and Layout skill (print layout composition, clean gutters, scalebar, north arrow, default A4 paper size). Zero Data Fabrication: Never invent mock data — you are fully free to search the internet to find real data from official agencies and open repositories, record provenance, and mandatorily embed real sources into the layout credits (`credits='Data Sources: ...'`). Finish by saving the project (`save_project`). Do NOT export (`export_layout`) unless the user explicitly requested an export file/image."
         parts.append(banner)
         for s in full:
-            tag = "pinned by user" if s in sel["pinned"] else f"auto-selected, score {sel['scores'].get(s.name, 0):.1f}"
-            refs = f"\nReferences (load with load_skill reference=...): {', '.join(s.references)}" if s.references else ""
-            parts.append(f"## Skill: {s.name} ({tag})\n{s.body()}{refs}")
-    if sel["hint"]:
+            if isinstance(s, dict):
+                s_name = s.get("skill") or s.get("name") or "unknown"
+                s_body = s.get("content") or s.get("body") or ""
+                s_refs = s.get("references", [])
+            else:
+                s_name = getattr(s, "name", str(s))
+                s_body = s.body() if callable(getattr(s, "body", None)) else getattr(s, "body", str(s))
+                s_refs = getattr(s, "references", [])
+
+            tag = "pinned by user" if s in sel.get("pinned", []) else f"auto-selected, score {sel.get('scores', {}).get(s_name, 0):.1f}"
+            refs = f"\nReferences (load with load_skill reference=...): {', '.join(s_refs)}" if s_refs else ""
+            parts.append(f"## Skill: {s_name} ({tag})\n{s_body}{refs}")
+    if sel.get("hint"):
         parts.append("# Also relevant (too large to inline; call `load_skill` if needed)\n" +
-                     "\n".join(f"- {s.name}: {s.description[:200]}" for s in sel["hint"]))
-    rest = [n for n in catalog_names if n not in {s.name for s in full + sel["hint"]}]
+                     "\n".join(f"- {getattr(s, 'name', str(s))}: {getattr(s, 'description', '')[:200]}" for s in sel["hint"]))
+    rest = [n for n in catalog_names if n not in {getattr(s, 'name', str(s)) for s in full + sel.get("hint", [])}]
     if rest:
         parts.append("# Other skills you can load on demand with `load_skill(name)` (use `list_skills(query)` to search)\n" +
                      ", ".join(rest))

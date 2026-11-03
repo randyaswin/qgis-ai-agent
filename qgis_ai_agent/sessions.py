@@ -118,7 +118,7 @@ class Message:
 class Session:
     def __init__(self, session_id=None, name="Session 1", created_at=None, updated_at=None,
                  cli="", model="", effort="default", messages=None, turns_count=0,
-                 active_skills=None, is_e2e=False, cli_session_id=""):
+                 active_skills=None, is_e2e=False, cli_session_id="", checkpoints=None):
         self.id = session_id or f"sess_{int(time.time())}_{uuid.uuid4().hex[:6]}"
         self.name = name
         self.created_at = created_at or time.strftime("%Y-%m-%d %H:%M:%S")
@@ -131,6 +131,39 @@ class Session:
         self.active_skills = list(active_skills or [])
         self.is_e2e = bool(is_e2e)
         self.cli_session_id = str(cli_session_id or "")
+        self.checkpoints = list(checkpoints or [])
+
+    def add_checkpoint(self, cycle, filename, prompt="", msg_count=0):
+        """Record a completed cycle checkpoint with its project file reference and message offset."""
+        self.checkpoints = [c for c in self.checkpoints if c.get("cycle") != cycle]
+        self.checkpoints.append({
+            "cycle": int(cycle),
+            "filename": filename,
+            "timestamp": time.strftime("%H:%M:%S"),
+            "prompt": prompt[:90] if prompt else f"Cycle {cycle}",
+            "msg_count": int(msg_count),
+        })
+        self.checkpoints.sort(key=lambda c: c.get("cycle", 0))
+
+    def get_checkpoints(self):
+        return list(self.checkpoints)
+
+    def get_checkpoint(self, cycle):
+        for c in self.checkpoints:
+            if c.get("cycle") == int(cycle):
+                return c
+        return None
+
+    def rollback_to_cycle(self, cycle):
+        """Rollback session messages and turns count to the specified cycle checkpoint."""
+        cycle = int(cycle)
+        chk = self.get_checkpoint(cycle)
+        if chk:
+            msg_count = chk.get("msg_count", 0)
+            self.messages = self.messages[:msg_count]
+        self.turns_count = cycle
+        self.checkpoints = [c for c in self.checkpoints if c.get("cycle", 0) <= cycle]
+        self.updated_at = time.strftime("%Y-%m-%d %H:%M:%S")
 
     def detect_and_store_cli_session_id(self, workspace_dir, cli_name=""):
         """Detect and bind the explicit CLI conversation ID from workspace caches."""
@@ -295,6 +328,7 @@ class Session:
             "active_skills": self.active_skills,
             "is_e2e": self.is_e2e,
             "cli_session_id": self.cli_session_id,
+            "checkpoints": self.checkpoints,
             "messages": [m.to_dict() for m in self.messages],
         }
 
@@ -313,6 +347,7 @@ class Session:
             active_skills=d.get("active_skills", []),
             is_e2e=d.get("is_e2e", False),
             cli_session_id=d.get("cli_session_id", ""),
+            checkpoints=d.get("checkpoints", []),
         )
 
 

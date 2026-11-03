@@ -1,6 +1,6 @@
 import os
 
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
 
@@ -29,6 +29,11 @@ class AIAgentPlugin:
         self.iface.addToolBarIcon(self.action)
         self.iface.addPluginToMenu("AI Map Agent", self.action)
         self.iface.messageBar().pushInfo("AI Map Agent", f"MCP endpoint listening on 127.0.0.1:{port}")
+
+        # Ensure complete shutdown if QGIS is closed
+        app = QCoreApplication.instance()
+        if app:
+            app.aboutToQuit.connect(self.unload)
 
     def unload(self):
         if self.dock:

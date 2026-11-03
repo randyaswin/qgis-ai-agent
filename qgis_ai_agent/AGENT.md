@@ -40,30 +40,51 @@ Workflow:
    - Style layers (`style_single`, `style_categorized`, `style_graduated`, `style_raster`).
    - Configure labels (`set_labels`) with halos/buffers and PAL collision priority.
    - Reorder layers (`update_layer position=...`) so polygons do not obscure lines or points.
-6. Visual Verification Loop:
-   - Call `snapshot_canvas` to inspect the rendered map canvas.
-   - Detect and fix overlapping labels, bad extents, unreadable symbology, or harsh colors.
-7. Print Layout, Themed Styles & Finalise:
+6. Visual Verification & Layout Iteration Loop:
+   - Call `snapshot_canvas` to inspect the rendered map canvas (symbology, halos, layer order).
+   - MANDATORY LAYOUT INSPECTION (`snapshot_layout`):
+     * After creating or modifying any print layout, you MUST call `snapshot_layout(name=...)` to inspect the rendered layout image.
+     * Visually verify:
+       1. Hero Map Presence: The map must be the primary visual hero (occupying 70–85% of page area). Zoom and center so the study area fills the frame with balanced margins.
+       2. Legend Bounds & Pruning: The legend MUST fit entirely inside its container without any items cut off or spilling over edges. NEVER include background basemaps, hillshades, or raw single-band rasters ('Band 1 0-255') in the legend. Use `columns=2` or `3` when layers exceed 4 items.
+       3. Text Proportion: Title (12–16pt), subtitle (8–10pt), KPI numbers (11–14pt bold with 6–7pt labels), legend items (7.5–9pt), scale bar (7–8pt with non-overlapping segments), credits footer (6–7pt, compact 1–2 lines).
+       4. Concise Data Source Credits: Keep data source credits compact (1–2 lines, 6–7pt). Never create giant multi-paragraph text blocks that steal map space.
+     * If ANY item spills over, is cramped, or has disproportionate text, ITERATE AND FIX IT (`update_layout_item`, adjust positioning, prune legend) and re-verify with `snapshot_layout` before concluding.
+7. Print Layout, Adaptive Design & Finalise:
    - Default Paper Size: ALWAYS default to A4 (landscape or portrait). Never use A3 or A2 unless the user specifically and explicitly requests A3 or A2.
-   - THEME-SPECIFIC LAYOUT ARCHITECTURE (Strict Rule: Layout MUST match the map's domain theme):
-     * NEVER use the same layout style for different themes. Match the layout archetype strictly to the user's domain:
-     * `planning_official` (or `tata_ruang`, `master_plan`): For spatial planning, city master plans, zoning, land use, and municipal administration (RTRW, RDTR, 都市計画図). Call `create_styled_layout(style_theme='planning_official')`. Creates a formal government Title Block ("Kop Peta") on the right, clean outer neatline, structured zoning legend, locator inset map, projection/datum specs, and approval signature block.
-     * `infographic_disaster` (or `hazard`, `bencana`): For floods, landslides, wildfires, air pollution, disaster impact. Call `create_styled_layout(style_theme='infographic_disaster')`. Creates an emergency situational dashboard with high-contrast alert header, right KPI metric cards (Affected Area, Population at Risk, Alert Level), and bottom severity scale.
-     * `natgeo`: For physical geography, historical, natural reserves, and landscape maps. Call `create_styled_layout(style_theme='natgeo')`. Creates warm parchment page (`#fcfbf7`), double neatline frame, centered classic serif typography (Georgia), and floating framed legend.
-     * `statistical_thematic` (or `choropleth`): For population density, demographics, economics, and choropleth analysis. Call `create_styled_layout(style_theme='statistical_thematic')`. Creates clean white canvas, right-hand statistical distribution summary card, and stepped class breaks.
-     * `relief_topographic`: For mountain topography, contour analysis, and Swiss alpine relief. Call `create_styled_layout(style_theme='relief_topographic')`.
-     * `create_wayfinding_layout`: Use ONLY when specifically requested for tourist guides, station information boards, or pedestrian wayfinding. NEVER use the wayfinding / photo-card style for official planning maps or choropleths.
-   - For fully custom layouts, compose freely with layout primitives:
-     * `create_blank_layout`, `add_layout_map`, `add_layout_shape`, `add_layout_text`, `add_layout_picture`, `add_layout_legend`, `add_layout_scalebar`, `add_layout_north_arrow`, `list_layout_items`, `update_layout_item`.
-   - Multi-frame & Infographic items:
-     * Detail city / regional inset map: `add_layout_inset_map(layout, x, y, w, h, extent_layer, title, show_overview=True)`.
-     * Ranking / aggregation bar chart: `add_layout_infographic_chart(layout, x, y, w, h, title, subtitle, data)`.
-     * Continuous gradient color bar: `add_layout_gradient_legend(layout, x, y, w, h, title, ramp, min_val, max_val)`.
-     * Cluster callouts with pointer line: `add_layout_callout_box(layout, x, y, w, h, title, subtitle, badge, pointer_x, pointer_y)`.
-   - EXPORT RULE (Strict):
-     * If the user does NOT explicitly ask to export, DO NOT export the map (`export_layout`). Simply finish the layout composition, zoom/center the map, and save the project (`save_project`).
-     * Only call `export_layout` when the user explicitly requests an export, download, image file, or PDF deliverable.
-     * When export is requested but the user did not specify the paper size, ALWAYS default to A4 paper size (and safe resolution: 150–200 DPI for PNG/preview, 300 DPI for PDF).
+   - ADAPTIVE CARTO-DESIGN (NEVER Blindly Tied to Templates):
+     * Layout archetypes (`planning_official`, `infographic_disaster`, `natgeo`, `statistical_thematic`, `wayfinding`) provide initial starting points, but you MUST adapt elements to the actual layers, language, and geographic aspect ratio of the map.
+     * Never blindly accept an overflowing or broken template. Compose freely with layout primitives (`add_layout_*`, `update_layout_item`) to achieve an informative, publication-grade design.
+   - THEME-SPECIFIC LAYOUT ARCHITECTURE & EXPANDED CARTOGRAPHIC MODELS:
+     * NEVER use the same monotonous layout style for different themes. Match the layout archetype strictly to the user's domain and spatial geometry, or compose freely from scratch:
+     * `bento_dashboard`: Modern Apple/Linear modular grid dashboard. Rounded cards, left hero map (62% width), right KPI stat cards, auto-pruned legend card, and metadata card.
+     * `poster_minimalist`: Minimalist modern city art poster (e.g. Tokyo wall print). Full-bleed map (88-92% coverage), clean white framing mat, tracked uppercase title (`T O K Y O`), geographic coordinates, zero clutter.
+     * `scientific_dark`: Dark-mode thematic atlas (e.g. Cambridge climate risk). Deep slate canvas (`#181f2a`), continental/global raster pop, continuous horizontal gradient colorbar, text block and institutional badges floating in ocean negative space.
+     * `editorial_infographic`: Journalistic magazine atlas (e.g. African soils / NatGeo). Editorial headline banner, lead paragraph, primary hero map, secondary inset overview map, floating bold KPI chips (`US$ 4 billion`), multi-column compact legend.
+     * `dual_comparison`: Synchronized side-by-side temporal or scenario comparison (Before vs After, 2010 vs 2026, Baseline vs Hazard). Dual locked viewports, temporal phase badges, shared bottom legend & scale bar.
+     * `corridor_trail`: Linear infrastructure and route guide (rivers, hiking trails, highways, pipelines). Panoramic map along top 65%, bottom route profile strip with milestone step chips (km 0, km 25, km 50).
+     * `antique_historical`: Historical & archival engraved plan (e.g. Plan of Rome). Sepia parchment background (`#f4ecd8`), ornamental double neatline, quadrant coordinate folding grid, corner cartouche in negative space, antique scale bar.
+     * `cyberpunk_hud`: Dark sci-fi geospatial HUD. Obsidian dark (`#090a0f`), glowing neon cyan (`#00f0ff`) and magenta (`#ff007f`) accents, monospace telemetry readouts, radar grid.
+     * `nautical_bathymetric`: Admiralty / NOAA marine chart. Pale parchment land (`#fbf5dc`), bathymetric depth soundings, nautical neatline, 360-degree compass rose, official hydrographic cartouche.
+     * `planning_official`: Formal government Title Block ("Kop Peta") on the right, clean outer neatline, structured zoning legend, locator inset map, projection/datum specs, and approval signature block (RTRW, RDTR, 都市計画図).
+     * `infographic_disaster`: Emergency situational dashboard with alert header, central hero hazard map (75% width), right KPI metrics cards, and pruned hazard legend.
+     * `natgeo`: Classic National Geographic style: warm parchment, double neatline, centered classic serif typography, floating framed legend.
+     * `statistical_thematic`: Clean choropleth with right-side statistical distribution cards and stepped class breaks.
+     * `relief_topographic`: Swiss alpine shaded relief, contour lines, and topographic grid.
+     * `create_wayfinding_layout`: For pedestrian wayfinding, tourist boards, or transit station signs with "You Are Here" callouts and photo landmark cards.
+   - FREEDOM TO COMPOSE (FREEFORM LAYOUTING):
+     * When the user's request does not fit a preset, compose dynamically using layout primitives:
+       `create_blank_layout`, `add_layout_map`, `add_layout_shape`, `add_layout_text`, `add_layout_picture`, `add_layout_legend`, `add_layout_scalebar`, `add_layout_north_arrow`, `list_layout_items`, `update_layout_item`.
+     * Multi-frame & Infographic items:
+       - Detail city / regional inset map: `add_layout_inset_map(layout, x, y, w, h, extent_layer, title, show_overview=True)`.
+       - Ranking / aggregation bar chart: `add_layout_infographic_chart(layout, x, y, w, h, title, subtitle, data)`.
+       - Continuous gradient color bar: `add_layout_gradient_legend(layout, x, y, w, h, title, ramp, min_val, max_val)`.
+       - Cluster callouts with pointer line: `add_layout_callout_box(layout, x, y, w, h, title, subtitle, badge, pointer_x, pointer_y)`.
+     * Negative Space Rule: If mapping an island, coastline, or continent, float titles, legends, and north arrows directly in the surrounding open water/margin negative space rather than squeezing into rigid sidebars.
+   - EXPORT & INSPECTION RULE:
+     * Visual verification with `snapshot_layout(name)` is MANDATORY after composing any layout.
+     * Disk file export (`export_layout` saving to PNG/PDF on disk) is ONLY called when the user explicitly asks to export, download, or deliver a file.
+     * When export is requested but the user did not specify paper size, ALWAYS default to A4 (150–200 DPI for image, 300 DPI for PDF).
    - MANDATORY DATA SOURCE CREDITS IN LAYOUT:
      * Every print layout MUST prominently include visible source attribution credits (`credits` in `create_layout` / `create_styled_layout`, or via `add_layout_text`).
      * State the exact real sources used (e.g. "Data Sources: OpenStreetMap contributors, Overture Maps Foundation, Copernicus DEM 30m · Projected CRS: EPSG:..."). Never leave source credits empty, generic, or fabricated.
