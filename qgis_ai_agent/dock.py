@@ -10,7 +10,7 @@ from qgis.PyQt.QtCore import Qt, QSettings, QTimer
 from qgis.PyQt.QtGui import QTextCursor
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QPlainTextEdit,
-    QTextEdit, QCheckBox, QLabel, QLineEdit, QFileDialog, QMessageBox, QDialog,
+    QTextEdit, QTextBrowser, QCheckBox, QLabel, QLineEdit, QFileDialog, QMessageBox, QDialog,
     QInputDialog, QFrame, QToolButton, QMenu, QAction,
 )
 from qgis.core import Qgis, QgsProject
@@ -676,13 +676,14 @@ class AgentDock(QDockWidget):
         lay.addLayout(row1)
 
         # Chat log display (Claude Dark IDE Theme)
-        self.log = QTextEdit()
+        self.log = QTextBrowser()
         self.log.setReadOnly(True)
-        self.log.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
+        wrap_mode = getattr(QTextEdit.LineWrapMode, "WidgetWidth", None) if hasattr(QTextEdit, "LineWrapMode") else getattr(QTextEdit, "WidgetWidth", 1)
+        self.log.setLineWrapMode(wrap_mode)
         self.log.setOpenLinks(False)
         self.log.anchorClicked.connect(self._on_log_anchor_clicked)
         self.log.setStyleSheet("""
-            QTextEdit {
+            QTextEdit, QTextBrowser {
                 background-color: #12131a;
                 color: #e2e8f0;
                 border: 1px solid #232533;
