@@ -16,7 +16,7 @@ from qgis.PyQt.QtWidgets import (
 from qgis.core import Qgis, QgsProject
 
 from . import tools
-from .runner import ADAPTERS, CliRunner, available
+from .runner import ADAPTERS, CliRunner, available, get_cli_models, ModelDiscoveryThread, _CLI_MODELS_CACHE
 from .skills import REGISTRY
 from .skills_dialog import SkillsDialog
 from .sessions import SessionManager
@@ -484,6 +484,7 @@ class AgentDock(QDockWidget):
         super().__init__("QGIS Copilot")
         self.iface, self.server = iface, server
         self.runner = CliRunner(self)
+        self._model_thread = None
         self.first_turn = True
         self.start_time = 0
         self.is_agent_streaming = False
@@ -668,7 +669,8 @@ class AgentDock(QDockWidget):
         saved_effort = s.value(SKEY + "effort", "default")
         self.effort_combo.setCurrentIndex(max(0, self.effort_combo.findData(saved_effort)))
         self.effort_combo.currentIndexChanged.connect(self._save_model_settings)
-        self.model_combo.currentIndexChanged.connect(self._save_model_settings)
+        self.model_combo.currentIndexChanged.connect(self._on_model_changed)
+        self.model_combo.editTextChanged.connect(self._on_model_changed)
 
         row1.addWidget(lbl_model)
         row1.addWidget(self.model_combo, 1)
@@ -846,11 +848,10 @@ class AgentDock(QDockWidget):
             return True
         return super().eventFilter(obj, ev)
 
-    def _on_cli_changed(self):
-        cli_name = self.cli.currentData()
-        adapter = ADAPTERS.get(cli_name, {})
+    def _populate_models_for_cli(self, cli_name):
+        self.model_combo.blockSignals(True)
         self.model_combo.clear()
-        models = adapter.get("models", [])
+        models = get_cli_models(cli_name)
         for label, val in models:
             self.model_combo.addItem(label, val)
 
@@ -865,23 +866,72 @@ class AgentDock(QDockWidget):
         elif self.model_combo.count() > 0:
             self.model_combo.setCurrentIndex(0)
 
-        # Effort support
-        sup_effort = adapter.get("supports_effort", False)
-        self.effort_combo.setEnabled(sup_effort)
-        if not sup_effort:
-            self.effort_combo.setToolTip("This CLI controls reasoning effort via model selection directly")
-        else:
+        self.model_combo.blockSignals(False)
+        self._update_effort_visibility()
+
+    def _on_models_discovered(self, cli_name, models):
+        if self.cli.currentData() != cli_name:
+            return
+        curr_text = self.model_combo.currentText()
+        curr_val = self.model_combo.currentData()
+
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        for label, val in models:
+            self.model_combo.addItem(label, val)
+
+        if curr_val:
+            idx = self.model_combo.findData(curr_val)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
+            else:
+                self.model_combo.setEditText(curr_text)
+        elif curr_text:
+            self.model_combo.setEditText(curr_text)
+        elif self.model_combo.count() > 0:
+            self.model_combo.setCurrentIndex(0)
+
+        self.model_combo.blockSignals(False)
+        self._update_effort_visibility()
+
+    def _update_effort_visibility(self):
+        cli_name = self.cli.currentData()
+        adapter = ADAPTERS.get(cli_name, {})
+        sup = adapter.get("supports_effort", False)
+        model_id = self.model_combo.currentData() or self.model_combo.currentText().strip()
+        is_supported = sup(model_id) if callable(sup) else bool(sup)
+        self.effort_combo.setVisible(is_supported)
+        if is_supported:
             self.effort_combo.setToolTip("Set reasoning / thinking effort for the selected model")
 
+    def _on_model_changed(self):
+        self._update_effort_visibility()
+        self._save_model_settings()
+
+    def _on_cli_changed(self):
+        cli_name = self.cli.currentData()
+        self._populate_models_for_cli(cli_name)
+
+        # Background live model discovery if not yet cached
+        if cli_name not in _CLI_MODELS_CACHE:
+            if self._model_thread and self._model_thread.isRunning():
+                self._model_thread.wait(300)
+            self._model_thread = ModelDiscoveryThread(cli_name, self)
+            self._model_thread.models_ready.connect(self._on_models_discovered)
+            self._model_thread.start()
+
+        self._update_effort_visibility()
+        s = QSettings()
         s.setValue(SKEY + "cli", cli_name)
 
     def _save_model_settings(self):
         cli_name = self.cli.currentData()
         m_val = self.model_combo.currentData() or self.model_combo.currentText().strip()
-        e_val = self.effort_combo.currentData()
+        e_val = self.effort_combo.currentData() if self.effort_combo.isVisible() else ""
         s = QSettings()
         s.setValue(f"{SKEY}model_{cli_name}", m_val)
-        s.setValue(SKEY + "effort", e_val)
+        if e_val:
+            s.setValue(SKEY + "effort", e_val)
 
     def _on_sessions_changed(self):
         try:
@@ -926,7 +976,7 @@ class AgentDock(QDockWidget):
         name, ok = QInputDialog.getText(self, "New Session", "Enter session name:")
         if ok and name.strip():
             selected_model = self.model_combo.currentData() or self.model_combo.currentText().strip() or ""
-            selected_effort = self.effort_combo.currentData() or "default"
+            selected_effort = (self.effort_combo.currentData() or "default") if self.effort_combo.isVisible() else ""
             self.session_manager.create_session(
                 name=name.strip(),
                 cli=self.cli.currentData(),
@@ -1362,7 +1412,7 @@ class AgentDock(QDockWidget):
         if not self.is_agent_streaming:
             cli_label = self.cli.currentData()
             model_info = self.model_combo.currentData() or self.model_combo.currentText().strip()
-            effort_info = self.effort_combo.currentData()
+            effort_info = self.effort_combo.currentData() if self.effort_combo.isVisible() else ""
             meta = [cli_label]
             if model_info:
                 meta.append(model_info)
@@ -1800,12 +1850,12 @@ class AgentDock(QDockWidget):
 
         # Model and Effort selection
         selected_model = self.model_combo.currentData() or self.model_combo.currentText().strip() or None
-        selected_effort = self.effort_combo.currentData()
+        selected_effort = self.effort_combo.currentData() if self.effort_combo.isVisible() else None
 
         # Update active session metadata
         active_sess.cli = self.cli.currentData()
         active_sess.model = selected_model or ""
-        active_sess.effort = selected_effort or "default"
+        active_sess.effort = selected_effort or ""
 
         # Assemble prompt: live QGIS context is injected; session history is omitted when continuing native CLI session
         sys_text = prompts.system_prompt(Qgis.version(), outdir, REGISTRY.mode)
@@ -1836,7 +1886,8 @@ class AgentDock(QDockWidget):
         s.setValue(SKEY + "auto", self.auto.isChecked())
         s.setValue(SKEY + "pyexec", self.pyexec.isChecked())
         s.setValue(f"{SKEY}model_{self.cli.currentData()}", selected_model or "")
-        s.setValue(SKEY + "effort", selected_effort)
+        if selected_effort:
+            s.setValue(SKEY + "effort", selected_effort)
 
         # Render User Message Card (Clean Modern Dark Theme)
         now_str = time.strftime("%H:%M:%S")
