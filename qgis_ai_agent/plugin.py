@@ -15,6 +15,10 @@ class AIAgentPlugin:
         self.action = None
 
     def initGui(self):
+        import sys
+        if "qgis_ai_agent.dock" in sys.modules:
+            del sys.modules["qgis_ai_agent.dock"]
+
         self.server = ToolServer()
         port = self.server.start()
         from .dock import AgentDock
