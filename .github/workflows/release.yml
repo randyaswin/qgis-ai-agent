@@ -1,0 +1,83 @@
+name: Package and Release QGIS Plugin
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: 'Create Draft Release'
+        type: boolean
+        required: false
+        default: false
+      prerelease:
+        description: 'Mark as Pre-release'
+        type: boolean
+        required: false
+        default: false
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Package QGIS Plugin ZIP
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Build & Validate Plugin ZIP Archive
+        id: package
+        run: python scripts/package_plugin.py
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: qgis-ai-agent-v${{ steps.package.outputs.version }}
+          path: dist/
+          retention-days: 30
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Release v${{ steps.package.outputs.version }}"
+          tag_name: ${{ github.ref_name }}
+          draft: ${{ github.event.inputs.draft || false }}
+          prerelease: ${{ github.event.inputs.prerelease || false }}
+          generate_release_notes: true
+          files: |
+            dist/qgis_ai_agent.zip
+            dist/qgis_ai_agent-${{ steps.package.outputs.version }}.zip
+            dist/checksums.sha256
+          body: |
+            ## 🚀 QGIS AI Agent v${{ steps.package.outputs.version }}
+
+            This release provides production-ready, validated ZIP archives ready for direct installation in QGIS or upload to the official [QGIS Python Plugins Repository](https://plugins.qgis.org/).
+
+            ### 📦 Download Assets
+            - **`qgis_ai_agent.zip`**: Canonical archive ready to upload to [plugins.qgis.org/plugins/add](https://plugins.qgis.org/plugins/add/) or install via QGIS Plugin Manager.
+            - **`qgis_ai_agent-${{ steps.package.outputs.version }}.zip`**: Versioned release archive.
+            - **`checksums.sha256`**: SHA-256 integrity checksums.
+
+            ### 📥 Installation in QGIS
+            1. Download **`qgis_ai_agent.zip`** from the assets below.
+            2. Open **QGIS** (v3.34 or newer).
+            3. In the menu bar, open **Plugins** → **Manage and Install Plugins...**.
+            4. In the left sidebar, click **Install from ZIP**.
+            5. Browse to the downloaded `qgis_ai_agent.zip` and click **Install Plugin**.
+            6. The **AI Map Agent** dock will appear in QGIS!
+

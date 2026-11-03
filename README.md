@@ -146,6 +146,33 @@ Restart QGIS and enable **QGIS AI Agent** in the Plugins menu.
 
 ---
 
+## 📦 Packaging & Release for QGIS Plugins Repository
+
+This repository includes automated packaging scripts and a GitHub Actions CI/CD workflow to produce compliant ZIP archives ready for upload to [plugins.qgis.org](https://plugins.qgis.org/):
+
+### Local Packaging
+Generate the upload-ready ZIP archive locally at any time:
+```bash
+python3 scripts/package_plugin.py
+```
+This validates `metadata.txt`, strips unwanted cache/OS files, and outputs:
+* `dist/qgis_ai_agent.zip` (ready for plugins.qgis.org upload or manual QGIS ZIP install)
+* `dist/qgis_ai_agent-<version>.zip` (versioned release asset)
+* `dist/checksums.sha256` (SHA-256 integrity checksums)
+
+### Automated GitHub Actions Release
+To publish an official release with attached ZIP assets on GitHub:
+1. Update `version` and `changelog` in [`qgis_ai_agent/metadata.txt`](qgis_ai_agent/metadata.txt).
+2. Tag and push to GitHub:
+   ```bash
+   git tag v1.0.0
+   git push origin v1.0.0
+   ```
+3. The GitHub Actions workflow ([`.github/workflows/release.yml`](.github/workflows/release.yml)) automatically validates the package, builds the release ZIPs, and attaches them to a new GitHub Release.
+4. You can also trigger the packaging workflow manually from the **Actions** tab in GitHub via **Run workflow**.
+
+---
+
 ## 📄 License & Compliance
 
 This plugin is licensed under the **GNU General Public License v3.0 or later (GPL-3.0-or-later)** in full compliance with the [QGIS Plugin Repository Guidelines](https://plugins.qgis.org/) and the GNU GPL ecosystem of QGIS.
