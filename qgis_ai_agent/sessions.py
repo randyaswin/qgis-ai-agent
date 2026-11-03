@@ -117,7 +117,8 @@ class Message:
 
 class Session:
     def __init__(self, session_id=None, name="Session 1", created_at=None, updated_at=None,
-                 cli="", model="", effort="default", messages=None, turns_count=0):
+                 cli="", model="", effort="default", messages=None, turns_count=0,
+                 active_skills=None, is_e2e=False, cli_session_id=""):
         self.id = session_id or f"sess_{int(time.time())}_{uuid.uuid4().hex[:6]}"
         self.name = name
         self.created_at = created_at or time.strftime("%Y-%m-%d %H:%M:%S")
@@ -127,6 +128,60 @@ class Session:
         self.effort = effort
         self.messages = [Message.from_dict(m) if isinstance(m, dict) else m for m in (messages or [])]
         self.turns_count = turns_count or sum(1 for m in self.messages if m.role == "user")
+        self.active_skills = list(active_skills or [])
+        self.is_e2e = bool(is_e2e)
+        self.cli_session_id = str(cli_session_id or "")
+
+    def detect_and_store_cli_session_id(self, workspace_dir, cli_name=""):
+        """Detect and bind the explicit CLI conversation ID from workspace caches."""
+        if self.cli_session_id:
+            return self.cli_session_id
+
+        norm_ws = os.path.normcase(os.path.realpath(workspace_dir))
+        raw_ws = os.path.normcase(os.path.abspath(workspace_dir))
+
+        # 1. agy (Antigravity CLI) - Cross-platform search paths (Linux, macOS, Windows)
+        candidate_cache_files = [
+            os.path.expanduser("~/.gemini/antigravity-cli/cache/last_conversations.json"),
+            os.path.join(os.environ.get("APPDATA", ""), "gemini", "antigravity-cli", "cache", "last_conversations.json"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "gemini", "antigravity-cli", "cache", "last_conversations.json"),
+            os.path.join(os.environ.get("USERPROFILE", ""), ".gemini", "antigravity-cli", "cache", "last_conversations.json"),
+        ]
+        for cache_file in candidate_cache_files:
+            if cache_file and os.path.exists(cache_file):
+                try:
+                    with open(cache_file, "r", encoding="utf-8") as f:
+                        d = json.load(f)
+                    for k, v in d.items():
+                        norm_k = os.path.normcase(os.path.realpath(k))
+                        if norm_k in (norm_ws, raw_ws):
+                            self.cli_session_id = str(v)
+                            return self.cli_session_id
+                except Exception:
+                    pass
+
+        # 2. Claude Code session detection (Linux, macOS, Windows)
+        candidate_claude_dirs = [
+            os.path.expanduser("~/.claude/sessions"),
+            os.path.join(os.environ.get("USERPROFILE", ""), ".claude", "sessions"),
+            os.path.join(os.environ.get("APPDATA", ""), "Claude", "sessions"),
+        ]
+        for claude_dir in candidate_claude_dirs:
+            if claude_dir and os.path.exists(claude_dir):
+                try:
+                    recent = sorted(
+                        [os.path.join(claude_dir, f) for f in os.listdir(claude_dir)],
+                        key=lambda p: os.path.getmtime(p),
+                        reverse=True
+                    )
+                    if recent and (time.time() - os.path.getmtime(recent[0]) < 180):
+                        cid = os.path.splitext(os.path.basename(recent[0]))[0]
+                        self.cli_session_id = str(cid)
+                        return self.cli_session_id
+                except Exception:
+                    pass
+
+        return self.cli_session_id
 
     def add_user_message(self, text, html_card):
         msg = Message(role="user", text=text, html=html_card)
@@ -237,6 +292,9 @@ class Session:
             "model": self.model,
             "effort": self.effort,
             "turns_count": self.turns_count,
+            "active_skills": self.active_skills,
+            "is_e2e": self.is_e2e,
+            "cli_session_id": self.cli_session_id,
             "messages": [m.to_dict() for m in self.messages],
         }
 
@@ -252,6 +310,9 @@ class Session:
             effort=d.get("effort", "default"),
             messages=[Message.from_dict(m) for m in d.get("messages", [])],
             turns_count=d.get("turns_count", 0),
+            active_skills=d.get("active_skills", []),
+            is_e2e=d.get("is_e2e", False),
+            cli_session_id=d.get("cli_session_id", ""),
         )
 
 
@@ -323,9 +384,13 @@ class SessionManager:
         os.makedirs(pdir, exist_ok=True)
         return pdir
 
-    def get_workspace_dir(self):
-        """Dedicated CLI working directory for this project to maintain isolated AI session states."""
-        wdir = os.path.join(self.get_project_dir(), "workspace")
+    def get_workspace_dir(self, session_id=None):
+        """Dedicated CLI working directory for this session to maintain isolated AI session states."""
+        sid = session_id or self.active_session_id
+        if sid:
+            wdir = os.path.join(self.get_project_dir(), "workspaces", sid)
+        else:
+            wdir = os.path.join(self.get_project_dir(), "workspace")
         os.makedirs(wdir, exist_ok=True)
         return wdir
 

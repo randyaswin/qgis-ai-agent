@@ -39,7 +39,7 @@ def build(system, context, skills_text, user, continuing, session_history=None):
         segs.append(system)
     if context:
         segs.append("# Current QGIS state (live, injected automatically)\n" + context)
-    if session_history:
+    if session_history and not continuing:
         segs.append(session_history)
     if skills_text:
         segs.append(skills_text)

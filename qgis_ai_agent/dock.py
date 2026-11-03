@@ -341,7 +341,7 @@ def render_user_message_html(text, attachments=None, timestamp=""):
     )
 
 
-def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_success=True, is_running=False, img_base64=None):
+def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_success=True, is_running=False, img_base64=None, duration=None):
     """Render a sleek vertical timeline tool node matching reference design."""
     if is_running:
         dot_color = "#38bdf8"
@@ -350,11 +350,18 @@ def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_succe
     else:
         dot_color = "#ef4444"
 
+    dur_str = f" &bull; <span style='color: #64748b; font-size: 10px;'>{duration}s</span>" if (duration and not is_running) else ""
     header_desc = f"{name} &bull; {primary_arg}" if primary_arg else name
 
     in_val = html.escape(in_str or "()")
     if is_running:
-        out_cell = "<span style='color: #38bdf8; font-family: monospace; font-size: 10px; font-style: italic;'>Running...</span>"
+        out_cell = (
+            "<div style='background-color: #0c2340; border: 1px solid #1e4976; "
+            "border-radius: 4px; padding: 4px 8px; color: #38bdf8; "
+            "font-family: monospace; font-size: 10px; line-height: 1.45; font-style: italic;'>"
+            "⏳ Executing MCP tool in QGIS..."
+            "</div>"
+        )
     else:
         out_bg = "#0d1117" if is_success else "#1c1418"
         out_border = "#21262d" if is_success else "#7f1d1d"
@@ -399,7 +406,7 @@ def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_succe
         f"<td valign='top' style='padding-left: 10px; padding-bottom: 10px;'>"
         f"<div style='line-height: 16px;'>"
         f"<b style='color: #f8fafc; font-size: 11px;'>{html.escape(category)}</b>&nbsp;&nbsp;"
-        f"<span style='color: #cbd5e1; font-size: 11px;'>{header_desc}</span>"
+        f"<span style='color: #cbd5e1; font-size: 11px;'>{header_desc}</span>{dur_str}"
         f"</div>"
         f"{sub_table}"
         f"{img_html}"
@@ -427,6 +434,35 @@ def render_thinking_node_html(text="Thought for 1s"):
     )
 
 
+def render_streaming_thinking_html(text="", elapsed=0):
+    """Render live streaming thinking node while agent is actively reasoning."""
+    clean_text = html.escape(text.strip())
+    if clean_text:
+        clean_text = clean_text.replace("\n", "<br>")
+        content = (
+            f"<div style='margin-top: 4px; padding: 5px 8px; background-color: #0d1527; "
+            f"border-left: 2px solid #818cf8; border-radius: 3px; color: #94a3b8; "
+            f"font-family: sans-serif; font-size: 10.5px; font-style: italic; line-height: 1.45; word-break: break-all;'>"
+            f"{clean_text}"
+            f"</div>"
+        )
+    else:
+        content = ""
+    return (
+        f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 0;'>"
+        f"<tr>"
+        f"<td width='20' valign='top' align='center' style='border-right: 2px solid #334155; padding-right: 8px;'>"
+        f"<span style='color: #818cf8; font-size: 11px; line-height: 16px;'>💭</span>"
+        f"</td>"
+        f"<td valign='top' style='padding-left: 10px; padding-bottom: 6px;'>"
+        f"<span style='color: #818cf8; font-size: 11px; font-weight: bold;'>Thinking ({elapsed}s)...</span>"
+        f"{content}"
+        f"</td>"
+        f"</tr>"
+        f"</table>"
+    )
+
+
 class AgentDock(QDockWidget):
     def __init__(self, iface, server):
         super().__init__("AI Map Agent")
@@ -439,14 +475,15 @@ class AgentDock(QDockWidget):
         self._current_model_header = ""
         self._last_tool_call = {}
         self._active_tool_pos = None
+        self._active_running_tool = None
+        self._thinking_active = False
+        self._thinking_start_time = 0
+        self._thinking_text = ""
+        self._thinking_pos = None
+        self._in_explicit_tag = False
         self._last_event_time = 0
         self.message_queue = []
         self.attachments = []
-        self._running_words = [
-            "Thinking", "Analyzing", "Calculating", "Querying", "Synthesizing",
-            "Inspecting", "Buffering", "Projecting", "Rendering", "Drafting",
-            "Orchestrating", "Formatting", "Verifying", "Refining", "Solving"
-        ]
         s = QSettings()
 
         # Session Manager bound to QGIS project
@@ -459,9 +496,9 @@ class AgentDock(QDockWidget):
         self.server.tool_completed.connect(self._on_tool_completed)
         self.server.tool_failed.connect(self._on_tool_failed)
 
-        # Pulse timer for running indicator
+        # 1-second pulse timer for live thinking stream elapsed timer & queue UI
         self.indicator_timer = QTimer(self)
-        self.indicator_timer.setInterval(2200)
+        self.indicator_timer.setInterval(1000)
         self.indicator_timer.timeout.connect(self._pulse_indicator)
 
         # Internal configuration storage
@@ -612,29 +649,40 @@ class AgentDock(QDockWidget):
         """)
         lay.addWidget(self.log, 1)
 
-        # Process Indicator Bar (Claude Code style running indicator)
+        # Queue & Interrupt Notification Bar (Only shown when user queues a new message while process is running)
         self.indicator_frame = QFrame()
         self.indicator_frame.setStyleSheet("""
             QFrame {
-                background-color: #1e1e2d;
-                border: 1px solid #3b3b54;
+                background-color: #172554;
+                border: 1px solid #1e40af;
                 border-radius: 4px;
-                padding: 2px 6px;
+                padding: 3px 8px;
             }
         """)
         ind_lay = QHBoxLayout(self.indicator_frame)
         ind_lay.setContentsMargins(6, 2, 6, 2)
-        self.indicator_label = QLabel("Thinking…")
-        self.indicator_label.setStyleSheet("color: #a78bfa; font-weight: bold; font-size: 11px;")
         self.queue_label = QLabel("")
-        self.queue_label.setStyleSheet("color: #38bdf8; font-size: 11px; margin-left: 8px;")
-        ind_lay.addWidget(self.indicator_label)
+        self.queue_label.setStyleSheet("color: #7dd3fc; font-weight: bold; font-size: 11px;")
         ind_lay.addWidget(self.queue_label)
         ind_lay.addStretch()
         self.interrupt_btn = QPushButton("⚡ Interrupt")
-        self.interrupt_btn.setToolTip("Interrupt the running process immediately with your next message")
-        self.interrupt_btn.setStyleSheet("background-color: #dc2626; color: white; font-size: 10px; padding: 2px 6px; border-radius: 3px;")
+        self.interrupt_btn.setToolTip("Interrupt active execution immediately to send queued message")
+        self.interrupt_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #dc2626;
+                color: #ffffff;
+                font-size: 11px;
+                font-weight: bold;
+                padding: 3px 10px;
+                border: none;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #ef4444;
+            }
+        """)
         self.interrupt_btn.clicked.connect(self._interrupt_now)
+        self.interrupt_btn.hide()
         ind_lay.addWidget(self.interrupt_btn)
         self.indicator_frame.hide()
         lay.addWidget(self.indicator_frame)
@@ -889,6 +937,10 @@ class AgentDock(QDockWidget):
 
     def _clear_chat_log(self):
         self._active_tool_pos = None
+        self._active_running_tool = None
+        self._thinking_active = False
+        self._thinking_pos = None
+        self._thinking_text = ""
         self.log.clear()
 
     def _set_cli(self, name):
@@ -925,6 +977,10 @@ class AgentDock(QDockWidget):
         except Exception:
             pass
         self._active_tool_pos = None
+        self._active_running_tool = None
+        self._thinking_active = False
+        self._thinking_pos = None
+        self._thinking_text = ""
         self.log.clear()
         sess = self.session_manager.get_active_session()
         for m in sess.messages:
@@ -1015,26 +1071,80 @@ class AgentDock(QDockWidget):
     def _clean_ansi(self, text):
         return ANSI.sub("", text).replace("\r\n", "\n").replace("\r", "\n")
 
-    def _on_cli_output(self, text):
-        clean = self._clean_ansi(text)
-        if not clean:
+    def _start_thinking_node(self):
+        """Starts a live streaming thinking node in the chat log."""
+        if self._thinking_active:
             return
-        self._current_assistant_text += clean
+        self._thinking_active = True
+        self._thinking_start_time = time.time()
+        self._thinking_text = ""
+        self._in_explicit_tag = False
+        node_html = render_streaming_thinking_html(text="", elapsed=0)
 
-        # Strip raw thinking tags if model outputs them in stream
-        lower_clean = clean.lower()
-        if "<thinking>" in lower_clean or "<thought>" in lower_clean:
-            clean = re.sub(r"<\/?(thinking|thought)>", "", clean, flags=re.I).strip()
-            if not clean:
-                return
+        c = self.log.textCursor()
+        c.movePosition(QTextCursor.MoveOperation.End)
+        if c.positionInBlock() > 0:
+            c.insertBlock()
+        start_pos = c.position()
+        c.insertHtml(node_html)
+        c.insertBlock()
+        end_pos = c.position()
+        self.log.setTextCursor(c)
+        self.log.ensureCursorVisible()
+        self._thinking_pos = (start_pos, end_pos)
 
+    def _update_thinking_stream(self, append_text=""):
+        """Updates the streaming thinking text or elapsed timer in the active thinking node."""
+        if not self._thinking_active or not self._thinking_pos:
+            return
+        if append_text:
+            self._thinking_text += append_text
+        elapsed = max(0, round(time.time() - self._thinking_start_time))
+        preview_text = self._thinking_text[-1200:] if len(self._thinking_text) > 1200 else self._thinking_text
+        node_html = render_streaming_thinking_html(text=preview_text, elapsed=elapsed)
+
+        start_pos, end_pos = self._thinking_pos
+        doc_len = self.log.document().characterCount()
+        if start_pos <= doc_len and end_pos <= doc_len:
+            rep_c = self.log.textCursor()
+            rep_c.setPosition(start_pos)
+            rep_c.setPosition(end_pos, QTextCursor.MoveMode.KeepAnchor)
+            rep_c.insertHtml(node_html)
+            rep_c.insertBlock()
+            self._thinking_pos = (start_pos, rep_c.position())
+            self.log.setTextCursor(rep_c)
+            self.log.ensureCursorVisible()
+
+    def _finalize_thinking_node(self):
+        """Replaces the live streaming thinking node with a compact 'Thought for Xs' node."""
+        if not self._thinking_active:
+            return
+        elapsed = max(1, round(time.time() - self._thinking_start_time))
+        final_html = render_thinking_node_html(f"Thought for {elapsed}s")
+
+        if self._thinking_pos:
+            start_pos, end_pos = self._thinking_pos
+            doc_len = self.log.document().characterCount()
+            if start_pos <= doc_len and end_pos <= doc_len:
+                rep_c = self.log.textCursor()
+                rep_c.setPosition(start_pos)
+                rep_c.setPosition(end_pos, QTextCursor.MoveMode.KeepAnchor)
+                rep_c.insertHtml(final_html)
+                rep_c.insertBlock()
+                self.log.setTextCursor(rep_c)
+                self.log.ensureCursorVisible()
+
+        self._thinking_active = False
+        self._thinking_pos = None
+        self._thinking_text = ""
+        self._in_explicit_tag = False
+        self._last_event_time = time.time()
+
+    def _stream_agent_text(self, text):
+        if not text:
+            return
+        self._current_assistant_text += text
         if not self.is_agent_streaming:
-            now = time.time()
-            elapsed = max(0, round(now - (self._last_event_time or self.start_time or now)))
-            if elapsed >= 1:
-                self._append_html(render_thinking_node_html(f"Thought for {elapsed}s"))
-                self._last_event_time = now
-
             cli_label = self.cli.currentData()
             model_info = self.model_combo.currentData() or self.model_combo.currentText().strip()
             effort_info = self.effort_combo.currentData()
@@ -1058,39 +1168,116 @@ class AgentDock(QDockWidget):
         c = self.log.textCursor()
         c.movePosition(QTextCursor.MoveOperation.End)
         self.log.setTextCursor(c)
-        c.insertText(clean)
+        c.insertText(text)
         self.log.ensureCursorVisible()
+
+    def _on_cli_output(self, text):
+        clean = self._clean_ansi(text)
+        if not clean:
+            return
+
+        rem = clean
+        while rem:
+            if not self._in_explicit_tag:
+                m_open = re.search(r"<(?:thinking|thought)>", rem, re.IGNORECASE)
+                if m_open:
+                    pre = rem[:m_open.start()]
+                    if pre.strip():
+                        self._finalize_thinking_node()
+                        self._stream_agent_text(pre)
+                    rem = rem[m_open.end():]
+                    self._in_explicit_tag = True
+                    if not self._thinking_active:
+                        self._start_thinking_node()
+                else:
+                    self._finalize_thinking_node()
+                    self._stream_agent_text(rem)
+                    rem = ""
+            else:
+                m_close = re.search(r"<\/(?:thinking|thought)>", rem, re.IGNORECASE)
+                if m_close:
+                    thought_chunk = rem[:m_close.start()]
+                    self._update_thinking_stream(thought_chunk)
+                    self._finalize_thinking_node()
+                    self._in_explicit_tag = False
+                    rem = rem[m_close.end():]
+                else:
+                    self._update_thinking_stream(rem)
+                    rem = ""
 
     def _on_tool_called(self, name, args):
         self.is_agent_streaming = False
+        self._finalize_thinking_node()
         cat, prim = categorize_tool(name, args)
         in_str = format_in_args(args)
+        now = time.time()
         self._last_tool_call = {
             "name": name,
             "args": args or {},
             "category": cat,
             "primary": prim,
             "in_str": in_str,
+            "start_time": now,
         }
-        # Render elapsed thought duration before this tool call
-        now = time.time()
-        elapsed = max(0, round(now - (self._last_event_time or self.start_time or now)))
-        self._append_html(render_thinking_node_html(f"Thought for {elapsed}s"))
+        self._active_running_tool = name
         self._last_event_time = now
 
-        # Update live indicator label
-        self.indicator_label.setText(f"Running {name}…")
-        self.indicator_frame.show()
+        # Immediately render the tool node with IN visible and OUT in "Running..." state!
+        running_node_html = render_tool_node_html(
+            cat, name, prim, in_str, "", is_success=True, is_running=True
+        )
+
+        c = self.log.textCursor()
+        c.movePosition(QTextCursor.MoveOperation.End)
+        if c.positionInBlock() > 0:
+            c.insertBlock()
+        start_pos = c.position()
+        c.insertHtml(running_node_html)
+        c.insertBlock()
+        end_pos = c.position()
+        self.log.setTextCursor(c)
+        self.log.ensureCursorVisible()
+
+        self._active_tool_pos = (start_pos, end_pos)
 
     def _on_tool_completed(self, name, result):
         clean_summary = format_out_result(name, result)
         cat = self._last_tool_call.get("category", "QGIS")
         prim = self._last_tool_call.get("primary", "")
         in_str = self._last_tool_call.get("in_str", "")
-        # Render clean vertical timeline tool node matching reference design
-        full_node_html = render_tool_node_html(cat, name, prim, in_str, clean_summary, is_success=True, is_running=False, img_base64=None)
-        self._append_html(full_node_html)
 
+        tool_start = self._last_tool_call.get("start_time", time.time())
+        duration = max(0.1, round(time.time() - tool_start, 1))
+
+        # Check for canvas snapshot image
+        img_b64 = None
+        if name == "snapshot_canvas" and isinstance(result, dict) and "image_base64" in result:
+            img_b64 = result["image_base64"]
+
+        full_node_html = render_tool_node_html(
+            cat, name, prim, in_str, clean_summary, is_success=True, is_running=False, img_base64=img_b64, duration=duration
+        )
+
+        # Replace the running placeholder block with the completed block
+        replaced = False
+        if self._active_tool_pos:
+            start_pos, end_pos = self._active_tool_pos
+            doc_len = self.log.document().characterCount()
+            if start_pos <= doc_len and end_pos <= doc_len:
+                rep_c = self.log.textCursor()
+                rep_c.setPosition(start_pos)
+                rep_c.setPosition(end_pos, QTextCursor.MoveMode.KeepAnchor)
+                rep_c.insertHtml(full_node_html)
+                rep_c.insertBlock()
+                self.log.setTextCursor(rep_c)
+                self.log.ensureCursorVisible()
+                replaced = True
+            self._active_tool_pos = None
+
+        if not replaced:
+            self._append_html(full_node_html)
+
+        self._active_running_tool = None
         self.iface.mapCanvas().refresh()
         self._last_event_time = time.time()
 
@@ -1105,13 +1292,40 @@ class AgentDock(QDockWidget):
         )
         self.session_manager.save_project_sessions()
 
+        # Start thinking for next turn
+        self._start_thinking_node()
+
     def _on_tool_failed(self, name, err_msg):
         cat = self._last_tool_call.get("category", "QGIS")
         prim = self._last_tool_call.get("primary", "")
         in_str = self._last_tool_call.get("in_str", "")
-        full_node_html = render_tool_node_html(cat, name, prim, in_str, err_msg, is_success=False, is_running=False)
-        self._append_html(full_node_html)
 
+        tool_start = self._last_tool_call.get("start_time", time.time())
+        duration = max(0.1, round(time.time() - tool_start, 1))
+
+        full_node_html = render_tool_node_html(
+            cat, name, prim, in_str, err_msg, is_success=False, is_running=False, duration=duration
+        )
+
+        replaced = False
+        if self._active_tool_pos:
+            start_pos, end_pos = self._active_tool_pos
+            doc_len = self.log.document().characterCount()
+            if start_pos <= doc_len and end_pos <= doc_len:
+                rep_c = self.log.textCursor()
+                rep_c.setPosition(start_pos)
+                rep_c.setPosition(end_pos, QTextCursor.MoveMode.KeepAnchor)
+                rep_c.insertHtml(full_node_html)
+                rep_c.insertBlock()
+                self.log.setTextCursor(rep_c)
+                self.log.ensureCursorVisible()
+                replaced = True
+            self._active_tool_pos = None
+
+        if not replaced:
+            self._append_html(full_node_html)
+
+        self._active_running_tool = None
         self._last_event_time = time.time()
 
         active_sess = self.session_manager.get_active_session()
@@ -1123,6 +1337,9 @@ class AgentDock(QDockWidget):
             html_card=full_node_html
         )
         self.session_manager.save_project_sessions()
+
+        # Start thinking for next turn
+        self._start_thinking_node()
 
     def _register(self):
         argv = self._adapter()["register"]
@@ -1237,22 +1454,38 @@ class AgentDock(QDockWidget):
 
     def _pulse_indicator(self):
         if not self.runner.running():
-            self.indicator_frame.hide()
+            self._update_queue_ui()
             self.indicator_timer.stop()
             return
-        word = random.choice(self._running_words)
-        self.indicator_label.setText(f"{word}…")
-        if self.message_queue:
-            self.queue_label.setText(f"({len(self.message_queue)} queued)")
+        if self._thinking_active and not self._active_running_tool:
+            self._update_thinking_stream()
+        self._update_queue_ui()
+
+    def _update_queue_ui(self):
+        q_len = len(self.message_queue)
+        if q_len > 0 and self.runner.running():
+            self.queue_label.setText(f"📥 {q_len} queued message(s) waiting")
+            self.interrupt_btn.show()
+            self.indicator_frame.show()
         else:
+            self.interrupt_btn.hide()
             self.queue_label.setText("")
+            self.indicator_frame.hide()
 
     def _interrupt_now(self):
         if not self.runner.running():
             return
         new_text = self.prompt.toPlainText().strip()
-        if not new_text and not self.message_queue:
-            QMessageBox.information(self, "Interrupt", "Type a message in the prompt input to send as an interrupt.")
+        if new_text:
+            self.message_queue.append({
+                "text": new_text,
+                "attachments": list(self.attachments)
+            })
+            self.prompt.clear()
+            self.attachments = []
+            self._update_attachment_bar()
+
+        if not self.message_queue:
             return
 
         self._append_html(
@@ -1260,8 +1493,6 @@ class AgentDock(QDockWidget):
             f"⚡ <b>Interrupted</b> by user with immediate priority.</div>"
         )
         self.runner.stop()
-        # The prompt will trigger _done which can dequeue or start immediately
-        QTimer.singleShot(400, self._run)
 
     def _run(self):
         user = self.prompt.toPlainText().strip()
@@ -1279,7 +1510,7 @@ class AgentDock(QDockWidget):
                     f"<div style='margin: 4px 0; padding: 4px 8px; background-color: #172554; border-left: 3px solid #38bdf8; border-radius: 3px; font-size: 11px; color: #bae6fd;'>"
                     f"📥 <b>Message queued</b> (#{len(self.message_queue)}): <i>{html.escape(user[:120])}...</i></div>"
                 )
-                self.queue_label.setText(f"({len(self.message_queue)} queued)")
+                self._update_queue_ui()
             return
 
         # Dequeue message if prompt is empty but queue exists
@@ -1303,15 +1534,46 @@ class AgentDock(QDockWidget):
 
         outdir = self.outdir.text().strip() or os.path.expanduser("~/qgis-ai-maps")
         os.makedirs(outdir, exist_ok=True)
-        cont = self.cont.isChecked() and not self.first_turn
+        active_sess = self.session_manager.get_active_session()
+        cont = self.cont.isChecked() and (not self.first_turn or active_sess.turns_count > 0)
         self.start_time = time.time()
         self.is_agent_streaming = False
         self._current_assistant_text = ""
 
         REGISTRY.mode = self.skill_mode.currentData()
-        sel = REGISTRY.select(user)
+        catalog = list(REGISTRY.available().keys())
 
-        active_sess = self.session_manager.get_active_session()
+        inherited_skills = []
+        if cont and active_sess.active_skills:
+            # Continuing turn: inherit previously selected skills
+            inherited_skills = list(active_sess.active_skills)
+            new_sel = REGISTRY.select(user) if REGISTRY.mode != "off" else {"pinned": [], "full": [], "hint": [], "scores": {}}
+            new_names = [s.name for s in new_sel.get("pinned", []) + new_sel.get("full", [])]
+            added_names = [n for n in new_names if n not in inherited_skills]
+
+            merged_skill_names = inherited_skills + added_names
+            active_sess.active_skills = merged_skill_names
+            if new_sel.get("is_e2e"):
+                active_sess.is_e2e = True
+
+            loaded_skills = merged_skill_names
+            # If new skills were added this turn, build their full bodies; otherwise a lightweight reminder
+            if added_names:
+                added_objs = [REGISTRY.load(n) for n in added_names if REGISTRY.load(n)]
+                skills_txt = (
+                    f"# Active skills inherited: {', '.join(inherited_skills)}\n\n"
+                    + prompts.skills_block({"pinned": [], "full": added_objs, "hint": [], "scores": new_sel.get("scores", {}), "is_e2e": False}, catalog)
+                )
+            else:
+                skills_txt = f"# Active session skills: {', '.join(merged_skill_names)} (already in context)"
+            sel = {"pinned": [], "full": [REGISTRY.load(n) for n in merged_skill_names if REGISTRY.load(n)], "scores": {}}
+        else:
+            # First turn or fresh session
+            sel = REGISTRY.select(user) if REGISTRY.mode != "off" else {"pinned": [], "full": [], "hint": [], "scores": {}}
+            loaded_skills = [s.name for s in sel.get("pinned", []) + sel.get("full", [])]
+            active_sess.active_skills = list(loaded_skills)
+            active_sess.is_e2e = sel.get("is_e2e", False)
+            skills_txt = prompts.skills_block(sel, catalog) if REGISTRY.mode != "off" else ""
 
         # Model and Effort selection
         selected_model = self.model_combo.currentData() or self.model_combo.currentText().strip() or None
@@ -1322,17 +1584,28 @@ class AgentDock(QDockWidget):
         active_sess.model = selected_model or ""
         active_sess.effort = selected_effort or "default"
 
-        # Assemble prompt: always include live QGIS context, session history, and active skills
+        # Assemble prompt: live QGIS context is injected; session history is omitted when continuing native CLI session
         sys_text = prompts.system_prompt(Qgis.version(), outdir, REGISTRY.mode)
         if self.custom_instructions.strip():
             sys_text += f"\n\n# User custom instructions\n{self.custom_instructions.strip()}"
         live_ctx = self._get_live_context()
-        catalog = list(REGISTRY.available().keys())
-        skills_txt = prompts.skills_block(sel, catalog) if REGISTRY.mode != "off" else ""
-        sess_hist = active_sess.format_history_for_prompt() if active_sess.turns_count > 0 else None
+        sess_hist = active_sess.format_history_for_prompt() if (active_sess.turns_count > 0 and not cont) else None
         full = prompts.build(sys_text, live_ctx, skills_txt, user, continuing=cont, session_history=sess_hist)
 
-        argv = self._adapter()["run"](full, cont, self.auto.isChecked(), model=selected_model, effort=selected_effort)
+        # Explicit CLI Session ID tracking: never rely on global "last"
+        cli_sess_id = active_sess.cli_session_id
+        if not cli_sess_id and self.cli.currentData() == "Gemini CLI":
+            cli_sess_id = str(uuid.uuid4())
+            active_sess.cli_session_id = cli_sess_id
+
+        argv = self._adapter()["run"](
+            full,
+            cont,
+            self.auto.isChecked(),
+            model=selected_model,
+            effort=selected_effort,
+            session_id=cli_sess_id or None
+        )
 
         s = QSettings()
         s.setValue(SKEY + "cli", self.cli.currentData())
@@ -1347,14 +1620,24 @@ class AgentDock(QDockWidget):
         user_card_html = render_user_message_html(user, attachments=attach_list, timestamp=now_str)
 
         # Render Skills & Model Info Badge
-        loaded_skills = [s.name for s in sel["pinned"] + sel["full"]]
         meta_badges = []
+        if cont:
+            turn_no = active_sess.turns_count + 1
+            sess_label = f"🔄 Continuing Turn {turn_no}"
+            if active_sess.cli_session_id:
+                sess_label += f" <span style='color: #94a3b8; font-size: 10px;'>({active_sess.cli_session_id[:8]}...)</span>"
+            meta_badges.append(f"<span style='color: #34d399; font-weight: bold;'>{sess_label}</span>")
         if selected_model:
             meta_badges.append(f"<span style='color: #a5b4fc;'>Model:</span> <code>{html.escape(selected_model)}</code>")
         if selected_effort and selected_effort != "default":
             meta_badges.append(f"<span style='color: #c084fc;'>Effort:</span> <code>{html.escape(selected_effort)}</code>")
         if loaded_skills:
-            meta_badges.append(f"<span style='color: #67e8f9;'>Skills:</span> <b>{', '.join(html.escape(s) for s in loaded_skills)}</b>")
+            inh_count = len(inherited_skills) if cont and inherited_skills else 0
+            if cont and inh_count > 0:
+                skill_tag = f"Skills ({len(loaded_skills)} active, inherited {inh_count}):"
+            else:
+                skill_tag = f"Skills ({len(loaded_skills)}):"
+            meta_badges.append(f"<span style='color: #67e8f9;'>{skill_tag}</span> <b>{', '.join(html.escape(s) for s in loaded_skills)}</b>")
 
         badge_html = ""
         if meta_badges:
@@ -1375,7 +1658,9 @@ class AgentDock(QDockWidget):
         self.session_manager.save_project_sessions()
 
         self._active_tool_pos = None
+        self._active_running_tool = None
         self._last_event_time = time.time()
+        self._start_thinking_node()
 
         self.prompt.clear()
         self.action_btn.setText("■ Stop")
@@ -1394,27 +1679,36 @@ class AgentDock(QDockWidget):
                 background-color: #ef4444;
             }
         """)
-        self.indicator_label.setText(f"{random.choice(self._running_words)}…")
-        self.indicator_frame.show()
+        self._update_queue_ui()
         self.indicator_timer.start()
         try:
-            # Use isolated project workspace for CLI subprocess
-            proj_workspace = self.session_manager.get_workspace_dir()
+            # Use isolated session workspace for CLI subprocess
+            proj_workspace = self.session_manager.get_workspace_dir(active_sess.id)
             self.runner.start(argv, proj_workspace)
         except Exception as e:
             self._on_tool_failed("Subprocess Start", str(e))
             self._done(-1)
 
     def _done(self, code):
+        self._finalize_thinking_node()
         self.indicator_timer.stop()
-        self.indicator_frame.hide()
         self._active_tool_pos = None
+        self._active_running_tool = None
+        self._update_queue_ui()
         elapsed = time.time() - self.start_time if self.start_time else 0
         status_color = "#10b981" if code == 0 else "#ef4444"
         now_str = time.strftime("%H:%M:%S")
 
         # Record assistant response and persist sessions
         active_sess = self.session_manager.get_active_session()
+
+        # Detect and store the exact CLI conversation ID
+        try:
+            proj_workspace = self.session_manager.get_workspace_dir(active_sess.id)
+            active_sess.detect_and_store_cli_session_id(proj_workspace, active_sess.cli)
+        except Exception:
+            pass
+
         raw_asst_text = self._current_assistant_text.strip()
         if raw_asst_text:
             card_html = render_assistant_message_html(

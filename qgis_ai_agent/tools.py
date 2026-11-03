@@ -1238,11 +1238,26 @@ def create_layout(name="Map", title="", subtitle="", credits="", page_size="A4",
 
     if scalebar:
         sb = QgsLayoutItemScaleBar(lay)
-        sb.setStyle("Single Box")
+        sb.setStyle("Double Box")
         sb.setLinkedMap(mp)
         sb.applyDefaultSize()
+        if hasattr(sb, "fillSymbol") and sb.fillSymbol():
+            fs = sb.fillSymbol().clone()
+            fs.setColor(QColor("#1e293b"))
+            sb.setFillSymbol(fs)
+        if hasattr(sb, "alternateFillSymbol") and sb.alternateFillSymbol():
+            afs = sb.alternateFillSymbol().clone()
+            afs.setColor(QColor("#ffffff"))
+            sb.setAlternateFillSymbol(afs)
+        sb.setBackgroundEnabled(True)
+        sb.setBackgroundColor(QColor("#ffffff"))
+        sb.setFrameEnabled(True)
+        sb.setFrameStrokeColor(QColor("#cbd5e1"))
+        sb.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
+        sb.update()
+        sb_h = sb.sizeWithUnits().height()
         lay.addLayoutItem(sb)
-        sb.attemptMove(QgsLayoutPoint(m + 5, H - bottom - 15, mm))
+        sb.attemptMove(QgsLayoutPoint(m + 5, H - bottom - sb_h - 4.0, mm))
 
     if north_arrow:
         na = QgsLayoutItemPicture(lay)
@@ -1717,11 +1732,24 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         na.attemptResize(QgsLayoutSize(arrow_w, 14.0, mm))
 
         sb = QgsLayoutItemScaleBar(lay)
-        sb.setStyle("Line Ticks Up")
+        sb.setStyle("Double Box")
         sb.setLinkedMap(mp)
         sb.applyDefaultSize()
+        if hasattr(sb, "fillSymbol") and sb.fillSymbol():
+            fs = sb.fillSymbol().clone()
+            fs.setColor(QColor("#0f172a"))
+            sb.setFillSymbol(fs)
+        if hasattr(sb, "alternateFillSymbol") and sb.alternateFillSymbol():
+            afs = sb.alternateFillSymbol().clone()
+            afs.setColor(QColor("#ffffff"))
+            sb.setAlternateFillSymbol(afs)
+        sb.setBackgroundEnabled(True)
+        sb.setBackgroundColor(QColor("#ffffff"))
+        sb.setFrameEnabled(True)
+        sb.setFrameStrokeColor(QColor("#cbd5e1"))
+        sb.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
         lay.addLayoutItem(sb)
-        sb.attemptMove(QgsLayoutPoint(right_x + arrow_w + 4.0, curr_y + 2.0, mm))
+        sb.attemptMove(QgsLayoutPoint(right_x + arrow_w + 3.0, curr_y + 1.0, mm))
         curr_y += 16.0
 
         _add_divider(right_x, curr_y, right_w)
@@ -1889,13 +1917,28 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         leg.attemptMove(QgsLayoutPoint(m + map_w - 65.0, map_top + map_h - 60.0, mm))
         leg.attemptResize(QgsLayoutSize(60.0, 55.0, mm))
 
-        # Scale bar
+        # Scale bar with classic cartographic Double Box & parchment fill
         sb = QgsLayoutItemScaleBar(lay)
-        sb.setStyle("Single Box")
+        sb.setStyle("Double Box")
         sb.setLinkedMap(mp)
         sb.applyDefaultSize()
+        if hasattr(sb, "fillSymbol") and sb.fillSymbol():
+            fs = sb.fillSymbol().clone()
+            fs.setColor(QColor("#263238"))
+            sb.setFillSymbol(fs)
+        if hasattr(sb, "alternateFillSymbol") and sb.alternateFillSymbol():
+            afs = sb.alternateFillSymbol().clone()
+            afs.setColor(QColor("#fcfbf7"))
+            sb.setAlternateFillSymbol(afs)
+        sb.setBackgroundEnabled(True)
+        sb.setBackgroundColor(QColor("#fcfbf7"))
+        sb.setFrameEnabled(True)
+        sb.setFrameStrokeColor(QColor("#263238"))
+        sb.setFrameStrokeWidth(QgsLayoutMeasurement(0.25, mm))
+        sb.update()
+        sb_h = sb.sizeWithUnits().height()
         lay.addLayoutItem(sb)
-        sb.attemptMove(QgsLayoutPoint(m + 5.0, map_top + map_h - 12.0, mm))
+        sb.attemptMove(QgsLayoutPoint(m + 5.0, map_top + map_h - sb_h - 4.0, mm))
 
         # North Arrow
         na = QgsLayoutItemPicture(lay)
@@ -1978,13 +2021,20 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         leg.attemptMove(QgsLayoutPoint(right_x, map_top + 23.0, mm))
         leg.attemptResize(QgsLayoutSize(right_w, map_h - 25.0, mm))
 
-        # Scale bar inside map
+        # Scale bar inside map with clean pill badge
         sb = QgsLayoutItemScaleBar(lay)
-        sb.setStyle("Line Ticks Up")
+        sb.setStyle("Stepped Line")
         sb.setLinkedMap(mp)
         sb.applyDefaultSize()
+        sb.setBackgroundEnabled(True)
+        sb.setBackgroundColor(QColor("#ffffff"))
+        sb.setFrameEnabled(True)
+        sb.setFrameStrokeColor(QColor("#cbd5e1"))
+        sb.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
+        sb.update()
+        sb_h = sb.sizeWithUnits().height()
         lay.addLayoutItem(sb)
-        sb.attemptMove(QgsLayoutPoint(m + 4.0, map_top + map_h - 10.0, mm))
+        sb.attemptMove(QgsLayoutPoint(m + 4.0, map_top + map_h - sb_h - 4.0, mm))
 
         # Credits
         if credits:
@@ -2105,13 +2155,28 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_cred.attemptMove(QgsLayoutPoint(m + W * 0.48, bot_y + 2.0, mm))
         lbl_cred.attemptResize(QgsLayoutSize(W * 0.48, bottom_h - 4.0, mm))
 
-        # Scale bar & North arrow inside map
+        # Scale bar & North arrow inside map with high-visibility Double Box
         sb = QgsLayoutItemScaleBar(lay)
-        sb.setStyle("Line Ticks Up")
+        sb.setStyle("Double Box")
         sb.setLinkedMap(mp)
         sb.applyDefaultSize()
+        if hasattr(sb, "fillSymbol") and sb.fillSymbol():
+            fs = sb.fillSymbol().clone()
+            fs.setColor(QColor("#0f172a"))
+            sb.setFillSymbol(fs)
+        if hasattr(sb, "alternateFillSymbol") and sb.alternateFillSymbol():
+            afs = sb.alternateFillSymbol().clone()
+            afs.setColor(QColor("#f8fafc"))
+            sb.setAlternateFillSymbol(afs)
+        sb.setBackgroundEnabled(True)
+        sb.setBackgroundColor(QColor("#ffffff"))
+        sb.setFrameEnabled(True)
+        sb.setFrameStrokeColor(QColor("#94a3b8"))
+        sb.setFrameStrokeWidth(QgsLayoutMeasurement(0.25, mm))
+        sb.update()
+        sb_h = sb.sizeWithUnits().height()
         lay.addLayoutItem(sb)
-        sb.attemptMove(QgsLayoutPoint(m + 4.0, map_top + map_h - 10.0, mm))
+        sb.attemptMove(QgsLayoutPoint(m + 4.0, map_top + map_h - sb_h - 4.0, mm))
 
         na = QgsLayoutItemPicture(lay)
         na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
@@ -2162,11 +2227,26 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         _apply_grid(mp, main_ext)
 
     sb = QgsLayoutItemScaleBar(lay)
-    sb.setStyle("Line Ticks Up")
+    sb.setStyle("Double Box" if is_relief else "Stepped Line")
     sb.setLinkedMap(mp)
     sb.applyDefaultSize()
+    if hasattr(sb, "fillSymbol") and sb.fillSymbol():
+        fs = sb.fillSymbol().clone()
+        fs.setColor(QColor("#1e293b"))
+        sb.setFillSymbol(fs)
+    if hasattr(sb, "alternateFillSymbol") and sb.alternateFillSymbol():
+        afs = sb.alternateFillSymbol().clone()
+        afs.setColor(QColor("#ffffff"))
+        sb.setAlternateFillSymbol(afs)
+    sb.setBackgroundEnabled(True)
+    sb.setBackgroundColor(QColor("#ffffff"))
+    sb.setFrameEnabled(True)
+    sb.setFrameStrokeColor(QColor("#cbd5e1"))
+    sb.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
+    sb.update()
+    sb_h = sb.sizeWithUnits().height()
     lay.addLayoutItem(sb)
-    sb.attemptMove(QgsLayoutPoint(m + 5.0, map_top + map_h - 12.0, mm))
+    sb.attemptMove(QgsLayoutPoint(m + 5.0, map_top + map_h - sb_h - 4.0, mm))
 
     na = QgsLayoutItemPicture(lay)
     na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")

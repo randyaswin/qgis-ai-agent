@@ -103,6 +103,7 @@ Rules:
      - For thematic and infographic maps, do NOT force a coordinate grid (`grid=False`). If a grid is needed, annotations must be InsideMapFrame and only on Left & Bottom edges.
      - Clean human-readable legend labels: remove internal underscores, raw column names, or obscure abbreviations.
      - North arrow and scale bar must be placed safely inside the map frame without overlapping outside cards or neatlines.
+     - Scale Bar Cartography & Bounds Safety: Never use monotonous single ticks or raw unstyled lines. Always use `Double Box` (alternating dark/light segments) or `Stepped Line` encased in a subtle card container (`background="#ffffff"`, `frame_color="#cbd5e1"`). Position using `position="bottom-left"` or `position="bottom-right"`, and verify that the scale bar bottom edge never protrudes or crosses outside the map frame neatline.
 - STRICT PROJECT ISOLATION & RECOVERY RULES (Recovery ONLY for Already-Saved Projects):
   * Fresh / Unsaved Projects: If the active QGIS project has not been saved yet (no file name on disk) or is empty (0 layers), NEVER attempt recovery and NEVER call `open_project()` to load any previously saved or autosaved project. You MUST start fresh and work strictly in the current active session.
   * Saved Projects Only: Recovery and multi-iteration autosave are STRICTLY RESTRICTED to projects that have already been saved to a `.qgz` or `.qgs` file by the user (`p.fileName()` exists on disk). Autosave writes directly into that active project file.

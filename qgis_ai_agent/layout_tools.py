@@ -387,13 +387,16 @@ def add_layout_legend(layout=None, x=0, y=0, width=None, height=None, item_id=No
     lg.setTitle(title or "")
     lay.addLayoutItem(lg)
     lg.setLinkedMap(_map(lay, map_id))
-    root = lg.model().rootGroup()
     if layers:
         lg.setAutoUpdateModel(False)
-        wanted = [_layer(n).id() for n in layers]
-        root.removeAllChildren()
-        for lid in wanted:
-            root.addLayer(QgsProject.instance().mapLayer(lid))
+        from qgis.core import QgsLayerTree
+        custom_tree = QgsLayerTree()
+        for n in layers:
+            custom_tree.addLayer(_layer(n))
+        lg.model().setRootGroup(custom_tree)
+        root = custom_tree
+    else:
+        root = lg.model().rootGroup()
     if hide_layer_titles:
         from qgis.core import QgsLegendRenderer
         lg.setAutoUpdateModel(False)
@@ -429,20 +432,25 @@ def add_layout_legend(layout=None, x=0, y=0, width=None, height=None, item_id=No
     return {"item_id": lg.id() or lg.uuid()}
 
 
-@tool("Add a scale bar linked to a map frame. Choose style, units and segments, e.g. '0 100 200 300 400 500 m' street-map bars.",
-      {"layout": S("string", ""), "x": S("number", "mm"), "y": S("number", "mm"), "item_id": S("string", ""),
+@tool("Add a scale bar linked to a map frame. Choose style, units and segments, e.g. 'Double Box' (alternating black/white), 'Single Box', 'Line Ticks Up', 'Line Ticks Middle', 'Stepped Line'. Supports safe auto-positioning ('bottom-left', 'bottom-right', 'top-left') so the bar never spills outside the map frame.",
+      {"layout": S("string", ""), "x": S("number", "mm (optional if position is given)"), "y": S("number", "mm (optional if position is given)"), "item_id": S("string", ""),
        "map_id": S("string", "linked map id, default first map"),
-       "style": S("string", "'Single Box' | 'Double Box' | 'Line Ticks Up' | 'Line Ticks Middle' | 'Line Ticks Down' | 'Stepped Line' | 'Hollow' | 'Numeric'"),
+       "style": S("string", "'Double Box' | 'Single Box' | 'Line Ticks Up' | 'Line Ticks Middle' | 'Line Ticks Down' | 'Stepped Line' | 'Hollow' | 'Numeric'"),
+       "position": S("string", "'bottom-left' | 'bottom-right' | 'top-left' | 'top-right' (auto-positions safely inside the map)"),
        "units": S("string", "m|km|mi|ft, default km (or m for large scales)"),
        "segments": S("integer", "right segments, default 4"), "units_per_segment": S("number", "e.g. 100 for 100 m steps"),
-       "height": S("number", "bar height mm, default 2"), "font_size": S("number", "pt, default 8"),
-       "color": S("string", "bar and text colour, default '#222222'"), "background": S("string", "optional fill behind bar")})
-def add_layout_scalebar(layout=None, x=0, y=0, item_id=None, map_id=None, style="Line Ticks Up", units=None, segments=4,
-                        units_per_segment=None, height=2, font_size=8, color="#222222", background=None, **kwargs):
+       "height": S("number", "bar height mm, default 2.5"), "font_size": S("number", "pt, default 8"),
+       "color": S("string", "primary bar and text colour, default '#1e293b'"),
+       "secondary_color": S("string", "alternating box fill colour, default '#ffffff'"),
+       "background": S("string", "optional fill behind bar (default '#ffffff' card)"),
+       "frame_color": S("string", "optional border stroke for the background card (default '#cbd5e1')")})
+def add_layout_scalebar(layout=None, x=None, y=None, item_id=None, map_id=None, style="Double Box", position=None,
+                        units=None, segments=4, units_per_segment=None, height=2.5, font_size=8, color="#1e293b",
+                        secondary_color="#ffffff", background="#ffffff", frame_color="#cbd5e1", **kwargs):
     lay = _lay(layout or kwargs.get("layout_name") or kwargs.get("name"))
     mp = _map(lay, map_id)
     sb = QgsLayoutItemScaleBar(lay)
-    sb.setStyle(style)
+    sb.setStyle(style or "Double Box")
     sb.setLinkedMap(mp)
     du = Qgis.DistanceUnit
     if not units:
@@ -458,16 +466,70 @@ def add_layout_scalebar(layout=None, x=0, y=0, item_id=None, map_id=None, style=
         sb.setUnitsPerSegment(float(units_per_segment))
     sb.setHeight(float(height))
     sb.setTextFormat(_fmt(font_size, color))
+
+    # Sophisticated fill & line styling (distinct cartographic aesthetics)
+    if hasattr(sb, "fillSymbol") and sb.fillSymbol():
+        fs = sb.fillSymbol().clone()
+        fs.setColor(QColor(color))
+        sb.setFillSymbol(fs)
+    if hasattr(sb, "alternateFillSymbol") and sb.alternateFillSymbol():
+        afs = sb.alternateFillSymbol().clone()
+        afs.setColor(QColor(secondary_color or "#ffffff"))
+        sb.setAlternateFillSymbol(afs)
     if hasattr(sb, "lineSymbol") and sb.lineSymbol():
         ls = sb.lineSymbol().clone()
         ls.setColor(QColor(color))
+        ls.setWidth(0.25)
         sb.setLineSymbol(ls)
-    if background:
+
+    # Sleek card container so the scalebar never blends into background features
+    if background and background != "none":
         sb.setBackgroundEnabled(True)
         sb.setBackgroundColor(QColor(background))
-    _place(lay, sb, x, y, item_id=item_id)
+        if hasattr(sb, "setBoxContentSpace"):
+            sb.setBoxContentSpace(1.8)
+    if frame_color and frame_color != "none":
+        sb.setFrameEnabled(True)
+        sb.setFrameStrokeColor(QColor(frame_color))
+        sb.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, MM))
+
     sb.update()
-    return {"item_id": sb.id() or sb.uuid(), "units": label}
+    sb_w = sb.sizeWithUnits().width()
+    sb_h = sb.sizeWithUnits().height()
+
+    # Smart positioning & safe bounds calculation relative to linked map
+    map_pos = mp.positionWithUnits()
+    map_sz = mp.sizeWithUnits()
+    map_x = map_pos.x()
+    map_y = map_pos.y()
+    map_bottom = map_y + map_sz.height()
+    map_right = map_x + map_sz.width()
+
+    pad = 4.0
+    pos_choice = position or kwargs.get("anchor")
+    if pos_choice == "bottom-left" or (x is None and y is None and pos_choice != "bottom-right"):
+        target_x = map_x + pad
+        target_y = map_bottom - sb_h - pad
+    elif pos_choice == "bottom-right":
+        target_x = map_right - sb_w - pad
+        target_y = map_bottom - sb_h - pad
+    elif pos_choice == "top-left":
+        target_x = map_x + pad
+        target_y = map_y + pad
+    elif pos_choice == "top-right":
+        target_x = map_right - sb_w - pad
+        target_y = map_y + pad
+    else:
+        target_x = float(x) if x is not None else (map_x + pad)
+        target_y = float(y) if y is not None else (map_bottom - sb_h - pad)
+
+    # CRITICAL: Automatically clamp target_y so the scale bar NEVER crosses outside the map frame!
+    if map_x <= target_x <= map_right and target_y + sb_h > map_bottom:
+        target_y = max(map_y + 2.0, map_bottom - sb_h - 2.5)
+
+    _place(lay, sb, target_x, target_y, item_id=item_id)
+    sb.update()
+    return {"item_id": sb.id() or sb.uuid(), "units": label, "style": sb.style(), "x": round(target_x, 1), "y": round(target_y, 1)}
 
 
 @tool("Add a north arrow linked to a map frame (rotates with the map).",
@@ -763,9 +825,9 @@ def create_wayfinding_layout(name="Wayfinding_Map", title="Information Map", sub
     add_layout_legend(name, m + 2 * u, map_y + 15 * u, leg_w - 4 * u, map_h - 18 * u, "legend", "main_map", title="",
                       layers=legend_layers, item_size=9 * u, layer_title_size=9.5 * u, hide_layer_titles=False,
                       symbol_width=7 * u, symbol_height=5 * u, text_color=panel_txt, background="none", frame_color="none")
-    add_layout_north_arrow(name, main_x + 5 * u, map_y + 5 * u, 11 * u, "north_arrow", "main_map", "default", "#222222")
-    add_layout_scalebar(name, main_x + 21 * u, map_y + 6 * u, "scalebar", "main_map", "Line Ticks Up", segments=5,
-                        height=1.6 * u, font_size=10 * u, color="#222222")
+    add_layout_north_arrow(name, main_x + 5 * u, map_y + 5 * u, 11 * u, "north_arrow", "main_map", "default", "#1e293b")
+    add_layout_scalebar(name, main_x + 21 * u, map_y + 6 * u, "scalebar", "main_map", "Double Box", segments=4,
+                        height=2.0 * u, font_size=9 * u, color="#1e293b", background="#ffffff", frame_color="#cbd5e1")
 
     # Footer
     if footer:

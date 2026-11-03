@@ -6,7 +6,7 @@ import sys
 from qgis.PyQt.QtCore import QObject, QProcess, QProcessEnvironment, pyqtSignal
 
 BRIDGE = os.path.join(os.path.dirname(__file__), "mcp_bridge.py")
-PY = shutil.which("python3") or sys.executable
+PY = shutil.which("python3") or shutil.which("python") or sys.executable
 
 
 # name -> run(prompt, continue, auto_approve, model, effort) -> argv, plus MCP registration command.
@@ -24,12 +24,13 @@ ADAPTERS = {
             ("gpt-oss-120b-medium", "gpt-oss-120b-medium"),
         ],
         "supports_effort": True,
-        "run": lambda p, cont, auto, model=None, effort=None: (
-            ["agy", "-p", p]
-            + (["-c"] if cont else [])
+        "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
+            ["agy"]
+            + ([f"--conversation={session_id}"] if (cont and session_id) else (["-c"] if cont else []))
             + (["--dangerously-skip-permissions"] if auto else [])
             + (["--model", model] if model else [])
             + (["--effort", effort.lower()] if effort and effort.lower() != "default" else [])
+            + ["-p", p]
         ),
         "register": ["agy", "mcp", "add", "qgis", PY, BRIDGE],
     },
@@ -43,12 +44,13 @@ ADAPTERS = {
             ("claude-3-5-haiku", "claude-3-5-haiku"),
         ],
         "supports_effort": True,
-        "run": lambda p, cont, auto, model=None, effort=None: (
-            ["claude", "-p", p]
-            + (["-c"] if cont else [])
+        "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
+            ["claude"]
+            + (["--resume", session_id] if (cont and session_id) else (["-c"] if cont else []))
             + (["--dangerously-skip-permissions"] if auto else ["--allowedTools", "mcp__qgis"])
             + (["--model", model] if model else [])
             + (["--effort", effort.lower()] if effort and effort.lower() != "default" else [])
+            + ["-p", p]
         ),
         "register": ["claude", "mcp", "add", "--scope", "user", "qgis", PY, BRIDGE],
     },
@@ -62,11 +64,12 @@ ADAPTERS = {
             ("gemini-1.5-flash", "gemini-1.5-flash"),
         ],
         "supports_effort": False,
-        "run": lambda p, cont, auto, model=None, effort=None: (
-            ["gemini", "-p", p]
-            + (["--resume", "latest"] if cont else [])
+        "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
+            ["gemini"]
+            + (["--resume", session_id] if (cont and session_id) else (["--resume", "latest"] if cont else (["--session-id", session_id] if session_id else [])))
             + (["--yolo"] if auto else ["--allowed-mcp-server-names", "qgis"])
             + (["-m", model] if model else [])
+            + ["-p", p]
         ),
         "register": ["gemini", "mcp", "add", "--scope", "user", "qgis", PY, BRIDGE],
     },
@@ -79,8 +82,8 @@ ADAPTERS = {
             ("gpt-4.5-preview", "gpt-4.5-preview"),
         ],
         "supports_effort": True,
-        "run": lambda p, cont, auto, model=None, effort=None: (
-            (["codex", "exec", "resume", "--last"] if cont else ["codex", "exec"])
+        "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
+            (["codex", "exec", "resume", session_id] if (cont and session_id) else (["codex", "exec", "resume", "--last"] if cont else ["codex", "exec"]))
             + (["--full-auto", "--skip-git-repo-check"] if auto else ["--skip-git-repo-check"])
             + (["-m", model] if model else [])
             + (["-c", f'model_reasoning_effort="{effort.lower()}"'] if effort and effort.lower() != "default" else [])
@@ -112,8 +115,20 @@ class CliRunner(QObject):
         self.proc = QProcess(self)
         env = QProcessEnvironment.systemEnvironment()
         env.insert("NO_COLOR", "1")
-        env.insert("PATH", os.pathsep.join([os.path.expanduser("~/.local/bin"),
-                                            os.path.expanduser("~/.npm-global/bin"), env.value("PATH")]))
+
+        # Cross-platform binary discovery (Linux, macOS Homebrew, Windows npm/AppData)
+        extra_paths = [
+            os.path.expanduser("~/.local/bin"),
+            os.path.expanduser("~/.npm-global/bin"),
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            os.path.join(os.environ.get("APPDATA", ""), "npm"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "npm"),
+        ]
+        valid_paths = [p for p in extra_paths if p and os.path.isdir(p)]
+        if valid_paths:
+            env.insert("PATH", os.pathsep.join(valid_paths + [env.value("PATH")]))
+
         self.proc.setProcessEnvironment(env)
         self.proc.setWorkingDirectory(cwd)
         self.proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
@@ -121,7 +136,9 @@ class CliRunner(QObject):
             lambda: self.output.emit(bytes(self.proc.readAllStandardOutput()).decode(errors="replace")))
         self.proc.finished.connect(lambda code, _s: self.finished.emit(code))
         self.proc.errorOccurred.connect(lambda e: self.output.emit(f"\n[process error: {e}]\n"))
-        self.proc.start(argv[0], argv[1:])
+
+        bin_exec = shutil.which(argv[0]) or argv[0]
+        self.proc.start(bin_exec, argv[1:])
 
     def stop(self):
         if self.running():

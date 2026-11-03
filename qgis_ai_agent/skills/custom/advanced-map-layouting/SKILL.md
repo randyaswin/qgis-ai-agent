@@ -239,18 +239,21 @@ add_layout_legend(
     frame_color="#d1d5db"
 )
 
-# Metric Scale Bar on Main Map
+# High-Visibility Scale Bar on Main Map (Safe positioning inside frame)
 add_layout_scalebar(
     layout="Executive_Report_Map",
-    x=16, y=250,
+    position="bottom-left",  # Or explicit x, y with auto-bounds clamp
     item_id="scalebar",
     map_id="main_map",
-    style="Line Ticks Up",
+    style="Double Box",      # Professional alternating fill (never use plain monotonous lines)
     units="km",
     segments=4,
-    units_per_segment=2.5,  # 0, 2.5, 5.0, 7.5, 10.0 km
+    units_per_segment=2.5,   # 0, 2.5, 5.0, 7.5, 10.0 km
     font_size=8,
-    color="#1f2937"
+    color="#1e293b",
+    secondary_color="#ffffff",
+    background="#ffffff",    # Crisp card backdrop so it never blends into raster/vector layers
+    frame_color="#cbd5e1"
 )
 
 # North Arrow
