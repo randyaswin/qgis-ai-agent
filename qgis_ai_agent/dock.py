@@ -481,7 +481,7 @@ def render_streaming_thinking_html(text="", elapsed=0):
 
 class AgentDock(QDockWidget):
     def __init__(self, iface, server):
-        super().__init__("AI Map Agent")
+        super().__init__("QGIS Copilot")
         self.iface, self.server = iface, server
         self.runner = CliRunner(self)
         self.first_turn = True

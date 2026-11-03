@@ -1,5 +1,5 @@
 [general]
-name=QGIS AI Agent
+name=QGIS Copilot
 qgisMinimumVersion=3.34
 qgisMaximumVersion=3.99
 description=Autonomous AI cartography and spatial analysis copilot driven via Model Context Protocol (MCP) and AI CLIs.

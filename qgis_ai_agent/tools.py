@@ -2144,7 +2144,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         # Credits
         if credits:
             lbl_cred = QgsLayoutItemLabel(lay)
-            lbl_cred.setText(f"Data Sources: {credits} | Cartography: QGIS AI Agent")
+            lbl_cred.setText(f"Data Sources: {credits} | Cartography: QGIS Copilot")
             fmt = QgsTextFormat()
             fmt.setSize(7.0)
             fmt.setColor(QColor("#64748b"))
@@ -2277,7 +2277,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_cred.setText(
             f"<div style='font-family:Arial, sans-serif; font-size:6.5px; color:#64748b; line-height:1.2;'>"
             f"<b>Data Sources:</b> {_html.escape(credits or 'Official Government Agencies, OpenStreetMap, Satellite Imagery')} &nbsp;&bull;&nbsp; "
-            f"<b>CRS:</b> {crs_str} &nbsp;&bull;&nbsp; <b>Cartography:</b> QGIS AI Agent"
+            f"<b>CRS:</b> {crs_str} &nbsp;&bull;&nbsp; <b>Cartography:</b> QGIS Copilot"
             f"</div>"
         )
         lay.addLayoutItem(lbl_cred)
@@ -2484,7 +2484,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
             f"<div style='font-family:Arial, sans-serif; text-align:right; color:#94a3b8; font-size:6.5px; line-height:1.3;'>"
             f"<span style='color:#f8fafc; font-weight:bold; font-size:8px;'>RESEARCH INITIATIVE &bull; GIS LAB</span><br>"
             f"Sources: {_html.escape(credits or 'Global Open Data, Earth Observation STAC')}<br>"
-            f"CRS: {p.crs().authid()} &bull; Map Cartography: QGIS AI Agent"
+            f"CRS: {p.crs().authid()} &bull; Map Cartography: QGIS Copilot"
             f"</div>"
         )
         lay.addLayoutItem(lbl_inst)
@@ -2782,7 +2782,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
             f"<div style='font-family:Arial, sans-serif; background:#ffffff; border:1px solid #cbd5e1; border-radius:4px; padding:4px 6px; font-size:6.5px; color:#64748b; line-height:1.25;'>"
             f"<b>Sources:</b> {_html.escape(credits or 'Official Spatial Repositories')} &nbsp;&bull;&nbsp; "
             f"<b>CRS:</b> {crs_code}<br>"
-            f"<b>Platform:</b> QGIS AI Agent &nbsp;&bull;&nbsp; Publication Edition"
+            f"<b>Platform:</b> QGIS Copilot &nbsp;&bull;&nbsp; Publication Edition"
             f"</div>"
         )
         lay.addLayoutItem(lbl_b4)
@@ -2877,7 +2877,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_meta.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
         lbl_meta.setText(
             f"<div style='font-family:Arial, sans-serif; font-size:6.5px; color:#64748b; line-height:1.2; text-align:right;'>"
-            f"Synchronized Dual Extent &bull; Sources: {_html.escape(credits or 'Multi-temporal Datasets')} &bull; QGIS AI Agent"
+            f"Synchronized Dual Extent &bull; Sources: {_html.escape(credits or 'Multi-temporal Datasets')} &bull; QGIS Copilot"
             f"</div>"
         )
         lay.addLayoutItem(lbl_meta)

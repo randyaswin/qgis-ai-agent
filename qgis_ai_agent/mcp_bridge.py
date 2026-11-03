@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stdio MCP server that forwards tool calls to the running QGIS AI Agent plugin.
+"""Stdio MCP server that forwards tool calls to the running QGIS Copilot plugin.
 
 Register once in any AI CLI, e.g.:
     claude mcp add qgis python3 /path/to/mcp_bridge.py
@@ -21,7 +21,7 @@ def qgis_rpc(method, params=None):
         with open(ENDPOINT_FILE) as f:
             ep = json.load(f)
     except FileNotFoundError:
-        raise RuntimeError("QGIS AI Agent plugin is not running. Open QGIS and enable the plugin.")
+        raise RuntimeError("QGIS Copilot plugin is not running. Open QGIS and enable the plugin.")
     _counter[0] += 1
     req = {"token": ep["token"], "id": _counter[0], "method": method, "params": params or {}}
     with socket.create_connection(("127.0.0.1", ep["port"]), timeout=600) as s:
