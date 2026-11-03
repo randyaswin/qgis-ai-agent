@@ -1270,26 +1270,40 @@ def create_layout(name="Map", title="", subtitle="", credits="", page_size="A4",
 
     if scalebar:
         sb = QgsLayoutItemScaleBar(lay)
-        sb.setStyle("Double Box")
+        sb.setStyle("Stepped Line")
         sb.setLinkedMap(mp)
-        sb.applyDefaultSize()
-        if hasattr(sb, "fillSymbol") and sb.fillSymbol():
-            fs = sb.fillSymbol().clone()
-            fs.setColor(QColor("#1e293b"))
-            sb.setFillSymbol(fs)
-        if hasattr(sb, "alternateFillSymbol") and sb.alternateFillSymbol():
-            afs = sb.alternateFillSymbol().clone()
-            afs.setColor(QColor("#ffffff"))
-            sb.setAlternateFillSymbol(afs)
+        du = Qgis.DistanceUnit if hasattr(Qgis, "DistanceUnit") else None
+        units_obj = du.Meters if (du and mp.scale() < 15000) else (du.Kilometers if du else None)
+        if units_obj is not None:
+            sb.applyDefaultSize(units_obj)
+        else:
+            sb.applyDefaultSize()
+        sb.setUnitLabel("m" if mp.scale() < 15000 else "km")
+        sb.setNumberOfSegments(2)
+        sb.setNumberOfSegmentsLeft(0)
+        sb.setHeight(2.0)
+        sb.setBoxContentSpace(1.2)
+        sb.setLabelBarSpace(1.0)
+        if hasattr(sb, "setSegmentSizeMode") and hasattr(Qgis, "ScaleBarSegmentSizeMode"):
+            sb.setSegmentSizeMode(Qgis.ScaleBarSegmentSizeMode.FitWidth)
+            if hasattr(sb, "setMaximumBarWidth"):
+                sb.setMaximumBarWidth(42.0)
+        fmt_s = QgsTextFormat()
+        fmt_s.setFont(QFont("Arial", 6))
+        fmt_s.setSize(6.5)
+        fmt_s.setColor(QColor("#1e293b"))
+        sb.setTextFormat(fmt_s)
         sb.setBackgroundEnabled(True)
         sb.setBackgroundColor(QColor("#ffffff"))
-        sb.setFrameEnabled(True)
-        sb.setFrameStrokeColor(QColor("#cbd5e1"))
-        sb.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
-        sb.update()
-        sb_h = sb.sizeWithUnits().height()
+        sb.setFrameEnabled(False)
         lay.addLayoutItem(sb)
-        sb.attemptMove(QgsLayoutPoint(m + 5, H - bottom - sb_h - 4.0, mm))
+        sb.update()
+        sb_sz = sb.sizeWithUnits()
+        sb_w, sb_h = sb_sz.width(), sb_sz.height()
+        target_x = m + 5.0
+        target_y = max(top + 2.0, (top + (H - top - bottom)) - sb_h - 4.0)
+        sb.attemptMove(QgsLayoutPoint(target_x, target_y, mm))
+        sb.update()
 
     if north_arrow:
         na = QgsLayoutItemPicture(lay)
@@ -1560,18 +1574,9 @@ def add_layout_callout_box(layout=None, x=0, y=0, width=50, height=15, title="",
     return {"callout_added": True, "badge": badge, "title": title}
 
 
-@tool("Create a publication-quality styled print layout with professional themes: 'infographic_disaster' (disaster dashboard with header banner, side metric panels, inset, chart, and multi-bar legends), 'natgeo' (National Geographic: classic neatline borders, serif typography, warm tones), 'relief_topographic' (Swiss/Imhof alpine topo), or 'modern_clean' (executive corporate).",
-      {"name": S("string", "layout name, default 'Map'"),
-       "style_theme": S("string", "'infographic_disaster' | 'infographic_bencana' | 'natgeo' | 'relief_topographic' | 'modern_clean'"),
-       "title": S("string", "main map title"), "subtitle": S("string", "subtitle"),
-       "credits": S("string", "credits and data source"),
-       "extent_layer": S("string", "main study area layer name"),
-       "page_size": S("string", "A4|A3|A2, default A4"),
-       "orientation": S("string", "landscape|portrait, default landscape"),
-       "grid": S("boolean", "include coordinate grid (default false)")})
-@tool("Create a publication-grade themed print layout matching specific cartographic genres: 'planning_official' (formal Kop Peta with right-side metadata block, zoning legend, inset, and neatline), 'infographic_disaster' (situational alert dashboard), 'poster_minimalist' (modern full-bleed city art poster like Tokyo), 'scientific_dark' (dark-mode thematic atlas with gradient colorbar like Cambridge climate risk), 'editorial_infographic' (multi-frame magazine atlas like African soils), 'antique_historical' (sepia engraving like Plan of Rome), 'bento_dashboard' (modern modular bento grid cards with KPI chips and auto-legend), 'dual_comparison' (side-by-side synchronized temporal or scenario comparison), 'corridor_trail' (linear route/river corridor with profile/waypoint strip), 'cyberpunk_hud' (dark sci-fi neon HUD with monospace telemetry), 'nautical_bathymetric' (marine hydrographic chart with nautical ticks and compass rose), 'natgeo' (classic National Geographic parchment, double neatline, serif typography), 'statistical_thematic' (clean choropleth with distribution cards), or 'relief_topographic'. Defaults to A4.",
+@tool("Create a publication-grade themed print layout matching specific cartographic genres: 'poster_minimalist' (modern city art poster like Tokyo), 'antique_historical' (sepia engraving with grid like Plan of Rome), 'landscape_masterplan' (architectural watercolor site plan), 'scientific_dark' (dark-mode thematic atlas with continuous colorbar like Cambridge climate risk), 'editorial_infographic' (multi-frame magazine atlas with hero+inset+KPI stats like African soils), 'infographic_disaster' (situational alert dashboard), 'bento_dashboard' (modern modular bento grid cards with KPI chips and auto-legend), 'planning_official' (formal Kop Peta with right-side metadata block, zoning legend, inset, and neatline), 'dual_comparison' (side-by-side synchronized temporal or scenario comparison), 'corridor_trail' (linear route/river corridor with profile/waypoint strip), 'cyberpunk_hud' (dark sci-fi neon HUD with monospace telemetry), 'nautical_bathymetric' (marine hydrographic chart with nautical ticks and compass rose), 'natgeo' (classic National Geographic parchment, double neatline, serif typography), 'statistical_thematic' (clean choropleth with distribution cards), or 'relief_topographic'. Defaults to A4.",
       {"name": S("string", "layout name"),
-       "style_theme": S("string", "planning_official | infographic_disaster | poster_minimalist | scientific_dark | editorial_infographic | antique_historical | bento_dashboard | dual_comparison | corridor_trail | cyberpunk_hud | nautical_bathymetric | natgeo | statistical_thematic | relief_topographic | modern_clean"),
+       "style_theme": S("string", "poster_minimalist | antique_historical | landscape_masterplan | scientific_dark | editorial_infographic | infographic_disaster | bento_dashboard | planning_official | dual_comparison | corridor_trail | cyberpunk_hud | nautical_bathymetric | natgeo | statistical_thematic | relief_topographic | modern_clean"),
        "title": S("string", "main map title"),
        "subtitle": S("string", "subtitle or administrative region"),
        "credits": S("string", "mandatory real data source attribution"),
@@ -1590,7 +1595,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         QgsLayoutItemShape, QgsFillSymbol, QgsLayoutItemMap, QgsLayoutItemLabel,
         QgsLayoutItemLegend, QgsLayoutItemScaleBar, QgsLayoutItemPicture,
         QgsLayoutPoint, QgsLayoutSize, QgsLayoutMeasurement, QgsLayoutItemMapGrid,
-        QgsLineSymbol, QgsLayoutItemMapOverview
+        QgsLineSymbol, QgsLayoutItemMapOverview, QgsTextFormat
     )
     from qgis.PyQt.QtGui import QColor, QFont
 
@@ -1611,7 +1616,8 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
     mm = QgsUnitTypes.LayoutUnit.LayoutMillimeters if hasattr(QgsUnitTypes, "LayoutUnit") else Qgis.LayoutUnit.Millimeters
 
     th = (style_theme or "planning_official").lower()
-    is_planning = th in ("planning_official", "tata_ruang", "master_plan", "urban_planning", "zoning", "planning", "official")
+    is_landscape_masterplan = th in ("landscape_masterplan", "landscape_plan", "site_plan", "master_plan_landscape", "watercolor_plan", "eco_park", "landscape")
+    is_planning = not is_landscape_masterplan and th in ("planning_official", "tata_ruang", "master_plan", "urban_planning", "zoning", "planning", "official")
     is_infographic = th in ("infographic_bencana", "infographic_disaster", "disaster", "hazard", "bencana")
     is_natgeo = th in ("natgeo", "national_geographic")
     is_statistical = th in ("statistical_thematic", "choropleth", "demographic", "socio_economic", "thematic")
@@ -1687,6 +1693,107 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lay.addLayoutItem(div)
         div.attemptMove(QgsLayoutPoint(rx, cy, mm))
         div.attemptResize(QgsLayoutSize(rw, 0.4, mm))
+
+    def _create_clean_scalebar(target_map, style=None, position="bottom-left", pad=5.0,
+                               custom_x=None, custom_y=None, max_width=42.0, font_family="Arial",
+                               font_size=6.5, color="#1e293b", secondary_color="#ffffff",
+                               background="#ffffff", frame_color=None, transparent=False):
+        sb = QgsLayoutItemScaleBar(lay)
+        sb.setStyle(style or "Stepped Line")
+        sb.setLinkedMap(target_map)
+
+        scale = target_map.scale()
+        du = Qgis.DistanceUnit if hasattr(Qgis, "DistanceUnit") else None
+        units_obj = du.Meters if (du and scale < 15000) else (du.Kilometers if du else None)
+        label_str = "m" if scale < 15000 else "km"
+        if units_obj is not None:
+            sb.applyDefaultSize(units_obj)
+        else:
+            sb.applyDefaultSize()
+        sb.setUnitLabel(label_str)
+        sb.setNumberOfSegments(2)
+        sb.setNumberOfSegmentsLeft(0)
+        sb.setHeight(2.0)
+        sb.setBoxContentSpace(1.2)
+        sb.setLabelBarSpace(1.0)
+
+        if hasattr(sb, "setSegmentSizeMode") and hasattr(Qgis, "ScaleBarSegmentSizeMode"):
+            sb.setSegmentSizeMode(Qgis.ScaleBarSegmentSizeMode.FitWidth)
+            if hasattr(sb, "setMaximumBarWidth"):
+                sb.setMaximumBarWidth(float(max_width))
+            if hasattr(sb, "setMinimumBarWidth"):
+                sb.setMinimumBarWidth(max(18.0, float(max_width) * 0.5))
+
+        fmt_s = QgsTextFormat()
+        f_sb = QFont(font_family, int(font_size))
+        fmt_s.setFont(f_sb)
+        fmt_s.setSize(font_size)
+        fmt_s.setColor(QColor(color))
+        sb.setTextFormat(fmt_s)
+
+        if hasattr(sb, "fillSymbol") and sb.fillSymbol():
+            fs = sb.fillSymbol().clone()
+            fs.setColor(QColor(color))
+            sb.setFillSymbol(fs)
+        if hasattr(sb, "alternateFillSymbol") and sb.alternateFillSymbol():
+            afs = sb.alternateFillSymbol().clone()
+            afs.setColor(QColor(secondary_color))
+            sb.setAlternateFillSymbol(afs)
+        if hasattr(sb, "lineSymbol") and sb.lineSymbol():
+            ls = sb.lineSymbol().clone()
+            ls.setColor(QColor(color))
+            ls.setWidth(0.25)
+            sb.setLineSymbol(ls)
+
+        if transparent or background is None or str(background).lower() == "none":
+            sb.setBackgroundEnabled(False)
+            sb.setFrameEnabled(False)
+        else:
+            sb.setBackgroundEnabled(True)
+            sb.setBackgroundColor(QColor(background))
+            if frame_color and str(frame_color).lower() != "none":
+                sb.setFrameEnabled(True)
+                sb.setFrameStrokeColor(QColor(frame_color))
+                sb.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
+            else:
+                sb.setFrameEnabled(False)
+
+        lay.addLayoutItem(sb)
+        sb.update()
+
+        sb_sz = sb.sizeWithUnits()
+        sb_w = sb_sz.width()
+        sb_h = sb_sz.height()
+
+        mpos = target_map.pos()
+        msz = target_map.rect()
+        mx, my = mpos.x(), mpos.y()
+        mw, mh = msz.width(), msz.height()
+
+        if custom_x is not None and custom_y is not None:
+            tx, ty = float(custom_x), float(custom_y)
+        elif position == "bottom-right":
+            tx = mx + mw - sb_w - pad
+            ty = my + mh - sb_h - pad
+        elif position == "top-left":
+            tx = mx + pad
+            ty = my + pad
+        elif position == "top-right":
+            tx = mx + mw - sb_w - pad
+            ty = my + pad
+        else:  # bottom-left
+            tx = mx + pad
+            ty = my + mh - sb_h - pad
+
+        # Safety clamp: never protrude or cross outside the map neatline
+        if mx <= tx <= mx + mw and ty + sb_h > my + mh:
+            ty = max(my + pad, my + mh - sb_h - pad)
+        if mx <= tx <= mx + mw and tx + sb_w > mx + mw:
+            tx = max(mx + pad, mx + mw - sb_w - pad)
+
+        sb.attemptMove(QgsLayoutPoint(tx, ty, mm))
+        sb.update()
+        return sb
 
     # =========================================================================
     # THEME 1: PLANNING OFFICIAL (Formal Kop Peta Layout)
@@ -1772,25 +1879,11 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         na.attemptMove(QgsLayoutPoint(right_x + 3.0, curr_y + 1.0, mm))
         na.attemptResize(QgsLayoutSize(arrow_w, 14.0, mm))
 
-        sb = QgsLayoutItemScaleBar(lay)
-        sb.setStyle("Double Box")
-        sb.setLinkedMap(mp)
-        sb.applyDefaultSize()
-        if hasattr(sb, "fillSymbol") and sb.fillSymbol():
-            fs = sb.fillSymbol().clone()
-            fs.setColor(QColor("#0f172a"))
-            sb.setFillSymbol(fs)
-        if hasattr(sb, "alternateFillSymbol") and sb.alternateFillSymbol():
-            afs = sb.alternateFillSymbol().clone()
-            afs.setColor(QColor("#ffffff"))
-            sb.setAlternateFillSymbol(afs)
-        sb.setBackgroundEnabled(True)
-        sb.setBackgroundColor(QColor("#ffffff"))
-        sb.setFrameEnabled(True)
-        sb.setFrameStrokeColor(QColor("#cbd5e1"))
-        sb.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
-        lay.addLayoutItem(sb)
-        sb.attemptMove(QgsLayoutPoint(right_x + arrow_w + 3.0, curr_y + 1.0, mm))
+        # Single Box scale bar bounded strictly within Kop Peta width (never overflows)
+        sb_max_w = max(25.0, right_w - arrow_w - 7.0)
+        _create_clean_scalebar(mp, style="Single Box", custom_x=right_x + arrow_w + 3.0,
+                               custom_y=curr_y + 1.5, max_width=sb_max_w, color="#0f172a",
+                               background="#ffffff", frame_color=None)
         curr_y += 16.0
 
         _add_divider(right_x, curr_y, right_w)
@@ -1959,27 +2052,9 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         leg.attemptResize(QgsLayoutSize(60.0, 55.0, mm))
 
         # Scale bar with classic cartographic Double Box & parchment fill
-        sb = QgsLayoutItemScaleBar(lay)
-        sb.setStyle("Double Box")
-        sb.setLinkedMap(mp)
-        sb.applyDefaultSize()
-        if hasattr(sb, "fillSymbol") and sb.fillSymbol():
-            fs = sb.fillSymbol().clone()
-            fs.setColor(QColor("#263238"))
-            sb.setFillSymbol(fs)
-        if hasattr(sb, "alternateFillSymbol") and sb.alternateFillSymbol():
-            afs = sb.alternateFillSymbol().clone()
-            afs.setColor(QColor("#fcfbf7"))
-            sb.setAlternateFillSymbol(afs)
-        sb.setBackgroundEnabled(True)
-        sb.setBackgroundColor(QColor("#fcfbf7"))
-        sb.setFrameEnabled(True)
-        sb.setFrameStrokeColor(QColor("#263238"))
-        sb.setFrameStrokeWidth(QgsLayoutMeasurement(0.25, mm))
-        sb.update()
-        sb_h = sb.sizeWithUnits().height()
-        lay.addLayoutItem(sb)
-        sb.attemptMove(QgsLayoutPoint(m + 5.0, map_top + map_h - sb_h - 4.0, mm))
+        _create_clean_scalebar(mp, style="Double Box", position="bottom-left", pad=6.0,
+                               font_family="Georgia", font_size=6.5, color="#263238", secondary_color="#fcfbf7",
+                               background="#fcfbf7", frame_color="#263238")
 
         # North Arrow
         na = QgsLayoutItemPicture(lay)
@@ -2063,19 +2138,8 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         leg.attemptResize(QgsLayoutSize(right_w, map_h - 25.0, mm))
 
         # Scale bar inside map with clean pill badge
-        sb = QgsLayoutItemScaleBar(lay)
-        sb.setStyle("Stepped Line")
-        sb.setLinkedMap(mp)
-        sb.applyDefaultSize()
-        sb.setBackgroundEnabled(True)
-        sb.setBackgroundColor(QColor("#ffffff"))
-        sb.setFrameEnabled(True)
-        sb.setFrameStrokeColor(QColor("#cbd5e1"))
-        sb.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
-        sb.update()
-        sb_h = sb.sizeWithUnits().height()
-        lay.addLayoutItem(sb)
-        sb.attemptMove(QgsLayoutPoint(m + 4.0, map_top + map_h - sb_h - 4.0, mm))
+        _create_clean_scalebar(mp, style="Stepped Line", position="bottom-left", pad=5.0,
+                               color="#0f172a", background="#ffffff", frame_color=None)
 
         # Credits
         if credits:
@@ -2220,28 +2284,9 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_cred.attemptMove(QgsLayoutPoint(m, foot_y, mm))
         lbl_cred.attemptResize(QgsLayoutSize(W - 2 * m, credit_h, mm))
 
-        # Scale bar & North arrow inside map with high-visibility Double Box
-        sb = QgsLayoutItemScaleBar(lay)
-        sb.setStyle("Double Box")
-        sb.setLinkedMap(mp)
-        sb.applyDefaultSize()
-        if hasattr(sb, "fillSymbol") and sb.fillSymbol():
-            fs = sb.fillSymbol().clone()
-            fs.setColor(QColor("#0f172a"))
-            sb.setFillSymbol(fs)
-        if hasattr(sb, "alternateFillSymbol") and sb.alternateFillSymbol():
-            afs = sb.alternateFillSymbol().clone()
-            afs.setColor(QColor("#ffffff"))
-            sb.setAlternateFillSymbol(afs)
-        sb.setBackgroundEnabled(True)
-        sb.setBackgroundColor(QColor("#ffffff"))
-        sb.setFrameEnabled(True)
-        sb.setFrameStrokeColor(QColor("#cbd5e1"))
-        sb.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
-        sb.update()
-        sb_h = sb.sizeWithUnits().height()
-        lay.addLayoutItem(sb)
-        sb.attemptMove(QgsLayoutPoint(m + 4.0, map_top + map_h - sb_h - 3.0, mm))
+        # Scale bar & North arrow inside map with high-visibility Stepped Line
+        _create_clean_scalebar(mp, style="Stepped Line", position="bottom-left", pad=6.0,
+                               color="#0f172a", background="#ffffff", frame_color=None)
 
         na = QgsLayoutItemPicture(lay)
         na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
@@ -2253,6 +2298,84 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         mgr.addLayout(lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale(),
                 "right_panel_rect": [right_x, map_top, right_w, map_h]}
+
+    # =========================================================================
+    # THEME 4B: LANDSCAPE ARCHITECTURE & WATERCOLOR MASTER PLAN
+    # =========================================================================
+    if is_landscape_masterplan:
+        page.setBackgroundColor(QColor("#fcfbf7"))
+        m = 8.0
+        map_w = W - 2 * m
+        map_h = H - 2 * m
+
+        mp = QgsLayoutItemMap(lay)
+        mp.setRect(0, 0, 10, 10)
+        lay.addLayoutItem(mp)
+        mp.setCrs(p.crs())
+        mp.attemptMove(QgsLayoutPoint(m, m, mm))
+        mp.attemptResize(QgsLayoutSize(map_w, map_h, mm))
+        main_ext = _setup_extent(mp, extent_layer)
+        mp.setFrameEnabled(True)
+        mp.setFrameStrokeColor(QColor("#334155"))
+        mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.25, mm))
+
+        # Floating Architectural Title Stamp in negative space (top-right)
+        stamp_w = 80.0
+        stamp_h = 24.0
+        lbl_stamp = QgsLayoutItemLabel(lay)
+        lbl_stamp.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        plan_title = title or "SITE MASTER PLAN"
+        plan_sub = subtitle or "Landscape & Environmental Architecture"
+        lbl_stamp.setText(
+            f"<div style='font-family:Century Gothic, Helvetica, Arial, sans-serif; background:rgba(255,255,255,0.92); border:1px solid #94a3b8; border-radius:3px; padding:5px 8px;'>"
+            f"<div style='font-size:6.5px; font-weight:bold; color:#059669; letter-spacing:1.2px; text-transform:uppercase;'>MASTER PLAN & DESIGN PROPOSAL</div>"
+            f"<div style='font-size:11.5px; font-weight:800; color:#1e293b; text-transform:uppercase; margin-top:1px;'>{_html.escape(plan_title)}</div>"
+            f"<div style='font-size:7px; color:#64748b; margin-top:2px;'>{_html.escape(plan_sub)}</div>"
+            f"<div style='font-size:6px; color:#94a3b8; margin-top:2px;'>CRS: {p.crs().authid()} &bull; {_html.escape(credits or 'Survey & Planning Bureau')}</div>"
+            f"</div>"
+        )
+        lay.addLayoutItem(lbl_stamp)
+        lbl_stamp.attemptMove(QgsLayoutPoint(W - m - stamp_w - 5.0, m + 5.0, mm))
+        lbl_stamp.attemptResize(QgsLayoutSize(stamp_w, stamp_h, mm))
+
+        # Floating Clean Legend Badge (bottom-right)
+        leg = QgsLayoutItemLegend(lay)
+        leg.setLinkedMap(mp)
+        leg.setTitle("LAND USE & FEATURES")
+        leg.setAutoUpdateModel(False)
+        from qgis.core import QgsLayerTree
+        skip_terms = ("esri", "osm", "carto", "basemap", "hillshade", "xyz", "canvas", "satellite", "terrain")
+        custom_tree = QgsLayerTree()
+        for lyr in p.mapLayers().values():
+            if any(st in lyr.name().lower() for st in skip_terms):
+                continue
+            custom_tree.addLayer(lyr)
+        if len(custom_tree.children()) > 0:
+            leg.model().setRootGroup(custom_tree)
+        else:
+            leg.setAutoUpdateModel(True)
+        leg.setBackgroundColor(QColor(255, 255, 255, 230))
+        leg.setFrameEnabled(True)
+        leg.setFrameStrokeColor(QColor("#cbd5e1"))
+        leg.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
+        lay.addLayoutItem(leg)
+        leg.attemptMove(QgsLayoutPoint(W - m - 65.0, H - m - 58.0, mm))
+        leg.attemptResize(QgsLayoutSize(60.0, 52.0, mm))
+
+        # Delicate Architectural Line Ticks Up scale bar (bottom-left)
+        _create_clean_scalebar(mp, style="Line Ticks Up", position="bottom-left", pad=6.0,
+                               color="#1e3a2f", background="rgba(255,255,255,0.85)", frame_color=None)
+
+        # Minimalist North Arrow
+        na = QgsLayoutItemPicture(lay)
+        na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
+        na.setLinkedMap(mp)
+        lay.addLayoutItem(na)
+        na.attemptResize(QgsLayoutSize(10.0, 14.0, mm))
+        na.attemptMove(QgsLayoutPoint(m + 6.0, m + 6.0, mm))
+
+        mgr.addLayout(lay)
+        return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
 
     # =========================================================================
     # THEME 5: MINIMALIST CITY ART POSTER (Full-Bleed, Modern Floating Typography)
@@ -2462,6 +2585,10 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
             ov.setFrameOutlineColor(QColor(220, 38, 38, 220))
             kmp.overviews().addOverview(ov)
 
+        # Scale bar inside editorial hero map
+        _create_clean_scalebar(mp, style="Stepped Line", position="bottom-left", pad=6.0,
+                               font_family="Georgia", color="#0f172a", background="#ffffff", frame_color=None)
+
         # Bottom Editorial Metadata
         lbl_cred = QgsLayoutItemLabel(lay)
         lbl_cred.setText(f"Editorial Cartography · Sources: {credits or 'Public Repositories'} · Projection: {p.crs().authid()}")
@@ -2529,24 +2656,10 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_cart.attemptMove(QgsLayoutPoint(W - m - cart_w - 4.0, H - m - cart_h - 4.0, mm))
         lbl_cart.attemptResize(QgsLayoutSize(cart_w, cart_h, mm))
 
-        # Antique Scale Bar
-        sb = QgsLayoutItemScaleBar(lay)
-        sb.setStyle("Single Box")
-        sb.setLinkedMap(mp)
-        sb.applyDefaultSize()
-        if hasattr(sb, "fillSymbol") and sb.fillSymbol():
-            fs = sb.fillSymbol().clone()
-            fs.setColor(QColor("#2e2115"))
-            sb.setFillSymbol(fs)
-        sb.setBackgroundEnabled(True)
-        sb.setBackgroundColor(QColor("#f4ecd8"))
-        sb.setFrameEnabled(True)
-        sb.setFrameStrokeColor(QColor("#2e2115"))
-        sb.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
-        sb.update()
-        sb_h = sb.sizeWithUnits().height()
-        lay.addLayoutItem(sb)
-        sb.attemptMove(QgsLayoutPoint(m + 4.0, H - m - sb_h - 4.0, mm))
+        # Antique Scale Bar (classical single box with authentic sepia ink styling)
+        _create_clean_scalebar(mp, style="Single Box", position="bottom-left", pad=6.0,
+                               font_family="Georgia", font_size=6.5, color="#2e2115", secondary_color="#f4ecd8",
+                               background="#f4ecd8", frame_color="#2e2115")
 
         mgr.addLayout(lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
@@ -2579,23 +2692,8 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.3, mm))
 
         # Scale bar & North Arrow cleanly floating inside Map Card
-        sb = QgsLayoutItemScaleBar(lay)
-        sb.setStyle("Double Box")
-        sb.setLinkedMap(mp)
-        sb.applyDefaultSize()
-        if hasattr(sb, "fillSymbol") and sb.fillSymbol():
-            fs = sb.fillSymbol().clone()
-            fs.setColor(QColor("#0f172a"))
-            sb.setFillSymbol(fs)
-        sb.setBackgroundEnabled(True)
-        sb.setBackgroundColor(QColor("#ffffff"))
-        sb.setFrameEnabled(True)
-        sb.setFrameStrokeColor(QColor("#cbd5e1"))
-        sb.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
-        sb.update()
-        sb_h = sb.sizeWithUnits().height()
-        lay.addLayoutItem(sb)
-        sb.attemptMove(QgsLayoutPoint(m + 4.0, m + avail_h - sb_h - 4.0, mm))
+        _create_clean_scalebar(mp, style="Stepped Line", position="bottom-left", pad=5.0,
+                               color="#0f172a", background="#ffffff", frame_color=None)
 
         na = QgsLayoutItemPicture(lay)
         na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
@@ -2772,14 +2870,8 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
 
         # Bottom Shared Dock: Scale bar & Legend & Credits
         foot_y = map_top + map_h + gap
-        sb = QgsLayoutItemScaleBar(lay)
-        sb.setStyle("Double Box")
-        sb.setLinkedMap(mp1)
-        sb.applyDefaultSize()
-        sb.setBackgroundEnabled(True)
-        sb.setBackgroundColor(QColor("#ffffff"))
-        lay.addLayoutItem(sb)
-        sb.attemptMove(QgsLayoutPoint(m, foot_y, mm))
+        _create_clean_scalebar(mp1, style="Stepped Line", custom_x=m + 2.0, custom_y=foot_y,
+                               max_width=45.0, color="#0f172a", background="#ffffff", frame_color=None)
 
         lbl_meta = QgsLayoutItemLabel(lay)
         lbl_meta.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
@@ -2853,15 +2945,9 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_strip.attemptMove(QgsLayoutPoint(m, strip_y, mm))
         lbl_strip.attemptResize(QgsLayoutSize(map_w, strip_h, mm))
 
-        # Scale bar
-        sb = QgsLayoutItemScaleBar(lay)
-        sb.setStyle("Double Box")
-        sb.setLinkedMap(mp)
-        sb.applyDefaultSize()
-        sb.setBackgroundEnabled(True)
-        sb.setBackgroundColor(QColor("#ffffff"))
-        lay.addLayoutItem(sb)
-        sb.attemptMove(QgsLayoutPoint(m + 4.0, map_top + map_h - 14.0, mm))
+        # Scale bar cleanly floating inside corridor map
+        _create_clean_scalebar(mp, style="Stepped Line", position="bottom-left", pad=5.0,
+                               color="#0f172a", background="#ffffff", frame_color=None)
 
         mgr.addLayout(lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
@@ -2981,14 +3067,9 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         na.attemptMove(QgsLayoutPoint(m + 4.0, m + 4.0, mm))
 
         # Nautical Scale bar
-        sb = QgsLayoutItemScaleBar(lay)
-        sb.setStyle("Double Box")
-        sb.setLinkedMap(mp)
-        sb.applyDefaultSize()
-        sb.setBackgroundEnabled(True)
-        sb.setBackgroundColor(QColor("#fbf5dc"))
-        lay.addLayoutItem(sb)
-        sb.attemptMove(QgsLayoutPoint(m + 4.0, H - m - 14.0, mm))
+        _create_clean_scalebar(mp, style="Double Box", position="bottom-left", pad=6.0,
+                               font_family="Times New Roman", font_size=6.5, color="#1e293b", secondary_color="#fbf5dc",
+                               background="#fbf5dc", frame_color="#1e293b")
 
         mgr.addLayout(lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
@@ -3029,27 +3110,8 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
     if grid or is_relief:
         _apply_grid(mp, main_ext)
 
-    sb = QgsLayoutItemScaleBar(lay)
-    sb.setStyle("Double Box" if is_relief else "Stepped Line")
-    sb.setLinkedMap(mp)
-    sb.applyDefaultSize()
-    if hasattr(sb, "fillSymbol") and sb.fillSymbol():
-        fs = sb.fillSymbol().clone()
-        fs.setColor(QColor("#1e293b"))
-        sb.setFillSymbol(fs)
-    if hasattr(sb, "alternateFillSymbol") and sb.alternateFillSymbol():
-        afs = sb.alternateFillSymbol().clone()
-        afs.setColor(QColor("#ffffff"))
-        sb.setAlternateFillSymbol(afs)
-    sb.setBackgroundEnabled(True)
-    sb.setBackgroundColor(QColor("#ffffff"))
-    sb.setFrameEnabled(True)
-    sb.setFrameStrokeColor(QColor("#cbd5e1"))
-    sb.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
-    sb.update()
-    sb_h = sb.sizeWithUnits().height()
-    lay.addLayoutItem(sb)
-    sb.attemptMove(QgsLayoutPoint(m + 5.0, map_top + map_h - sb_h - 4.0, mm))
+    _create_clean_scalebar(mp, style="Stepped Line" if not is_relief else "Double Box",
+                           position="bottom-left", pad=6.0, color="#1e293b", background="#ffffff", frame_color=None)
 
     na = QgsLayoutItemPicture(lay)
     na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")

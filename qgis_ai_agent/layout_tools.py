@@ -451,25 +451,26 @@ def add_layout_legend(layout=None, x=0, y=0, width=None, height=None, item_id=No
     return {"item_id": lg.id() or lg.uuid()}
 
 
-@tool("Add a scale bar linked to a map frame. Choose style, units and segments, e.g. 'Double Box' (alternating black/white), 'Single Box', 'Line Ticks Up', 'Line Ticks Middle', 'Stepped Line'. Supports safe auto-positioning ('bottom-left', 'bottom-right', 'top-left') so the bar never spills outside the map frame.",
+@tool("Add a scale bar linked to a map frame. Choose style, units and segments, e.g. 'Stepped Line', 'Single Box', 'Double Box', 'Line Ticks Down', 'Line Ticks Up', 'Line Ticks Middle', 'Numeric'. Supports safe auto-positioning ('bottom-left', 'bottom-right', 'top-left') so the bar never spills outside the map frame.",
       {"layout": S("string", ""), "x": S("number", "mm (optional if position is given)"), "y": S("number", "mm (optional if position is given)"), "item_id": S("string", ""),
        "map_id": S("string", "linked map id, default first map"),
-       "style": S("string", "'Double Box' | 'Single Box' | 'Line Ticks Up' | 'Line Ticks Middle' | 'Line Ticks Down' | 'Stepped Line' | 'Hollow' | 'Numeric'"),
+       "style": S("string", "'Stepped Line' | 'Single Box' | 'Double Box' | 'Line Ticks Up' | 'Line Ticks Middle' | 'Line Ticks Down' | 'Hollow' | 'Numeric'"),
        "position": S("string", "'bottom-left' | 'bottom-right' | 'top-left' | 'top-right' (auto-positions safely inside the map)"),
        "units": S("string", "m|km|mi|ft, default km (or m for large scales)"),
-       "segments": S("integer", "right segments, default 4"), "units_per_segment": S("number", "e.g. 100 for 100 m steps"),
-       "height": S("number", "bar height mm, default 2.5"), "font_size": S("number", "pt, default 8"),
+       "segments": S("integer", "right segments, default 2 (clean and compact)"), "units_per_segment": S("number", "e.g. 100 for 100 m steps"),
+       "max_width": S("number", "maximum bar width mm, default 42"),
+       "height": S("number", "bar height mm, default 2.0"), "font_size": S("number", "pt, default 6.5"),
        "color": S("string", "primary bar and text colour, default '#1e293b'"),
        "secondary_color": S("string", "alternating box fill colour, default '#ffffff'"),
-       "background": S("string", "optional fill behind bar (default '#ffffff' card)"),
-       "frame_color": S("string", "optional border stroke for the background card (default '#cbd5e1')")})
-def add_layout_scalebar(layout=None, x=None, y=None, item_id=None, map_id=None, style="Double Box", position=None,
-                        units=None, segments=4, units_per_segment=None, height=2.5, font_size=8, color="#1e293b",
-                        secondary_color="#ffffff", background="#ffffff", frame_color="#cbd5e1", **kwargs):
+       "background": S("string", "optional fill behind bar (default '#ffffff' card, or 'none')"),
+       "frame_color": S("string", "optional border stroke for the background card (default 'none')")})
+def add_layout_scalebar(layout=None, x=None, y=None, item_id=None, map_id=None, style="Stepped Line", position=None,
+                        units=None, segments=2, units_per_segment=None, max_width=42.0, height=2.0, font_size=6.5, color="#1e293b",
+                        secondary_color="#ffffff", background="#ffffff", frame_color=None, **kwargs):
     lay = _lay(layout or kwargs.get("layout_name") or kwargs.get("name"))
     mp = _map(lay, map_id)
     sb = QgsLayoutItemScaleBar(lay)
-    sb.setStyle(style or "Double Box")
+    sb.setStyle(style or "Stepped Line")
     sb.setLinkedMap(mp)
     du = Qgis.DistanceUnit
     if not units:
@@ -479,12 +480,23 @@ def add_layout_scalebar(layout=None, x=None, y=None, item_id=None, map_id=None, 
     sb.applyDefaultSize(unit)
     sb.setUnitLabel(label)
     sb.setNumberOfSegmentsLeft(0)
-    sb.setNumberOfSegments(int(segments))
+    sb.setNumberOfSegments(int(segments or 2))
     if units_per_segment:
         sb.setSegmentSizeMode(Qgis.ScaleBarSegmentSizeMode.Fixed)
         sb.setUnitsPerSegment(float(units_per_segment))
-    sb.setHeight(float(height))
-    sb.setTextFormat(_fmt(font_size, color))
+    elif hasattr(sb, "setSegmentSizeMode") and hasattr(Qgis, "ScaleBarSegmentSizeMode"):
+        sb.setSegmentSizeMode(Qgis.ScaleBarSegmentSizeMode.FitWidth)
+        if hasattr(sb, "setMaximumBarWidth"):
+            sb.setMaximumBarWidth(float(max_width or 42.0))
+        if hasattr(sb, "setMinimumBarWidth"):
+            sb.setMinimumBarWidth(max(18.0, float(max_width or 42.0) * 0.5))
+
+    sb.setHeight(float(height or 2.0))
+    sb.setTextFormat(_fmt(font_size or 6.5, color))
+    if hasattr(sb, "setBoxContentSpace"):
+        sb.setBoxContentSpace(1.2)
+    if hasattr(sb, "setLabelBarSpace"):
+        sb.setLabelBarSpace(1.0)
 
     # Sophisticated fill & line styling (distinct cartographic aesthetics)
     if hasattr(sb, "fillSymbol") and sb.fillSymbol():
@@ -502,16 +514,19 @@ def add_layout_scalebar(layout=None, x=None, y=None, item_id=None, map_id=None, 
         sb.setLineSymbol(ls)
 
     # Sleek card container so the scalebar never blends into background features
-    if background and background != "none":
+    if background and str(background).lower() != "none":
         sb.setBackgroundEnabled(True)
         sb.setBackgroundColor(QColor(background))
-        if hasattr(sb, "setBoxContentSpace"):
-            sb.setBoxContentSpace(1.8)
-    if frame_color and frame_color != "none":
+    else:
+        sb.setBackgroundEnabled(False)
+    if frame_color and str(frame_color).lower() != "none":
         sb.setFrameEnabled(True)
         sb.setFrameStrokeColor(QColor(frame_color))
         sb.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, MM))
+    else:
+        sb.setFrameEnabled(False)
 
+    lay.addLayoutItem(sb)
     sb.update()
     sb_w = sb.sizeWithUnits().width()
     sb_h = sb.sizeWithUnits().height()
@@ -524,7 +539,7 @@ def add_layout_scalebar(layout=None, x=None, y=None, item_id=None, map_id=None, 
     map_bottom = map_y + map_sz.height()
     map_right = map_x + map_sz.width()
 
-    pad = 4.0
+    pad = 5.0
     pos_choice = position or kwargs.get("anchor")
     if pos_choice == "bottom-left" or (x is None and y is None and pos_choice != "bottom-right"):
         target_x = map_x + pad
@@ -544,9 +559,13 @@ def add_layout_scalebar(layout=None, x=None, y=None, item_id=None, map_id=None, 
 
     # CRITICAL: Automatically clamp target_y so the scale bar NEVER crosses outside the map frame!
     if map_x <= target_x <= map_right and target_y + sb_h > map_bottom:
-        target_y = max(map_y + 2.0, map_bottom - sb_h - 2.5)
+        target_y = max(map_y + 2.0, map_bottom - sb_h - pad)
+    if map_x <= target_x <= map_right and target_x + sb_w > map_right:
+        target_x = max(map_x + pad, map_right - sb_w - pad)
 
-    _place(lay, sb, target_x, target_y, item_id=item_id)
+    sb.attemptMove(QgsLayoutPoint(target_x, target_y, MM))
+    if item_id:
+        sb.setId(str(item_id))
     sb.update()
     return {"item_id": sb.id() or sb.uuid(), "units": label, "style": sb.style(), "x": round(target_x, 1), "y": round(target_y, 1)}
 

@@ -124,7 +124,15 @@ Rules:
      - For thematic and infographic maps, do NOT force a coordinate grid (`grid=False`). If a grid is needed, annotations must be InsideMapFrame and only on Left & Bottom edges.
      - Clean human-readable legend labels: remove internal underscores, raw column names, or obscure abbreviations.
      - North arrow and scale bar must be placed safely inside the map frame without overlapping outside cards or neatlines.
-     - Scale Bar Cartography & Bounds Safety: Never use monotonous single ticks or raw unstyled lines. Always use `Double Box` (alternating dark/light segments) or `Stepped Line` encased in a subtle card container (`background="#ffffff"`, `frame_color="#cbd5e1"`). Position using `position="bottom-left"` or `position="bottom-right"`, and verify that the scale bar bottom edge never protrudes or crosses outside the map frame neatline.
+     - Cartographic Style & Scale Bar Harmony:
+       * Dynamic Scale Bar Selection (Never Monotonous): Select the scale bar style that strictly fits the map archetype:
+         - Modern Minimalist / City Poster: Omit or use a delicate `Line Ticks Down` / `Numeric` (ratio `1:50 000`) with transparent background. Never use heavy boxed scale bars on art prints.
+         - Antique / Historical Plan: `Single Box` or `Line Ticks Middle` in vintage sepia/ink (`#2e2115`), parchment fill (`#f4ecd8`), Roman/Serif font (`Georgia`).
+         - Landscape & Site Masterplan: Delicate `Line Ticks Up` or `Stepped Line` in dark slate or forest green (`#1e3a2f`), soft transparent/white card.
+         - Scientific Dark Mode / Global Atlas: Discrete `Line Ticks Down` or clean continuous gradient ramp legend with transparent background.
+         - Editorial / Magazine / Infographic: Refined `Stepped Line` with 2 segments (`segments=2`), compact 6.5pt font, clean white background with NO clashing outer border.
+         - Official / Formal Planning (Kop Peta): Compact `Single Box` bounded strictly within the Kop Peta width (max 42mm).
+       * Zero Collision & Zero Neatline Spill: The scale bar MUST NEVER protrude or cross outside neatlines, and labels must never collide (no jammed numbers). Always use 2 segments (`segments=2`), small readable text (`font_size=6.5`), and safe padding (5–6mm inside map boundaries).
 - STRICT PROJECT ISOLATION & RECOVERY RULES (Recovery ONLY for Already-Saved Projects):
   * Fresh / Unsaved Projects: If the active QGIS project has not been saved yet (no file name on disk) or is empty (0 layers), NEVER attempt recovery and NEVER call `open_project()` to load any previously saved or autosaved project. You MUST start fresh and work strictly in the current active session.
   * Saved Projects Only: Recovery and multi-iteration autosave are STRICTLY RESTRICTED to projects that have already been saved to a `.qgz` or `.qgs` file by the user (`p.fileName()` exists on disk). Autosave writes directly into that active project file.
@@ -139,7 +147,24 @@ Rules:
   * `esri_streets` (Full street network with building outlines, 100% free, no key)
   * `esri_dark` (Dark mode canvas for high-contrast thematic maps, 100% free, no key)
   > **Note:** CartoDB XYZ tiles now require an API key and return diagonal watermarks. The plugin automatically redirects any legacy `carto_light`/`carto_dark` requests to clean Esri Light/Dark Canvas. Always prefer `esri_light`.
-- Layout Guidelines:
+- Layout Guidelines & Flexible Cartography:
+  * Layout Archetypes & Genres (Never limit maps to standard rigid templates):
+    - When a specific visual genre is desired, use `create_styled_layout(style_theme=...)`:
+      * `poster_minimalist`: Modern minimalist city art print (like Tokyo wall poster) with tracked uppercase typography, coordinates, elegant mat border, zero clutter.
+      * `antique_historical`: Authentic vintage survey plan (like Plan of Rome) on sepia parchment with coordinate grid, double neatline, and ornate serif corner cartouche.
+      * `landscape_masterplan`: Architectural watercolor site plan with organic zoning, floating project title stamp, and soft legend badge.
+      * `scientific_dark`: Dark-mode thematic atlas (like Cambridge climate risk) with deep charcoal canvas, floating ocean context card, continuous colorbar ramp, and institutional partner row.
+      * `editorial_infographic`: Rich journalistic multi-frame atlas (like African soils) with serif headline banner, primary hero map, secondary inset map, bold KPI chips (`250 million`, `US$ 4 billion`), and embedded chart.
+      * `infographic_disaster`: Situational crisis alert dashboard (flood/hazard SITREP) with emergency header, hero hazard map, KPI cards, and auto-pruned legend.
+      * `bento_dashboard`: Modern modular bento cards (Apple / Linear style) with KPI metrics, categorized legend, and metadata dock.
+      * `dual_comparison`: Synchronized side-by-side comparison (before/after, baseline vs scenario).
+      * `corridor_trail`: Linear corridor / route strip map with bottom elevation profile and milestone markers.
+      * `nautical_bathymetric`: Admiralty hydrographic chart with sounding cartouche and compass rose.
+      * `natgeo`: Classic National Geographic parchment with double neatlines and serif typography.
+      * `planning_official`: Formal Indonesian RTRW / municipal zoning layout with right-column Kop Peta.
+  * Freeform Bespoke Layout Composition (Maximum Flexibility):
+    - If the user provides a reference sketch/image or requests an unconventional layout, DO NOT force a preset! Build freely from layout primitives:
+      `create_blank_layout(...)` -> `add_layout_map(...)` -> `add_layout_text(...)` -> `add_layout_callout_box(...)` -> `add_layout_infographic_chart(...)` -> `add_layout_inset_map(...)` -> `add_layout_legend(...)` -> `add_layout_scalebar(...)` -> `add_layout_north_arrow(...)`.
   * For thematic and infographic maps, NEVER force a coordinate grid (`grid=False` by default in `create_styled_layout`).
   * If a grid is explicitly requested, coordinates must stay INSIDE the map frame (`InsideMapFrame`) and only display on Left & Bottom edges so numbers never collide with title headers, metrics sidecards, or bottom summaries.
   * Keep visual hierarchy neat: maintain clear 3-5mm gutters between map frames, legends, cards, and scalebars.

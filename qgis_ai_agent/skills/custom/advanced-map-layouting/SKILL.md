@@ -44,15 +44,16 @@ Cartographic layouts must NEVER look identical or follow a one-size-fits-all rig
      * Historical landmark directory / index table (Roman numerals / numbered POIs) placed along outer margins.
    - **Tool Call:** `create_styled_layout(name="Rome_Antique_Plan", style_theme="antique_historical", title="PLAN OF ROME", subtitle="Surveyed & Engraved", extent_layer="rome_boundary")`
 
-3. **Organic Site Master Plan & Landscape (`planning_official`):**
-   - **Inspired By:** Resort / Campus / Park Master Plan (Reference Image 3).
-   - **Use For:** Architectural site plans, golf/resort master plans, environmental zoning, campus design.
+3. **Landscape Architecture & Watercolor Master Plan (`landscape_masterplan`):**
+   - **Inspired By:** Resort / Campus / Park Watercolor Master Plan (Reference Image 3).
+   - **Use For:** Architectural site plans, park & botanic master plans, environmental zoning, campus design.
    - **Visual Structure:**
-     * Site-boundary hugging canvas with generous clean whitespace surrounding the organic land parcels.
+     * Site-boundary hugging canvas (`#fcfbf7`) with generous clean whitespace surrounding the organic land parcels.
      * Soft watercolor / natural earth tones (emerald greens, water blues, terracotta roofs).
-     * Subtle, unobtrusive title and minimalist legend tucked into the natural whitespace of the page.
-     * Transparent or delicate line frames with zero heavy boxes.
-   - **Tool Call:** `create_styled_layout(name="Site_Master_Plan", style_theme="planning_official", title="ECO-PARK MASTER PLAN", extent_layer="site_boundary")`
+     * Floating architectural title stamp (`MASTER PLAN & DESIGN PROPOSAL`) with small caps and green accents.
+     * Soft floating legend badge with semi-transparent rounded background (`rgba(255,255,255,0.9)`).
+     * Delicate `Line Ticks Up` scale bar in forest slate `#2e4033`, zero heavy boxes.
+   - **Tool Call:** `create_styled_layout(name="Site_Master_Plan", style_theme="landscape_masterplan", title="ECO-PARK MASTER PLAN", extent_layer="site_boundary")`
 
 4. **Scientific Dark Mode Thematic Atlas (`scientific_dark`):**
    - **Inspired By:** Cambridge Risk Studies / Global Climate Atlas (Reference Image 4).
@@ -201,7 +202,7 @@ add_layout_legend(layout="Custom_Magazine_Spread", x=217, y=8, width=72, height=
 add_layout_inset_map(layout="Custom_Magazine_Spread", x=217, y=122, width=72, height=55, extent_layer="national_boundary", title="REGIONAL OVERVIEW", show_overview=True)
 
 # 6. Add High-Visibility Scale Bar inside map frame
-add_layout_scalebar(layout="Custom_Magazine_Spread", position="bottom-left", map_id="main_map", style="Double Box", units="km")
+add_layout_scalebar(layout="Custom_Magazine_Spread", position="bottom-left", map_id="main_map", style="Stepped Line", units="km")
 
 # 7. MANDATORY VISUAL INSPECTION
 snapshot_layout(name="Custom_Magazine_Spread")
@@ -380,15 +381,13 @@ add_layout_scalebar(
     position="bottom-left",  # Or explicit x, y with auto-bounds clamp
     item_id="scalebar",
     map_id="main_map",
-    style="Double Box",      # Professional alternating fill (never use plain monotonous lines)
+    style="Stepped Line",    # Or "Single Box", "Double Box", "Line Ticks Down" matching genre
     units="km",
-    segments=4,
-    units_per_segment=2.5,   # 0, 2.5, 5.0, 7.5, 10.0 km
-    font_size=8,
+    segments=2,              # 2 segments is clean, compact, and prevents digit crowding
+    font_size=6.5,
     color="#1e293b",
-    secondary_color="#ffffff",
-    background="#ffffff",    # Crisp card backdrop so it never blends into raster/vector layers
-    frame_color="#cbd5e1"
+    background="#ffffff",    # Subtle card backdrop so it never blends into raster/vector layers
+    frame_color=None         # No clashing outer border
 )
 
 # North Arrow

@@ -126,3 +126,182 @@ add_layout_infographic_chart(
     bar_color="#1565c0"
 )
 ```
+
+---
+
+## 4. Modern Minimalist City Art Poster (`poster_minimalist`)
+
+### Inspired by: Tokyo City Map Art Print (Reference Image 1)
+- Full-bleed urban street network filling 88-92% of page.
+- Clean black framing mat border.
+- Centered modern luxury typography at bottom: Tracked uppercase title (`T O K Y O`), country (`J A P A N`), geographic centroid coordinates.
+- Zero legend clutter, zero bulky scale bars, zero north arrow distraction.
+
+### Implementation:
+```python
+create_styled_layout(
+    name="Tokyo_Art_Poster",
+    style_theme="poster_minimalist",
+    title="TOKYO",
+    subtitle="JAPAN",
+    credits="35° 41' 22\" N · 139° 41' 30\" E · OpenStreetMap contributors",
+    extent_layer="Tokyo_Road_Network",
+    page_size="A3",
+    orientation="portrait"
+)
+```
+
+---
+
+## 5. Historical & Antique Engraved Plan (`antique_historical`)
+
+### Inspired by: Plan of Rome (Reference Image 2)
+- Warm aged sepia parchment tone (`#f4ecd8`).
+- Double neatline border (outer 0.8mm + inner 0.25mm line).
+- Authentically referenced coordinate/quadrant grid across the map.
+- Classical Roman/Serif corner cartouche title in negative space.
+- Antique single box scale bar with serif typography and authentic ink tones.
+
+### Implementation:
+```python
+create_styled_layout(
+    name="Rome_Antique_Plan",
+    style_theme="antique_historical",
+    title="PLAN OF ROME",
+    subtitle="Accurately delineated from authentic historical surveys",
+    credits="Monumenta Cartographica Vaticana · Historical Survey Archive",
+    extent_layer="Historic_Rome_Boundary",
+    page_size="A3",
+    orientation="landscape",
+    grid=True
+)
+```
+
+---
+
+## 6. Landscape Architecture & Watercolor Master Plan (`landscape_masterplan`)
+
+### Inspired by: Organic Campus / Resort Master Plan (Reference Image 3)
+- Natural warm paper canvas (`#fcfbf7`) with generous whitespace.
+- Soft watercolor palette (lush greens, water blues, terracotta roofs).
+- Floating architectural title stamp (`MASTER PLAN & DESIGN PROPOSAL`).
+- Floating semi-transparent legend badge with rounded borders.
+- Delicate `Line Ticks Up` scale bar in forest slate `#2e4033`, zero heavy boxes.
+
+### Implementation:
+```python
+create_styled_layout(
+    name="EcoPark_Master_Plan",
+    style_theme="landscape_masterplan",
+    title="BOTANIC ECO-PARK MASTER PLAN",
+    subtitle="Landscape Architecture & Environmental Zoning",
+    credits="Survey & Planning Bureau · Topo Datum: WGS 84",
+    extent_layer="Park_Site_Boundary",
+    page_size="A3",
+    orientation="portrait"
+)
+```
+
+---
+
+## 7. Scientific Dark Mode Thematic Atlas (`scientific_dark`)
+
+### Inspired by: Cambridge Risk Studies / BAS Climatology Map (Reference Image 4)
+- Deep slate charcoal canvas (`#181f2a`).
+- High-contrast continuous heat / risk gradient on continental landmasses.
+- Floating research context text card in negative ocean space.
+- Horizontal continuous gradient ramp legend with discrete threshold markers (`0`, `>200`).
+- Clean institutional / partner logo attribution row at bottom.
+
+### Implementation:
+```python
+create_styled_layout(
+    name="Climate_Risk_Atlas",
+    style_theme="scientific_dark",
+    title="Mean Daily Temperature Exceedance",
+    subtitle="1979-2018 vs 2018-2059 Projections · Prob. Exceedance 10%",
+    credits="Centre for Risk Studies · Cambridge Zero · British Antarctic Survey",
+    extent_layer="World_Clim_Grid",
+    page_size="A3",
+    orientation="landscape"
+)
+```
+
+---
+
+## 8. Editorial Magazine & Multi-Frame Infographic (`editorial_infographic`)
+
+### Inspired by: African Soils Magazine Spread (Reference Image 5)
+- Editorial headline in elegant serif font (`African soils`) with introductory narrative deck.
+- Dominant primary thematic map.
+- Secondary inset map in bottom-left corner with overview frame.
+- Floating bold KPI callout chips (`250 million`, `US$ 4 billion`) with highlight colors.
+- Built-in multi-column classification legend.
+
+### Implementation:
+```python
+# 1. Base editorial composition with hero map and right column
+create_styled_layout(
+    name="African_Soils_Report",
+    style_theme="editorial_infographic",
+    title="African Soils",
+    subtitle="Soil degradation is one of the most serious ecological problems facing the African continent.",
+    credits="FAO Land Degradation Assessment · ISRIC World Soil Information",
+    extent_layer="Africa_Soil_Types",
+    key_extent_layer="Africa_Desertification_Risk",
+    page_size="A3",
+    orientation="landscape"
+)
+
+# 2. Add floating bold KPI callout cards inside negative ocean space
+add_layout_callout_box(
+    layout="African_Soils_Report",
+    x=18, y=55, width=60, height=18,
+    title="250 MILLION",
+    subtitle="People depend on desert soils for subsistence",
+    badge="IMPACT"
+)
+
+add_layout_callout_box(
+    layout="African_Soils_Report",
+    x=18, y=130, width=60, height=18,
+    title="US$ 4 BILLION",
+    subtitle="Lost each year in soil nutrients due to degradation",
+    badge="ECONOMIC"
+)
+```
+
+---
+
+## 9. Procedural Freeform Composition (Custom Bespoke Layout from Scratch)
+
+When none of the presets match the user's custom layout or reference sketch, compose freely using layout primitives:
+
+```python
+# Step 1: Create Blank Page
+create_blank_layout(name="Bespoke_Atlas", page_size="A4", orientation="landscape", background="#ffffff")
+
+# Step 2: Add Main Map Frame (takes 72% width)
+add_layout_map(layout="Bespoke_Atlas", x=8, y=8, width=200, height=194, item_id="main_map",
+               extent_layer="Study_Area", frame_color="#334155", frame_width=0.3)
+
+# Step 3: Add Inset Regional Map (bottom-right of right column)
+add_layout_inset_map(layout="Bespoke_Atlas", x=214, y=125, width=75, height=65,
+                     extent_layer="Regional_Context", title="REGIONAL OVERVIEW", show_overview=True)
+
+# Step 4: Add Floating Title in negative ocean space
+add_layout_text(layout="Bespoke_Atlas", x=16, y=16, width=90, height=22,
+                text="<b>REGIONAL WATER STRESS ATLAS</b><br><span style='color:#64748b; font-size:8px;'>Multi-basin hydrologic analysis</span>",
+                html=True, item_id="title_card")
+
+# Step 5: Add Filtered Legend in right sidebar
+add_layout_legend(layout="Bespoke_Atlas", x=214, y=8, width=75, height=110,
+                  map_id="main_map", title="HYDROLOGIC BASINS", columns=1)
+
+# Step 6: Add Clean Safe Scalebar (never spills outside frame)
+add_layout_scalebar(layout="Bespoke_Atlas", map_id="main_map", position="bottom-left",
+                    style="Stepped Line", segments=2, font_size=6.5, color="#0f172a")
+
+# Step 7: Inspect Finished Layout
+snapshot_layout(name="Bespoke_Atlas")
+```
