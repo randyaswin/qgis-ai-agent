@@ -41,6 +41,7 @@ if hasattr(QgsGraduatedSymbolRenderer, "setSourceSymbol") and not hasattr(QgsGra
 
 TOOLS = {}
 ALLOW_PYTHON = {"value": True}
+CANCEL_REQUESTED = False
 
 
 def tool(description, schema=None):
@@ -953,6 +954,8 @@ def describe_algorithm(algorithm):
       {"algorithm": S("string", ""), "params": S("object", "parameter dict"),
        "load": S("boolean", "default true"), "output_name": S("string", "rename the loaded result")})
 def run_processing(algorithm, params, load=True, output_name=None):
+    if CANCEL_REQUESTED:
+        raise RuntimeError("Execution stopped by user.")
     import processing
     params = dict(params or {})
     for k, v in list(params.items()):
@@ -3330,6 +3333,8 @@ def load_public_cog(url, name=None):
        "limit": S("integer", "max features to fetch, default 500"),
        "output_name": S("string", "layer name in QGIS, default e.g. 'Overture_Places'")})
 def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, limit=500, output_name=None):
+    if CANCEL_REQUESTED:
+        raise RuntimeError("Execution stopped by user.")
     import duckdb
     import time as _time
     default_types = {
@@ -3431,11 +3436,14 @@ def query_duckdb_spatial(query, layer_name="DuckDB_Layer"):
 @tool("Execute arbitrary PyQGIS code (iface, QgsProject, processing in scope). Assign to `result` to return a value. Only works if the user enabled it in the plugin panel.",
       {"code": S("string", "python source")})
 def exec_pyqgis(code):
+    if CANCEL_REQUESTED:
+        raise RuntimeError("Execution stopped by user.")
     if not ALLOW_PYTHON["value"]:
         raise PermissionError("exec_pyqgis is disabled by the user. Use the dedicated tools.")
     import processing
+    from qgis.PyQt.QtCore import QEventLoop
     from qgis.PyQt.QtWidgets import QApplication
-    QApplication.processEvents()
+    QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
     ns = {"iface": _iface(), "QgsProject": QgsProject, "processing": processing, "result": None}
     exec("from qgis.core import *\nfrom qgis.gui import *", ns)
     out = io.StringIO()
@@ -3454,6 +3462,8 @@ def list_tools():
 
 
 def call(name, args):
+    if CANCEL_REQUESTED:
+        raise RuntimeError("Execution stopped by user.")
     if name not in TOOLS:
         raise ValueError(f"Unknown tool {name}")
     return TOOLS[name]["fn"](**(args or {}))

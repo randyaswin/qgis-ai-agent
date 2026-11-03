@@ -487,6 +487,7 @@ class AgentDock(QDockWidget):
         self._model_thread = None
         self.first_turn = True
         self.start_time = 0
+        self._is_turn_active = False
         self.is_agent_streaming = False
         self._current_assistant_text = ""
         self._current_model_header = ""
@@ -1085,6 +1086,7 @@ class AgentDock(QDockWidget):
         self._run()
 
     def _on_stop_clicked(self):
+        tools.CANCEL_REQUESTED = True
         if self.runner.running():
             self.runner.stop()
             self._append_html(
@@ -1345,7 +1347,16 @@ class AgentDock(QDockWidget):
             return
         if append_text:
             self._thinking_text += append_text
-        elapsed = max(0, round(time.time() - self._thinking_start_time))
+
+        # Throttle DOM re-layout to at most once every 150ms to keep QGIS GUI completely responsive
+        now = time.time()
+        if not hasattr(self, "_last_thinking_update_time"):
+            self._last_thinking_update_time = 0
+        if append_text and (now - self._last_thinking_update_time < 0.15):
+            return
+
+        self._last_thinking_update_time = now
+        elapsed = max(0, round(now - self._thinking_start_time))
         preview_text = self._thinking_text[-1200:] if len(self._thinking_text) > 1200 else self._thinking_text
         node_html = render_streaming_thinking_html(text=preview_text, elapsed=elapsed)
 
@@ -1356,7 +1367,6 @@ class AgentDock(QDockWidget):
             rep_c.setPosition(start_pos)
             rep_c.setPosition(end_pos, QTextCursor.MoveMode.KeepAnchor)
             rep_c.insertHtml(node_html)
-            rep_c.insertBlock()
             self._thinking_pos = (start_pos, rep_c.position())
             self.log.setTextCursor(rep_c)
             self.log.ensureCursorVisible()
@@ -1507,8 +1517,9 @@ class AgentDock(QDockWidget):
         self._active_tool_pos = (start_pos, end_pos)
 
         # Force Qt GUI repaint so user sees IN arguments and running state immediately!
+        from qgis.PyQt.QtCore import QEventLoop
         from qgis.PyQt.QtWidgets import QApplication
-        QApplication.processEvents()
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
 
     def _on_tool_completed(self, name, result):
         clean_summary = format_out_result(name, result)
@@ -1811,6 +1822,7 @@ class AgentDock(QDockWidget):
         self.start_time = time.time()
         self.is_agent_streaming = False
         self._current_assistant_text = ""
+        tools.CANCEL_REQUESTED = False
 
         REGISTRY.mode = self.skill_mode.currentData()
         catalog = list(REGISTRY.available().keys())
@@ -1964,12 +1976,16 @@ class AgentDock(QDockWidget):
         try:
             # Use isolated session workspace for CLI subprocess
             proj_workspace = self.session_manager.get_workspace_dir(active_sess.id)
+            self._is_turn_active = True
             self.runner.start(argv, proj_workspace)
         except Exception as e:
             self._on_tool_failed("Subprocess Start", str(e))
             self._done(-1)
 
     def _done(self, code):
+        if not getattr(self, "_is_turn_active", True):
+            return
+        self._is_turn_active = False
         self._finalize_thinking_node(discard_if_empty=True)
         self.indicator_timer.stop()
         self._active_tool_pos = None

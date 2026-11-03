@@ -80,18 +80,19 @@ class ToolServer(QObject):
                 args = params.get("arguments") or {}
                 self.activity.emit(f"🔧 {name} {json.dumps(args, ensure_ascii=False)[:300]}")
                 self.tool_called.emit(name, args)
+                from qgis.PyQt.QtCore import QEventLoop
                 from qgis.PyQt.QtWidgets import QApplication
-                QApplication.processEvents()
+                QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
                 try:
                     res = tools.call(name, args)
                     self.tool_completed.emit(name, res)
-                    QApplication.processEvents()
+                    QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
                     return {"id": rid, "result": res}
                 except Exception as e:
                     err_msg = f"{type(e).__name__}: {e}"
                     self.activity.emit(f"⚠️ {err_msg}")
                     self.tool_failed.emit(name, err_msg)
-                    QApplication.processEvents()
+                    QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
                     return {"id": rid, "error": err_msg, "trace": traceback.format_exc()[-1500:]}
             return {"id": rid, "error": f"unknown method {method}"}
         except Exception as e:

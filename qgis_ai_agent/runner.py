@@ -296,11 +296,11 @@ class CliRunner(QObject):
     def stop(self):
         if self.running():
             pid = self.proc.processId()
-            # 1. Graceful termination
+            # 1. Graceful termination: send SIGTERM directly to guard.py (NEVER os.killpg, which can kill QGIS)
             self.proc.terminate()
-            if pid > 0 and hasattr(os, "killpg"):
+            if pid > 0 and sys.platform != "win32":
                 try:
-                    os.killpg(os.getpgid(pid), signal.SIGTERM)
+                    os.kill(pid, signal.SIGTERM)
                 except Exception:
                     pass
             elif pid > 0 and sys.platform == "win32":
@@ -310,12 +310,13 @@ class CliRunner(QObject):
                 except Exception:
                     pass
 
-            if not self.proc.waitForFinished(1500):
-                # 2. Force kill process tree if still active
-                if pid > 0 and hasattr(os, "killpg"):
+            # 2. Fast non-blocking wait (300ms max) to ensure the Qt GUI never freezes
+            if not self.proc.waitForFinished(300):
+                # 3. Force kill supervisor if not exited
+                if pid > 0 and sys.platform != "win32":
                     try:
-                        os.killpg(os.getpgid(pid), signal.SIGKILL)
+                        os.kill(pid, signal.SIGKILL)
                     except Exception:
                         pass
                 self.proc.kill()
-                self.proc.waitForFinished(1000)
+                self.proc.waitForFinished(200)

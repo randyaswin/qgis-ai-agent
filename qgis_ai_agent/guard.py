@@ -29,6 +29,13 @@ def main():
     cwd = sys.argv[2]
     child_cmd = sys.argv[3:]
 
+    # Ensure guard process runs in its own process group, completely separated from QGIS
+    if hasattr(os, "setpgrp"):
+        try:
+            os.setpgrp()
+        except Exception:
+            pass
+
     # 1. Linux PR_SET_PDEATHSIG: kernel sends SIGKILL if parent dies, even on kill -9 or segfault
     if sys.platform.startswith("linux"):
         try:
@@ -44,9 +51,14 @@ def main():
         nonlocal proc
         if proc and proc.poll() is None:
             try:
-                if hasattr(os, "killpg"):
-                    # Kill entire process group (child + subagents + tool subprocesses)
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                # Ensure we NEVER kill the parent QGIS process group under any circumstance
+                if hasattr(os, "killpg") and proc.pid:
+                    child_pgid = os.getpgid(proc.pid)
+                    parent_pgid = os.getpgid(parent_pid) if parent_pid > 0 else -1
+                    if child_pgid != parent_pgid and child_pgid != os.getpid():
+                        os.killpg(child_pgid, signal.SIGKILL)
+                    else:
+                        proc.kill()
                 else:
                     proc.kill()
             except Exception:
