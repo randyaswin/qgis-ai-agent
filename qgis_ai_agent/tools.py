@@ -112,8 +112,109 @@ def _canvas():
         return None
 
 
+def _is_valid_extent(e):
+    if e is None:
+        return False
+    try:
+        if e.isNull() or e.isEmpty():
+            return False
+        import math
+        vals = [e.xMinimum(), e.yMinimum(), e.xMaximum(), e.yMaximum()]
+        for v in vals:
+            if math.isnan(v) or math.isinf(v) or abs(v) > 1e16:
+                return False
+        if e.xMinimum() >= e.xMaximum() or e.yMinimum() >= e.yMaximum():
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _safe_transform_extent(ext, src_crs, dst_crs, project=None):
+    if not _is_valid_extent(ext):
+        return None
+    if not src_crs or not dst_crs or not src_crs.isValid() or not dst_crs.isValid() or src_crs == dst_crs:
+        return QgsRectangle(ext)
+    p = project or QgsProject.instance()
+    try:
+        tr = QgsCoordinateTransform(src_crs, dst_crs, p)
+        res = tr.transformBoundingBox(ext)
+        if _is_valid_extent(res):
+            return res
+    except Exception:
+        pass
+    try:
+        if not dst_crs.isGeographic():
+            b = dst_crs.bounds()
+            if _is_valid_extent(b):
+                tr_wgs = QgsCoordinateTransform(QgsCoordinateReferenceSystem("EPSG:4326"), dst_crs, p)
+                clamped_b = tr_wgs.transformBoundingBox(b)
+                if _is_valid_extent(clamped_b):
+                    return clamped_b
+    except Exception:
+        pass
+    return None
+
+
+def _sanitize_canvas_extent(target_crs=None, fallback_from_crs=None):
+    c = _canvas()
+    if not c or not hasattr(c, "extent") or not hasattr(c, "setExtent"):
+        return
+    p = QgsProject.instance()
+    dst_crs = target_crs or p.crs()
+    if not dst_crs or not dst_crs.isValid():
+        return
+
+    cur_ext = c.extent()
+    if _is_valid_extent(cur_ext):
+        if fallback_from_crs and fallback_from_crs.isValid() and fallback_from_crs != dst_crs:
+            safe_trans = _safe_transform_extent(cur_ext, fallback_from_crs, dst_crs, p)
+            if safe_trans:
+                c.setExtent(safe_trans)
+                return
+        else:
+            return
+
+    # If canvas extent is corrupt, empty, null, or out-of-bounds in dst_crs:
+    valid_extent = None
+    for lyr in p.mapLayers().values():
+        if not lyr.isValid() or lyr.providerType() == "wms":
+            continue
+        lyr_ext = lyr.extent()
+        if _is_valid_extent(lyr_ext):
+            trans_ext = _safe_transform_extent(lyr_ext, lyr.crs(), dst_crs, p)
+            if trans_ext:
+                if valid_extent is None:
+                    valid_extent = QgsRectangle(trans_ext)
+                else:
+                    valid_extent.combineExtentWith(trans_ext)
+
+    if valid_extent and _is_valid_extent(valid_extent):
+        valid_extent.scale(1.05)
+        c.setExtent(valid_extent)
+        return
+
+    if not dst_crs.isGeographic():
+        b = dst_crs.bounds()
+        if _is_valid_extent(b):
+            safe_b = _safe_transform_extent(b, QgsCoordinateReferenceSystem("EPSG:4326"), dst_crs, p)
+            if safe_b:
+                c.setExtent(safe_b)
+                return
+
+    if dst_crs.authid() in ("EPSG:4326", "OGC:CRS84"):
+        c.setExtent(QgsRectangle(-180, -85, 180, 85))
+    elif dst_crs.authid() == "EPSG:3857":
+        c.setExtent(QgsRectangle(-20037508, -20037508, 20037508, 20037508))
+    else:
+        c.setExtent(QgsRectangle(-50000, -50000, 50000, 50000))
+
+
 def _refresh():
-    _canvas().refreshAllLayers()
+    _sanitize_canvas_extent()
+    c = _canvas()
+    if c:
+        c.refreshAllLayers()
 
 
 # ---------------------------------------------------------------- project
@@ -121,13 +222,14 @@ def _refresh():
 def get_project_state():
     p = QgsProject.instance()
     order = [n.layerId() for n in p.layerTreeRoot().findLayers()]
-    ext = _canvas().extent()
+    c = _canvas()
+    ext = c.extent() if c else None
     state = {
         "project_file": p.fileName(),
         "crs": p.crs().authid(),
         "layers_top_to_bottom": [_layer_info(p.mapLayer(i)) for i in order if p.mapLayer(i)],
-        "canvas_extent": [ext.xMinimum(), ext.yMinimum(), ext.xMaximum(), ext.yMaximum()],
-        "canvas_scale": _canvas().scale(),
+        "canvas_extent": [round(ext.xMinimum(), 4), round(ext.yMinimum(), 4), round(ext.xMaximum(), 4), round(ext.yMaximum(), 4)] if _is_valid_extent(ext) else None,
+        "canvas_scale": c.scale() if c else 1.0,
         "layouts": [l.name() for l in p.layoutManager().layouts()],
         "qgis_version": Qgis.version(),
     }
@@ -136,8 +238,12 @@ def get_project_state():
 
 @tool("Clear the project and start fresh.", {"crs": S("string", "e.g. EPSG:4326 or EPSG:32748")})
 def new_project(crs="EPSG:4326"):
-    QgsProject.instance().clear()
-    QgsProject.instance().setCrs(QgsCoordinateReferenceSystem(crs))
+    p = QgsProject.instance()
+    p.clear()
+    c = QgsCoordinateReferenceSystem(crs)
+    if c.isValid():
+        p.setCrs(c)
+    _sanitize_canvas_extent(target_crs=c)
     return get_project_state()
 
 
@@ -146,7 +252,10 @@ def set_project_crs(crs):
     c = QgsCoordinateReferenceSystem(crs)
     if not c.isValid():
         raise ValueError(f"Invalid CRS {crs}")
-    QgsProject.instance().setCrs(c)
+    p = QgsProject.instance()
+    old_crs = p.crs()
+    p.setCrs(c)
+    _sanitize_canvas_extent(target_crs=c, fallback_from_crs=old_crs)
     _refresh()
     return {"crs": c.authid()}
 
@@ -188,7 +297,25 @@ def add_vector_layer(path, name=None, provider="ogr"):
     lyr = QgsVectorLayer(path, name or os.path.splitext(os.path.basename(path))[0], provider)
     if not lyr.isValid():
         raise ValueError(f"Invalid vector source: {path}")
-    QgsProject.instance().addMapLayer(lyr)
+    if not _is_valid_extent(lyr.extent()):
+        try:
+            lyr.updateExtents()
+        except Exception:
+            pass
+    p = QgsProject.instance()
+    non_wms = [l for l in p.mapLayers().values() if l.providerType() != "wms"]
+    is_first = len(non_wms) == 0
+    p.addMapLayer(lyr)
+    if is_first and _is_valid_extent(lyr.extent()):
+        safe_ext = _safe_transform_extent(lyr.extent(), lyr.crs(), p.crs(), p)
+        if safe_ext:
+            c = _canvas()
+            if c:
+                safe_ext.scale(1.05)
+                c.setExtent(safe_ext)
+                c.refresh()
+    else:
+        _sanitize_canvas_extent()
     return _layer_info(lyr)
 
 
@@ -198,7 +325,20 @@ def add_raster_layer(path, name=None, provider="gdal"):
     lyr = QgsRasterLayer(path, name or os.path.splitext(os.path.basename(path))[0], provider)
     if not lyr.isValid():
         raise ValueError(f"Invalid raster source: {path}")
-    QgsProject.instance().addMapLayer(lyr)
+    p = QgsProject.instance()
+    non_wms = [l for l in p.mapLayers().values() if l.providerType() != "wms"]
+    is_first = len(non_wms) == 0
+    p.addMapLayer(lyr)
+    if is_first and _is_valid_extent(lyr.extent()):
+        safe_ext = _safe_transform_extent(lyr.extent(), lyr.crs(), p.crs(), p)
+        if safe_ext:
+            c = _canvas()
+            if c:
+                safe_ext.scale(1.05)
+                c.setExtent(safe_ext)
+                c.refresh()
+    else:
+        _sanitize_canvas_extent()
     return _layer_info(lyr)
 
 
@@ -480,6 +620,7 @@ def add_basemap(preset="esri_light", url=None, name=None, **kwargs):
     if not lyr.isValid():
         raise ValueError(f"Basemap failed to load from {target_url}")
     p = QgsProject.instance()
+    _sanitize_canvas_extent(target_crs=p.crs())
     p.addMapLayer(lyr, False)
     p.layerTreeRoot().insertLayer(-1, lyr)
     return _layer_info(lyr)
@@ -528,11 +669,16 @@ def update_layer(layer, new_name=None, visible=None, opacity=None, position=None
        "margin": S("number", "fractional padding, default 0.05")})
 def zoom_to(layer=None, bbox=None, margin=0.05):
     c = _canvas()
+    p = QgsProject.instance()
     if bbox:
         r = QgsRectangle(*bbox)
     else:
         lyr = _layer(layer)
-        r = QgsCoordinateTransform(lyr.crs(), QgsProject.instance().crs(), QgsProject.instance()).transformBoundingBox(lyr.extent())
+        r = _safe_transform_extent(lyr.extent(), lyr.crs(), p.crs(), p)
+        if not r:
+            raise ValueError(f"Cannot calculate a valid bounding box to zoom for layer '{lyr.name()}'. Extent is empty or unprojectable.")
+    if not _is_valid_extent(r):
+        raise ValueError("Invalid target bounding box for zoom.")
     r.scale(1 + float(margin))
     c.setExtent(r)
     c.refresh()
@@ -549,12 +695,14 @@ def _jsonable(v):
 def _extent_info(lyr):
     p = QgsProject.instance()
     e = lyr.extent()
-    d = {"extent_layer_crs": [e.xMinimum(), e.yMinimum(), e.xMaximum(), e.yMaximum()]}
-    try:
-        w = QgsCoordinateTransform(lyr.crs(), QgsCoordinateReferenceSystem("EPSG:4326"), p).transformBoundingBox(e)
+    if not _is_valid_extent(e):
+        return {"extent_layer_crs": None, "extent_wgs84": None}
+    d = {"extent_layer_crs": [round(e.xMinimum(), 6), round(e.yMinimum(), 6), round(e.xMaximum(), 6), round(e.yMaximum(), 6)]}
+    w = _safe_transform_extent(e, lyr.crs(), QgsCoordinateReferenceSystem("EPSG:4326"), p)
+    if w:
         d["extent_wgs84"] = [round(w.xMinimum(), 6), round(w.yMinimum(), 6), round(w.xMaximum(), 6), round(w.yMaximum(), 6)]
-    except Exception:
-        pass
+    else:
+        d["extent_wgs84"] = None
     return d
 
 
@@ -966,6 +1114,7 @@ def run_processing(algorithm, params, load=True, output_name=None):
         params.setdefault("OUTPUT", "TEMPORARY_OUTPUT")
     before = set(QgsProject.instance().mapLayers())
     res = processing.runAndLoadResults(algorithm, params) if load else processing.run(algorithm, params)
+    _sanitize_canvas_extent()
     new = [QgsProject.instance().mapLayer(i) for i in set(QgsProject.instance().mapLayers()) - before]
     if output_name and new:
         new[0].setName(output_name)
@@ -1009,7 +1158,9 @@ def style_single(layer, color="#3388ff", outline_color=None, width=None, size=No
 def style_categorized(layer, field, ramp="Spectral", outline_color=None):
     lyr = _layer(layer)
     idx = lyr.fields().indexOf(field)
-    values = sorted(lyr.uniqueValues(idx), key=str) if idx >= 0 else []
+    raw_values = sorted(lyr.uniqueValues(idx), key=str) if idx >= 0 else []
+    MAX_CATS = 250
+    values = raw_values[:MAX_CATS]
     r = _ramp(ramp)
     cats = []
     n = max(len(values) - 1, 1)
@@ -1020,7 +1171,7 @@ def style_categorized(layer, field, ramp="Spectral", outline_color=None):
     lyr.setRenderer(QgsCategorizedSymbolRenderer(field, cats))
     lyr.triggerRepaint()
     _iface().layerTreeView().refreshLayerSymbology(lyr.id())
-    return {"categories": len(cats)}
+    return {"categories": len(cats), "total_unique": len(raw_values)}
 
 
 @tool("Graduated (choropleth / proportional) style.",
@@ -1055,14 +1206,25 @@ def style_raster(layer, band=1, ramp="Spectral", invert_ramp=False, classes=7):
     r = _ramp(ramp)
     if invert_ramp:
         r.invert()
-    fcn = QgsColorRampShader(st.minimumValue, st.maximumValue, r)
-    fcn.classifyColorRamp(int(classes), int(band), lyr.extent(), lyr.dataProvider())
+    min_v = st.minimumValue
+    max_v = st.maximumValue
+    import math
+    if math.isnan(min_v) or math.isinf(min_v):
+        min_v = 0.0
+    if math.isnan(max_v) or math.isinf(max_v):
+        max_v = 100.0
+    if min_v >= max_v:
+        max_v = min_v + 1.0
+
+    classes_count = max(2, min(int(classes), 50))
+    fcn = QgsColorRampShader(min_v, max_v, r)
+    fcn.classifyColorRamp(classes_count, int(band), lyr.extent(), lyr.dataProvider())
     sh = QgsRasterShader()
     sh.setRasterShaderFunction(fcn)
     lyr.setRenderer(QgsSingleBandPseudoColorRenderer(lyr.dataProvider(), int(band), sh))
     lyr.triggerRepaint()
     _iface().layerTreeView().refreshLayerSymbology(lyr.id())
-    return {"min": st.minimumValue, "max": st.maximumValue}
+    return {"min": min_v, "max": max_v}
 
 
 @tool("Apply a QML style file.", {"layer": S("string", ""), "qml_path": S("string", "")})
@@ -3278,12 +3440,16 @@ def search_stac_items(collections, bbox=None, datetime=None, limit=3, api_url=No
     client = Client.open(endpoint)
 
     if not bbox:
-        # Use current canvas extent in EPSG:4326
+        # Use current canvas extent in EPSG:4326 safely
         c = _canvas()
-        tr = QgsCoordinateTransform(QgsProject.instance().crs(), QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance())
-        wgs_ext = tr.transformBoundingBox(c.extent())
-        bbox = [round(wgs_ext.xMinimum(), 4), round(wgs_ext.yMinimum(), 4),
-                round(wgs_ext.xMaximum(), 4), round(wgs_ext.yMaximum(), 4)]
+        cur_ext = c.extent() if c else None
+        p_crs = QgsProject.instance().crs()
+        wgs_ext = _safe_transform_extent(cur_ext, p_crs, QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance())
+        if wgs_ext and _is_valid_extent(wgs_ext):
+            bbox = [round(wgs_ext.xMinimum(), 4), round(wgs_ext.yMinimum(), 4),
+                    round(wgs_ext.xMaximum(), 4), round(wgs_ext.yMaximum(), 4)]
+        else:
+            bbox = [-180, -85, 180, 85]
 
     params = {"collections": collections, "bbox": bbox, "max_items": int(limit)}
     if datetime:
@@ -3321,7 +3487,19 @@ def load_public_cog(url, name=None):
     lyr = QgsRasterLayer(vsi_url, layer_name, "gdal")
     if not lyr.isValid():
         raise ValueError(f"Failed to load COG raster from {clean_url}. Check if the URL is accessible.")
-    QgsProject.instance().addMapLayer(lyr)
+    p = QgsProject.instance()
+    is_first = len([l for l in p.mapLayers().values() if l.providerType() != "wms"]) == 0
+    p.addMapLayer(lyr)
+    if is_first and _is_valid_extent(lyr.extent()):
+        safe_ext = _safe_transform_extent(lyr.extent(), lyr.crs(), p.crs(), p)
+        if safe_ext:
+            c = _canvas()
+            if c:
+                safe_ext.scale(1.05)
+                c.setExtent(safe_ext)
+                c.refresh()
+    else:
+        _sanitize_canvas_extent()
     return _layer_info(lyr)
 
 
@@ -3346,16 +3524,20 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
 
     if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
         c = _canvas()
-        tr = QgsCoordinateTransform(QgsProject.instance().crs(), QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance())
-        wgs_ext = tr.transformBoundingBox(c.extent())
-        bbox = [round(wgs_ext.xMinimum(), 5), round(wgs_ext.yMinimum(), 5),
-                round(wgs_ext.xMaximum(), 5), round(wgs_ext.yMaximum(), 5)]
+        cur_ext = c.extent() if c else None
+        p_crs = QgsProject.instance().crs()
+        wgs_ext = _safe_transform_extent(cur_ext, p_crs, QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance())
+        if wgs_ext and _is_valid_extent(wgs_ext):
+            bbox = [round(wgs_ext.xMinimum(), 5), round(wgs_ext.yMinimum(), 5),
+                    round(wgs_ext.xMaximum(), 5), round(wgs_ext.yMaximum(), 5)]
+        else:
+            bbox = [137.35, 34.73, 137.45, 34.80]
 
     raw_xmin, raw_ymin, raw_xmax, raw_ymax = bbox
-    xmin = min(raw_xmin, raw_xmax)
-    xmax = max(raw_xmin, raw_xmax)
-    ymin = min(raw_ymin, raw_ymax)
-    ymax = max(raw_ymin, raw_ymax)
+    xmin = max(-180.0, min(180.0, min(raw_xmin, raw_xmax)))
+    xmax = max(-180.0, min(180.0, max(raw_xmin, raw_xmax)))
+    ymin = max(-85.0, min(85.0, min(raw_ymin, raw_ymax)))
+    ymax = max(-85.0, min(85.0, max(raw_ymin, raw_ymax)))
 
     # Select key attributes based on theme
     if t_name == "places":
@@ -3404,7 +3586,19 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
     lyr = QgsVectorLayer(out_file, layer_label, "ogr")
     if not lyr.isValid():
         raise ValueError(f"Failed to load Overture data exported to {out_file}")
-    QgsProject.instance().addMapLayer(lyr)
+    p = QgsProject.instance()
+    is_first = len([l for l in p.mapLayers().values() if l.providerType() != "wms"]) == 0
+    p.addMapLayer(lyr)
+    if is_first and _is_valid_extent(lyr.extent()):
+        safe_ext = _safe_transform_extent(lyr.extent(), lyr.crs(), p.crs(), p)
+        if safe_ext:
+            c = _canvas()
+            if c:
+                safe_ext.scale(1.05)
+                c.setExtent(safe_ext)
+                c.refresh()
+    else:
+        _sanitize_canvas_extent()
     return _layer_info(lyr)
 
 
@@ -3428,7 +3622,19 @@ def query_duckdb_spatial(query, layer_name="DuckDB_Layer"):
     lyr = QgsVectorLayer(out_file, layer_name, "ogr")
     if not lyr.isValid():
         raise ValueError(f"Failed to load DuckDB spatial query output from {out_file}")
-    QgsProject.instance().addMapLayer(lyr)
+    p = QgsProject.instance()
+    is_first = len([l for l in p.mapLayers().values() if l.providerType() != "wms"]) == 0
+    p.addMapLayer(lyr)
+    if is_first and _is_valid_extent(lyr.extent()):
+        safe_ext = _safe_transform_extent(lyr.extent(), lyr.crs(), p.crs(), p)
+        if safe_ext:
+            c = _canvas()
+            if c:
+                safe_ext.scale(1.05)
+                c.setExtent(safe_ext)
+                c.refresh()
+    else:
+        _sanitize_canvas_extent()
     return _layer_info(lyr)
 
 

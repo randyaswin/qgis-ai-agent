@@ -23,7 +23,7 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QMetaType
 
-from .tools import tool, S, _layer, _canvas
+from .tools import tool, S, _layer, _canvas, _safe_transform_extent, _is_valid_extent
 
 MM = Qgis.LayoutUnit.Millimeters if hasattr(Qgis, "LayoutUnit") else QgsUnitTypes.LayoutMillimeters
 ALIGN_H = {"left": Qt.AlignmentFlag.AlignLeft, "center": Qt.AlignmentFlag.AlignHCenter,
@@ -108,16 +108,29 @@ def _fmt(size=10, color="#000000", bold=False, font=None, italic=False, buffer_c
 
 def _extent(extent_layer=None, bbox=None, bbox_crs=None, margin=0.05):
     p = QgsProject.instance()
+    ext = None
     if bbox:
-        ext = QgsRectangle(*[float(v) for v in bbox])
+        b = QgsRectangle(*[float(v) for v in bbox])
         if bbox_crs:
-            ext = QgsCoordinateTransform(QgsCoordinateReferenceSystem(bbox_crs), p.crs(), p).transformBoundingBox(ext)
+            ext = _safe_transform_extent(b, QgsCoordinateReferenceSystem(bbox_crs), p.crs(), p)
+        else:
+            ext = b if _is_valid_extent(b) else None
     elif extent_layer:
-        lyr = _layer(extent_layer)
-        ext = QgsCoordinateTransform(lyr.crs(), p.crs(), p).transformBoundingBox(lyr.extent())
-    else:
-        ext = _canvas().extent()
-    if margin:
+        try:
+            lyr = _layer(extent_layer)
+            ext = _safe_transform_extent(lyr.extent(), lyr.crs(), p.crs(), p)
+        except Exception:
+            ext = None
+
+    if not _is_valid_extent(ext):
+        c = _canvas()
+        canv_ext = c.extent() if c else None
+        if _is_valid_extent(canv_ext):
+            ext = QgsRectangle(canv_ext)
+        else:
+            ext = QgsRectangle(-180, -85, 180, 85)
+
+    if margin and _is_valid_extent(ext):
         ext.scale(1 + float(margin))
     return ext
 
