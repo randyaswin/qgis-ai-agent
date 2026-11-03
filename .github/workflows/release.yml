@@ -2,6 +2,8 @@ name: Package and Release QGIS Plugin
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -55,9 +57,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: "Release v${{ steps.package.outputs.version }}"
-          tag_name: ${{ github.ref_name }}
-          draft: ${{ github.event.inputs.draft || false }}
-          prerelease: ${{ github.event.inputs.prerelease || false }}
+          tag_name: v${{ steps.package.outputs.version }}
+          draft: ${{ inputs.draft == true }}
+          prerelease: ${{ inputs.prerelease == true }}
           generate_release_notes: true
           files: |
             dist/qgis_ai_agent.zip
