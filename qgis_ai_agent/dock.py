@@ -432,10 +432,23 @@ def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_succe
     )
 
 
-def render_thinking_node_html(text="Thought for 1s"):
-    """Render a short, sleek Thinking timeline node with connected vertical line."""
+def render_thinking_node_html(text="Thought for 1s", content=""):
+    """Render a short, sleek Thinking timeline node with connected vertical line and optional expandable text."""
     if not text:
         text = "Thought for 1s"
+    body = ""
+    if content and content.strip():
+        clean_content = html.escape(content.strip())
+        if len(clean_content) > 3000:
+            clean_content = clean_content[:3000] + "<br><i>... (truncated)</i>"
+        clean_content = clean_content.replace("\n", "<br>")
+        body = (
+            f"<div style='margin-top: 4px; padding: 6px 10px; background-color: #0d1527; "
+            f"border-left: 2px solid #6366f1; border-radius: 4px; color: #94a3b8; "
+            f"font-family: sans-serif; font-size: 10.5px; line-height: 1.5; font-style: italic; word-break: break-word;'>"
+            f"{clean_content}"
+            f"</div>"
+        )
     return (
         f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 0;'>"
         f"<tr>"
@@ -443,7 +456,8 @@ def render_thinking_node_html(text="Thought for 1s"):
         f"<span style='color: #64748b; font-size: 11px; line-height: 16px;'>●</span>"
         f"</td>"
         f"<td valign='top' style='padding-left: 10px; padding-bottom: 6px;'>"
-        f"<span style='color: #94a3b8; font-size: 11px;'>{html.escape(text)}</span>"
+        f"<span style='color: #94a3b8; font-size: 11px; font-weight: 500;'>{html.escape(text)}</span>"
+        f"{body}"
         f"</td>"
         f"</tr>"
         f"</table>"
@@ -452,7 +466,7 @@ def render_thinking_node_html(text="Thought for 1s"):
 
 def render_streaming_thinking_html(text="", elapsed=0):
     """Render live streaming thinking node while agent is actively reasoning."""
-    clean_text = html.escape(text.strip())
+    clean_text = html.escape(text.strip()) if text else ""
     if clean_text:
         clean_text = clean_text.replace("\n", "<br>")
         content = (
@@ -463,7 +477,11 @@ def render_streaming_thinking_html(text="", elapsed=0):
             f"</div>"
         )
     else:
-        content = ""
+        content = (
+            f"<div style='margin-top: 2px; color: #64748b; font-size: 10.5px; font-style: italic;'>"
+            f"Reasoning and executing internal steps..."
+            f"</div>"
+        )
     return (
         f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 0;'>"
         f"<tr>"
@@ -499,6 +517,8 @@ class AgentDock(QDockWidget):
         self._thinking_text = ""
         self._thinking_pos = None
         self._in_explicit_tag = False
+        self._has_mcp_call_in_turn = False
+        self._last_finalized_thinking_html = None
         self._last_event_time = 0
         self.message_queue = []
         self.attachments = []
@@ -1060,6 +1080,8 @@ class AgentDock(QDockWidget):
         self._thinking_active = False
         self._thinking_pos = None
         self._thinking_text = ""
+        self._has_mcp_call_in_turn = False
+        self._last_finalized_thinking_html = None
         self.log.clear()
 
     def _set_cli(self, name):
@@ -1229,6 +1251,8 @@ class AgentDock(QDockWidget):
         self._thinking_active = False
         self._thinking_pos = None
         self._thinking_text = ""
+        self._has_mcp_call_in_turn = False
+        self._last_finalized_thinking_html = None
         self.log.clear()
         sess = self.session_manager.get_active_session()
         for m in sess.messages:
@@ -1371,10 +1395,66 @@ class AgentDock(QDockWidget):
             self.log.setTextCursor(rep_c)
             self.log.ensureCursorVisible()
 
+    def _extract_recent_thinking(self):
+        """Attempts to retrieve thinking text from CLI transcripts if available."""
+        if self._thinking_text and self._thinking_text.strip():
+            return self._thinking_text.strip()
+        try:
+            active_sess = self.session_manager.get_active_session()
+            proj_workspace = self.session_manager.get_workspace_dir(active_sess.id)
+            cli_id = active_sess.detect_and_store_cli_session_id(proj_workspace, active_sess.cli)
+
+            # 1. Antigravity CLI transcript
+            if cli_id:
+                p = os.path.expanduser(f"~/.gemini/antigravity/brain/{cli_id}/.system_generated/logs/transcript.jsonl")
+                if os.path.exists(p):
+                    with open(p, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+                    for line in reversed(lines[-40:]):
+                        try:
+                            d = json.loads(line)
+                            th = d.get("thinking")
+                            if th and isinstance(th, str) and th.strip():
+                                return th.strip()
+                        except Exception:
+                            pass
+
+            # 2. Claude Code projects transcript
+            norm_ws = proj_workspace.replace("/", "-").replace(os.sep, "-")
+            claude_dir = os.path.expanduser(f"~/.claude/projects/{norm_ws}")
+            if os.path.exists(claude_dir):
+                import glob
+                files = sorted(glob.glob(os.path.join(claude_dir, "*.jsonl")), key=os.path.getmtime, reverse=True)
+                if files:
+                    with open(files[0], "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+                    for line in reversed(lines[-50:]):
+                        try:
+                            d = json.loads(line)
+                            msg = d.get("message", {})
+                            cnt = msg.get("content")
+                            if isinstance(cnt, list):
+                                for b in cnt:
+                                    if isinstance(b, dict) and b.get("type") == "thinking":
+                                        th = b.get("thinking")
+                                        if th and th.strip():
+                                            return th.strip()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        return ""
+
     def _finalize_thinking_node(self, discard_if_empty=True):
         """Replaces the live streaming thinking node with 'Thought for Xs', or removes if empty."""
         if not self._thinking_active:
-            return
+            return getattr(self, "_last_finalized_thinking_html", None)
+
+        # If thinking text is empty, try extracting recent thinking from transcript
+        if not self._thinking_text or not self._thinking_text.strip():
+            extracted = self._extract_recent_thinking()
+            if extracted:
+                self._thinking_text = extracted
 
         has_thought_content = bool(self._thinking_text and self._thinking_text.strip())
         if discard_if_empty and not has_thought_content:
@@ -1392,10 +1472,10 @@ class AgentDock(QDockWidget):
             self._thinking_pos = None
             self._thinking_text = ""
             self._in_explicit_tag = False
-            return
+            return None
 
         elapsed = max(1, round(time.time() - self._thinking_start_time))
-        final_html = render_thinking_node_html(f"Thought for {elapsed}s")
+        final_html = render_thinking_node_html(f"Thought for {elapsed}s", content=self._thinking_text)
 
         if self._thinking_pos:
             start_pos, end_pos = self._thinking_pos
@@ -1409,11 +1489,13 @@ class AgentDock(QDockWidget):
                 self.log.setTextCursor(rep_c)
                 self.log.ensureCursorVisible()
 
+        self._last_finalized_thinking_html = final_html
         self._thinking_active = False
         self._thinking_pos = None
         self._thinking_text = ""
         self._in_explicit_tag = False
         self._last_event_time = time.time()
+        return final_html
 
     def _stream_agent_text(self, text):
         if not text:
@@ -1458,14 +1540,16 @@ class AgentDock(QDockWidget):
                 if m_open:
                     pre = rem[:m_open.start()]
                     if pre.strip():
-                        self._finalize_thinking_node(discard_if_empty=True)
+                        discard = getattr(self, "_has_mcp_call_in_turn", False) and not bool(self._thinking_text and self._thinking_text.strip())
+                        self._finalize_thinking_node(discard_if_empty=discard)
                         self._stream_agent_text(pre)
                     rem = rem[m_open.end():]
                     self._in_explicit_tag = True
                     if not self._thinking_active:
                         self._start_thinking_node()
                 else:
-                    self._finalize_thinking_node(discard_if_empty=True)
+                    discard = getattr(self, "_has_mcp_call_in_turn", False) and not bool(self._thinking_text and self._thinking_text.strip())
+                    self._finalize_thinking_node(discard_if_empty=discard)
                     self._stream_agent_text(rem)
                     rem = ""
             else:
@@ -1482,7 +1566,8 @@ class AgentDock(QDockWidget):
 
     def _on_tool_called(self, name, args):
         self.is_agent_streaming = False
-        # Tool call / script execution is NOT thinking: discard empty thinking placeholder immediately
+        self._has_mcp_call_in_turn = True
+        # Tool call / script execution is an MCP call: discard empty thinking placeholder immediately
         self._finalize_thinking_node(discard_if_empty=True)
         cat, prim = categorize_tool(name, args)
         in_str = format_in_args(args)
@@ -1822,6 +1907,8 @@ class AgentDock(QDockWidget):
         self.start_time = time.time()
         self.is_agent_streaming = False
         self._current_assistant_text = ""
+        self._has_mcp_call_in_turn = False
+        self._last_finalized_thinking_html = None
         tools.CANCEL_REQUESTED = False
 
         REGISTRY.mode = self.skill_mode.currentData()
@@ -1986,7 +2073,8 @@ class AgentDock(QDockWidget):
         if not getattr(self, "_is_turn_active", True):
             return
         self._is_turn_active = False
-        self._finalize_thinking_node(discard_if_empty=True)
+        discard = getattr(self, "_has_mcp_call_in_turn", False) and not bool(self._thinking_text and self._thinking_text.strip())
+        final_th_html = self._finalize_thinking_node(discard_if_empty=discard)
         self.indicator_timer.stop()
         self._active_tool_pos = None
         self._active_running_tool = None
@@ -2012,9 +2100,15 @@ class AgentDock(QDockWidget):
                 model_info=self._current_model_header,
                 timestamp=now_str
             )
+            th_block = final_th_html or getattr(self, "_last_finalized_thinking_html", None)
+            if th_block and not getattr(self, "_has_mcp_call_in_turn", False):
+                full_card_html = th_block + card_html
+            else:
+                full_card_html = card_html
+
             active_sess.add_assistant_message(
                 text=raw_asst_text,
-                html_card=card_html,
+                html_card=full_card_html,
                 model_info=self._current_model_header
             )
 
