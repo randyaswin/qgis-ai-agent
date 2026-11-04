@@ -1485,24 +1485,74 @@ def create_layout(name="Map", title="", subtitle="", credits="", page_size="A4",
     if credits:
         label(credits, m, H - m - 8, W - 2 * m, 8, 8)
 
-    mgr.addLayout(lay)
+    _register_layout(mgr, lay)
     return {"layout": name, "page_mm": [W, H], "map_scale": mp.scale()}
 
 
-def _get_layout(layout_name):
+def _open_layout_window(lay):
+    """Open the layout designer window in normal (non-fullscreen) mode so the user can see how the layout is made."""
+    if not lay:
+        return None
+    iface = _iface()
+    if not iface or not hasattr(iface, "openLayoutDesigner"):
+        return None
+    try:
+        from qgis.PyQt.QtWidgets import QApplication
+        from qgis.PyQt.QtCore import QEventLoop
+        designer = iface.openLayoutDesigner(lay)
+        if designer and hasattr(designer, "window"):
+            win = designer.window()
+            if win:
+                if hasattr(win, "isFullScreen") and win.isFullScreen():
+                    win.showNormal()
+                if hasattr(win, "isMaximized") and win.isMaximized():
+                    win.showNormal()
+                screen = QApplication.primaryScreen()
+                if screen:
+                    avail = screen.availableGeometry()
+                    w = min(1200, max(800, int(avail.width() * 0.65)))
+                    h = min(850, max(600, int(avail.height() * 0.72)))
+                    x = max(avail.x(), avail.x() + (avail.width() - w) // 2)
+                    y = max(avail.y(), avail.y() + (avail.height() - h) // 2)
+                    win.setGeometry(x, y, w, h)
+                win.show()
+                win.raise_()
+        from qgis.PyQt.QtCore import QEventLoop
+        from qgis.PyQt.QtWidgets import QApplication
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        return designer
+    except Exception as e:
+        LOGGER.warning(f"Failed to open layout designer window: {e}")
+    return None
+
+
+def _register_layout(mgr, lay):
+    """Add layout to manager and open layout designer window in normal (non-fullscreen) mode."""
+    mgr.addLayout(lay)
+    _open_layout_window(lay)
+
+
+def _get_layout(layout_name, open_window=True):
     mgr = QgsProject.instance().layoutManager()
+    lay = None
     if not layout_name:
         layouts = mgr.printLayouts()
         if layouts:
-            return layouts[0]
-        raise ValueError("No layout specified and active project has no layouts.")
-    lay = mgr.layoutByName(str(layout_name))
-    if not lay:
-        for l in mgr.printLayouts():
-            if l.name().lower() == str(layout_name).lower():
-                return l
-        avail = [l.name() for l in mgr.printLayouts()]
-        raise ValueError(f"No layout {layout_name!r}. Available: {avail}")
+            lay = layouts[0]
+        else:
+            raise ValueError("No layout specified and active project has no layouts.")
+    else:
+        lay = mgr.layoutByName(str(layout_name))
+        if not lay:
+            for l in mgr.printLayouts():
+                if l.name().lower() == str(layout_name).lower():
+                    lay = l
+                    break
+        if not lay:
+            avail = [l.name() for l in mgr.printLayouts()]
+            raise ValueError(f"No layout {layout_name!r}. Available: {avail}")
+    if open_window and lay:
+        _open_layout_window(lay)
     return lay
 
 
@@ -2149,7 +2199,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_appr.attemptMove(QgsLayoutPoint(right_x, appr_y + 0.5, mm))
         lbl_appr.attemptResize(QgsLayoutSize(right_w, 9.0, mm))
 
-        mgr.addLayout(lay)
+        _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale(),
                 "kop_peta_rect": [right_x, m, right_w, map_h]}
 
@@ -2245,7 +2295,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
             lbl_cred.attemptMove(QgsLayoutPoint(m, H - m - 4.0, mm))
             lbl_cred.attemptResize(QgsLayoutSize(W - 2 * m, 5.0, mm))
 
-        mgr.addLayout(lay)
+        _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
 
     # =========================================================================
@@ -2322,7 +2372,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
             lbl_cred.attemptMove(QgsLayoutPoint(m, H - m - 4.0, mm))
             lbl_cred.attemptResize(QgsLayoutSize(W - 2 * m, 5.0, mm))
 
-        mgr.addLayout(lay)
+        _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale(),
                 "right_panel_rect": [right_x, map_top, right_w, map_h]}
 
@@ -2464,7 +2514,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         na.attemptResize(QgsLayoutSize(10.0, 14.0, mm))
         na.attemptMove(QgsLayoutPoint(m + map_w - 14.0, map_top + 3.0, mm))
 
-        mgr.addLayout(lay)
+        _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale(),
                 "right_panel_rect": [right_x, map_top, right_w, map_h]}
 
@@ -2543,7 +2593,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         na.attemptResize(QgsLayoutSize(10.0, 14.0, mm))
         na.attemptMove(QgsLayoutPoint(m + 6.0, m + 6.0, mm))
 
-        mgr.addLayout(lay)
+        _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
 
     # =========================================================================
@@ -2592,7 +2642,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_art.attemptMove(QgsLayoutPoint(m, m + map_h + 3.0, mm))
         lbl_art.attemptResize(QgsLayoutSize(map_w, title_block_h, mm))
 
-        mgr.addLayout(lay)
+        _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
 
     # =========================================================================
@@ -2660,7 +2710,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_inst.attemptMove(QgsLayoutPoint(W - m - 95.0, H - m - 14.0, mm))
         lbl_inst.attemptResize(QgsLayoutSize(90.0, 12.0, mm))
 
-        mgr.addLayout(lay)
+        _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
 
     # =========================================================================
@@ -2769,7 +2819,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_cred.attemptMove(QgsLayoutPoint(m, H - m - 3.5, mm))
         lbl_cred.attemptResize(QgsLayoutSize(W - 2 * m, 4.0, mm))
 
-        mgr.addLayout(lay)
+        _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale(),
                 "right_panel_rect": [right_x, map_top, right_w, map_h]}
 
@@ -2830,7 +2880,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
                                font_family="Georgia", font_size=6.5, color="#2e2115", secondary_color="#f4ecd8",
                                background="#f4ecd8", frame_color="#2e2115")
 
-        mgr.addLayout(lay)
+        _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
 
     # =========================================================================
@@ -2958,7 +3008,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_b4.attemptMove(QgsLayoutPoint(right_x, curr_y, mm))
         lbl_b4.attemptResize(QgsLayoutSize(right_w, card4_h, mm))
 
-        mgr.addLayout(lay)
+        _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale(),
                 "bento_cards": 4}
 
@@ -3053,7 +3103,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_meta.attemptMove(QgsLayoutPoint(W / 2.0, foot_y + 2.0, mm))
         lbl_meta.attemptResize(QgsLayoutSize(W / 2.0 - m, 10.0, mm))
 
-        mgr.addLayout(lay)
+        _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "maps": ["Map 1 (Baseline)", "Map 2 (Scenario)"]}
 
     # =========================================================================
@@ -3118,7 +3168,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         _create_clean_scalebar(mp, style="Stepped Line", position="bottom-left", pad=5.0,
                                color="#0f172a", background="#ffffff", frame_color=None)
 
-        mgr.addLayout(lay)
+        _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
 
     # =========================================================================
@@ -3177,7 +3227,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_tele.attemptMove(QgsLayoutPoint(W - m - 65.0, H - m - 12.0, mm))
         lbl_tele.attemptResize(QgsLayoutSize(60.0, 9.0, mm))
 
-        mgr.addLayout(lay)
+        _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
 
     # =========================================================================
@@ -3240,7 +3290,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
                                font_family="Times New Roman", font_size=6.5, color="#1e293b", secondary_color="#fbf5dc",
                                background="#fbf5dc", frame_color="#1e293b")
 
-        mgr.addLayout(lay)
+        _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
 
     # =========================================================================
@@ -3299,7 +3349,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_cred.attemptMove(QgsLayoutPoint(m, H - m - 4.0, mm))
         lbl_cred.attemptResize(QgsLayoutSize(W - 2 * m, 5.0, mm))
 
-    mgr.addLayout(lay)
+    _register_layout(mgr, lay)
     return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
 
 
@@ -3366,12 +3416,12 @@ def export_layout(name=None, path=None, dpi=300, preview=False, **kwargs):
     return out
 
 
-@tool("Open the layout designer window for the user.", {"name": S("string", "")})
+@tool("Open the layout designer window for the user in normal (non-fullscreen) mode.", {"name": S("string", "")})
 def open_layout_designer(name=None, **kwargs):
     target = name or kwargs.get("layout") or kwargs.get("layout_name")
-    lay = _get_layout(target)
-    _iface().openLayoutDesigner(lay)
-    return {"opened": target}
+    lay = _get_layout(target, open_window=True)
+    _open_layout_window(lay)
+    return {"opened": getattr(lay, "name", lambda: str(target))()}
 
 
 # ---------------------------------------------------------------- skills

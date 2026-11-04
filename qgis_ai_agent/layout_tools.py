@@ -23,7 +23,7 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QMetaType
 
-from .tools import tool, S, _layer, _canvas, _safe_transform_extent, _is_valid_extent
+from .tools import tool, S, _layer, _canvas, _safe_transform_extent, _is_valid_extent, _open_layout_window, _register_layout
 
 MM = Qgis.LayoutUnit.Millimeters if hasattr(Qgis, "LayoutUnit") else QgsUnitTypes.LayoutMillimeters
 ALIGN_H = {"left": Qt.AlignmentFlag.AlignLeft, "center": Qt.AlignmentFlag.AlignHCenter,
@@ -55,6 +55,7 @@ def _lay(name):
                 return l
         avail = [l.name() for l in mgr.printLayouts()]
         raise ValueError(f"No layout {name!r}. Available layouts: {avail}. Create it with create_blank_layout / create_layout first.")
+    _open_layout_window(lay)
     return lay
 
 
@@ -201,7 +202,7 @@ def create_blank_layout(name="Map", page_size="A4", orientation="landscape", wid
         page.setPageSize(page_size, ori)
     sym = QgsFillSymbol.createSimple({"color": QColor(background).name(), "outline_style": "no"})
     page.setPageStyleSymbol(sym)
-    mgr.addLayout(lay)
+    _register_layout(mgr, lay)
     W, H = page.pageSize().width(), page.pageSize().height()
     return {"layout": name, "page_mm": [W, H], "hint": "Origin is the top-left corner; x grows right, y grows down (mm)."}
 

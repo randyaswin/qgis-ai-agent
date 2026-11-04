@@ -35,6 +35,13 @@ def summarize_tool_result(name, result):
     if name == "snapshot_canvas":
         kb = len(result.get("__image__", "")) * 3 // 4 // 1024
         return f"Canvas screenshot captured ({kb} KB)"
+    if name == "snapshot_layout":
+        kb = len(result.get("__image__", "")) * 3 // 4 // 1024
+        dim = ""
+        if "page_mm" in result:
+            p_mm = result["page_mm"]
+            dim = f"Page {p_mm[0]:.0f}x{p_mm[1]:.0f} mm • "
+        return f"Layout '{result.get('layout', '')}' preview captured ({dim}{kb} KB)"
     if name == "export_layout":
         meta = result.get("meta", result)
         path = meta.get("path", "")
@@ -458,11 +465,13 @@ def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_succe
 
     img_html = ""
     if img_base64:
-        cap_prefix = "📄 Print Layout Preview" if ("layout" in name.lower()) else "🗺️ Canvas Preview"
+        kb = len(img_base64) * 3 // 4 // 1024
+        cap_prefix = "📄 Layout Preview" if ("layout" in name.lower()) else "🗺️ Canvas Screenshot"
         img_html = (
-            f"<div style='margin-top: 6px; text-align: left;'>"
-            f"<img src='data:image/png;base64,{img_base64}' style='max-width: 95%; border: 1px solid #334155; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.5);'><br>"
-            f"<span style='font-size: 10px; color: #64748b;'>{cap_prefix} ({html.escape(name)})</span>"
+            f"<div style='margin-top: 4px; text-align: left;'>"
+            f"<span style='display: inline-block; background-color: #0f172a; border: 1px solid #1e293b; "
+            f"color: #38bdf8; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-family: monospace;'>"
+            f"📷 {cap_prefix} sent to AI ({kb} KB)</span>"
             f"</div>"
         )
 
