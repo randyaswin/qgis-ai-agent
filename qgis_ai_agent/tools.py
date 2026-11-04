@@ -3562,25 +3562,30 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
     s3_path = f"s3://overturemaps-us-west-2/release/2026-10-21.0/theme={t_name}/type={t_type}/*"
 
     con = duckdb.connect()
-    con.execute("INSTALL spatial; LOAD spatial; INSTALL httpfs; LOAD httpfs;")
-    con.execute("SET s3_region='us-west-2';")
-    con.execute("SET geometry_always_xy=true;")
-
-    copy_query = f"""
-    COPY (
-        SELECT {select_clause}
-        FROM read_parquet('{s3_path}', hive_partitioning=1)
-        WHERE {' AND '.join(where_clauses)}
-        LIMIT {int(limit)}
-    ) TO '{out_file}' WITH (FORMAT GDAL, DRIVER 'GeoJSON');
-    """
     try:
+        con.execute("INSTALL spatial; LOAD spatial; INSTALL httpfs; LOAD httpfs;")
+        con.execute("SET s3_region='us-west-2';")
+        con.execute("SET geometry_always_xy=true;")
+
+        copy_query = f"""
+        COPY (
+            SELECT {select_clause}
+            FROM read_parquet('{s3_path}', hive_partitioning=1)
+            WHERE {' AND '.join(where_clauses)}
+            LIMIT {int(limit)}
+        ) TO '{out_file}' WITH (FORMAT GDAL, DRIVER 'GeoJSON');
+        """
         con.execute(copy_query)
     except Exception as e:
         raise RuntimeError(
             f"Overture Maps query failed for theme='{t_name}', type='{t_type}'. Error: {e}. "
             f"Tip: If a column or filter fails, adjust parameters or use `query_duckdb_spatial` for custom SQL against '{s3_path}'."
         ) from e
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
 
     layer_label = output_name or f"Overture_{t_name.capitalize()}"
     lyr = QgsVectorLayer(out_file, layer_label, "ogr")
@@ -3609,15 +3614,20 @@ def query_duckdb_spatial(query, layer_name="DuckDB_Layer"):
     import duckdb
     out_file = os.path.join(tempfile.gettempdir(), f"duckdb_result_{int(time.time())}.geojson")
     con = duckdb.connect()
-    con.execute("INSTALL spatial; LOAD spatial; INSTALL httpfs; LOAD httpfs;")
-    con.execute("SET s3_region='us-west-2';")
-    con.execute("SET geometry_always_xy=true;")
-
-    copy_query = f"COPY ({query}) TO '{out_file}' WITH (FORMAT GDAL, DRIVER 'GeoJSON');"
     try:
+        con.execute("INSTALL spatial; LOAD spatial; INSTALL httpfs; LOAD httpfs;")
+        con.execute("SET s3_region='us-west-2';")
+        con.execute("SET geometry_always_xy=true;")
+
+        copy_query = f"COPY ({query}) TO '{out_file}' WITH (FORMAT GDAL, DRIVER 'GeoJSON');"
         con.execute(copy_query)
     except Exception as e:
         raise RuntimeError(f"DuckDB spatial query failed. Query: {query}. Error: {e}") from e
+    finally:
+        try:
+            con.close()
+        except Exception:
+            pass
 
     lyr = QgsVectorLayer(out_file, layer_name, "ogr")
     if not lyr.isValid():

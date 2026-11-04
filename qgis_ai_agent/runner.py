@@ -1,4 +1,5 @@
 """Adapters that spawn AI CLIs non-interactively and register the MCP bridge."""
+import glob
 import json
 import os
 import re
@@ -6,6 +7,9 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
+import time
+import uuid
 
 from qgis.PyQt.QtCore import QObject, QProcess, QProcessEnvironment, QThread, pyqtSignal
 
@@ -248,6 +252,105 @@ def available():
     return {k: bool(shutil.which(v["bin"]) or find_cli_bin(v["bin"]) != v["bin"]) for k, v in ADAPTERS.items()}
 
 
+def get_process_descendants(root_pid, protected_pids=None):
+    """Recursively collect all child/descendant PIDs of root_pid."""
+    if protected_pids is None:
+        protected_pids = set()
+    descendants = set()
+    to_visit = [root_pid]
+    while to_visit:
+        curr = to_visit.pop(0)
+        found = set()
+        for child_file in glob.glob(f"/proc/{curr}/task/*/children"):
+            try:
+                with open(child_file, "r") as f:
+                    for c in f.read().split():
+                        if c.isdigit():
+                            found.add(int(c))
+            except Exception:
+                pass
+        try:
+            out = subprocess.check_output(["pgrep", "-P", str(curr)], stderr=subprocess.DEVNULL, text=True)
+            for c in out.split():
+                if c.isdigit():
+                    found.add(int(c))
+        except Exception:
+            pass
+        for c in found:
+            if c not in descendants and c not in protected_pids:
+                descendants.add(c)
+                to_visit.append(c)
+    return list(descendants)
+
+
+def kill_entire_tree(root_pids, protected_pids=None):
+    """Guarantees complete termination of processes and all their children."""
+    if protected_pids is None:
+        protected_pids = set()
+    protected_pids.add(os.getpid())
+    try:
+        protected_pids.add(os.getppid())
+    except Exception:
+        pass
+
+    all_targets = set()
+    for rpid in root_pids:
+        if rpid and rpid > 0 and rpid not in protected_pids:
+            all_targets.add(rpid)
+            if sys.platform.startswith("linux") or sys.platform == "darwin":
+                try:
+                    for d in get_process_descendants(rpid, protected_pids):
+                        all_targets.add(d)
+                except Exception:
+                    pass
+
+    # Windows native process tree termination
+    if sys.platform == "win32":
+        for rpid in root_pids:
+            if rpid and rpid > 0 and rpid not in protected_pids:
+                try:
+                    subprocess.call(
+                        ["taskkill", "/F", "/T", "/PID", str(rpid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL
+                    )
+                except Exception:
+                    pass
+        return
+
+    # First wave: SIGTERM to target processes and their process groups
+    for pid in all_targets:
+        if pid not in protected_pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
+            try:
+                if hasattr(os, "getpgid") and hasattr(os, "killpg"):
+                    pg = os.getpgid(pid)
+                    if pg not in protected_pids and pg > 0:
+                        os.killpg(pg, signal.SIGTERM)
+            except Exception:
+                pass
+
+    time.sleep(0.06)
+
+    # Second wave: SIGKILL to force kill everything surviving
+    for pid in all_targets:
+        if pid not in protected_pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+            try:
+                if hasattr(os, "getpgid") and hasattr(os, "killpg"):
+                    pg = os.getpgid(pid)
+                    if pg not in protected_pids and pg > 0:
+                        os.killpg(pg, signal.SIGKILL)
+            except Exception:
+                pass
+
+
 class CliRunner(QObject):
     output = pyqtSignal(str)
     finished = pyqtSignal(int)
@@ -255,9 +358,22 @@ class CliRunner(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.proc = None
+        self._current_pid_file = None
 
     def running(self):
         return self.proc is not None and self.proc.state() != QProcess.ProcessState.NotRunning
+
+    def _cleanup_pid_file(self):
+        if self._current_pid_file and os.path.exists(self._current_pid_file):
+            try:
+                os.remove(self._current_pid_file)
+            except Exception:
+                pass
+        self._current_pid_file = None
+
+    def _on_finished(self, code, _status=None):
+        self._cleanup_pid_file()
+        self.finished.emit(code)
 
     def start(self, argv, cwd):
         if self.running():
@@ -265,6 +381,10 @@ class CliRunner(QObject):
         self.proc = QProcess(self)
         env = QProcessEnvironment.systemEnvironment()
         env.insert("NO_COLOR", "1")
+
+        # Create unique PID tracking file for this invocation
+        self._current_pid_file = os.path.join(tempfile.gettempdir(), f"qgis_ai_{uuid.uuid4().hex[:12]}.pid")
+        env.insert("QGIS_AI_PID_FILE", self._current_pid_file)
 
         # Cross-platform binary discovery (Linux, macOS Homebrew, Windows npm/AppData)
         extra_paths = [
@@ -284,7 +404,7 @@ class CliRunner(QObject):
         self.proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.proc.readyReadStandardOutput.connect(
             lambda: self.output.emit(bytes(self.proc.readAllStandardOutput()).decode(errors="replace")))
-        self.proc.finished.connect(lambda code, _s: self.finished.emit(code))
+        self.proc.finished.connect(self._on_finished)
         self.proc.errorOccurred.connect(lambda e: self.output.emit(f"\n[process error: {e}]\n"))
 
         bin_exec = shutil.which(argv[0]) or argv[0]
@@ -294,29 +414,37 @@ class CliRunner(QObject):
         self.proc.start(guard_argv[0], guard_argv[1:])
 
     def stop(self):
-        if self.running():
-            pid = self.proc.processId()
-            # 1. Graceful termination: send SIGTERM directly to guard.py (NEVER os.killpg, which can kill QGIS)
-            self.proc.terminate()
-            if pid > 0 and sys.platform != "win32":
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                except Exception:
-                    pass
-            elif pid > 0 and sys.platform == "win32":
-                try:
-                    subprocess.call(["taskkill", "/F", "/T", "/PID", str(pid)],
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except Exception:
-                    pass
+        # 1. Read child CLI PID directly from the tracking file if available
+        child_pid = None
+        if self._current_pid_file and os.path.exists(self._current_pid_file):
+            try:
+                with open(self._current_pid_file, "r") as f:
+                    content = f.read().strip()
+                    if content.isdigit():
+                        child_pid = int(content)
+            except Exception:
+                pass
 
-            # 2. Fast non-blocking wait (300ms max) to ensure the Qt GUI never freezes
-            if not self.proc.waitForFinished(300):
-                # 3. Force kill supervisor if not exited
-                if pid > 0 and sys.platform != "win32":
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except Exception:
-                        pass
+        # 2. Get guard supervisor PID
+        guard_pid = None
+        if self.proc and self.proc.state() != QProcess.ProcessState.NotRunning:
+            try:
+                p = self.proc.processId()
+                if p and p > 0:
+                    guard_pid = p
+            except Exception:
+                pass
+
+        # 3. Kill all targets and their entire descendant process trees directly
+        targets = [p for p in (guard_pid, child_pid) if p and p > 0]
+        if targets:
+            kill_entire_tree(targets, protected_pids={os.getpid(), os.getppid()})
+
+        # 4. Finish Qt QProcess object cleanly
+        if self.proc and self.proc.state() != QProcess.ProcessState.NotRunning:
+            self.proc.terminate()
+            if not self.proc.waitForFinished(400):
                 self.proc.kill()
                 self.proc.waitForFinished(200)
+
+        self._cleanup_pid_file()

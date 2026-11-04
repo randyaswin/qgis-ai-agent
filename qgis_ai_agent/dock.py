@@ -1109,15 +1109,14 @@ class AgentDock(QDockWidget):
 
     def _on_stop_clicked(self):
         tools.CANCEL_REQUESTED = True
-        if self.runner.running():
-            self.runner.stop()
-            self._append_html(
-                f"<div style='margin: 6px 0; padding: 4px 8px; background-color: #450a0a; "
-                f"border-left: 3px solid #ef4444; border-radius: 3px; font-size: 11px; color: #fca5a5;'>"
-                f"⏹ <b>Execution stopped by user.</b>"
-                f"</div>"
-            )
-            self._done(-9)
+        self.runner.stop()
+        self._append_html(
+            f"<div style='margin: 6px 0; padding: 4px 8px; background-color: #450a0a; "
+            f"border-left: 3px solid #ef4444; border-radius: 3px; font-size: 11px; color: #fca5a5;'>"
+            f"⏹ <b>Execution stopped by user.</b>"
+            f"</div>"
+        )
+        self._done(-9)
 
     def _on_log_anchor_clicked(self, url):
         u_str = url.toString() if hasattr(url, "toString") else str(url)
