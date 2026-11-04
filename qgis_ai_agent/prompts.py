@@ -52,5 +52,8 @@ def build(system, context, skills_text, user, continuing, session_history=None):
         segs.append(session_history)
     if skills_text:
         segs.append(skills_text)
-    segs.append("# User request\n" + user)
+    req_header = "# User request"
+    if not continuing and not session_history:
+        req_header += " (Initial request: if requirements are vague/underspecified, follow Protocol 0 to clarify with max 3 questions and interactive options [🔘 Label](prompt:...) before executing tools)"
+    segs.append(f"{req_header}\n{user}")
     return "\n\n".join(segs)

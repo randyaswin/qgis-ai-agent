@@ -273,6 +273,34 @@ def markdown_to_clean_html(md_text):
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
     text = re.sub(r"\*([^*\n]+)\*", r"<i>\1</i>", text)
 
+    # 5b. Markdown Links & Interactive Option Chips: [label](url)
+    def _link_conv(m):
+        label = m.group(1).strip()
+        url = m.group(2).strip()
+        u_lower = url.lower()
+        if any(u_lower.startswith(p) for p in ("prompt:", "fill:", "answer:", "send:")):
+            return (
+                f"<a href='{html.escape(url, quote=True)}' "
+                f"style='display: inline-block; background-color: #1e293b; color: #38bdf8; "
+                f"border: 1px solid #334155; padding: 2px 9px; border-radius: 12px; "
+                f"text-decoration: none; font-size: 11px; margin: 2px 4px 2px 0; font-weight: 500;'>"
+                f"{label}</a>"
+            )
+        elif u_lower.startswith("revert:"):
+            return (
+                f"<a href='{html.escape(url, quote=True)}' "
+                f"style='color: #f59e0b; text-decoration: underline; font-weight: bold;'>"
+                f"{label}</a>"
+            )
+        else:
+            return (
+                f"<a href='{html.escape(url, quote=True)}' "
+                f"style='color: #60a5fa; text-decoration: underline;'>"
+                f"{label}</a>"
+            )
+
+    text = re.sub(r"\[([^\]\n]+)\]\(([^)\n]+)\)", _link_conv, text)
+
     # 6. Horizontal rule
     text = re.sub(r"^---+$", r"<hr style='border: none; border-top: 1px solid #282f3d; margin: 8px 0;'>", text, flags=re.M)
 
@@ -1162,12 +1190,61 @@ class AgentDock(QDockWidget):
 
     def _on_log_anchor_clicked(self, url):
         u_str = url.toString() if hasattr(url, "toString") else str(url)
+        import urllib.parse
         if u_str.startswith("revert:"):
             try:
                 cycle_no = int(u_str.split(":", 1)[1])
                 self._confirm_and_revert(cycle_no)
             except Exception as e:
                 tools.LOGGER.warning(f"Error handling revert anchor: {e}")
+        elif any(u_str.startswith(p) for p in ("prompt:", "fill:", "answer:", "send:")):
+            try:
+                prefix = u_str.split(":", 1)[0]
+                raw_val = u_str[len(prefix) + 1:]
+                val = urllib.parse.unquote(raw_val).strip()
+                if val.endswith(":"):
+                    val += " "
+
+                if prefix == "send":
+                    self.prompt.setPlainText(val)
+                    self._run()
+                    return
+
+                cur_text = self.prompt.toPlainText().strip()
+                if ":" in val and cur_text:
+                    cat = val.split(":", 1)[0].strip().lower()
+                    delimiter = "\n" if "\n" in cur_text else ", "
+                    chunks = [c.strip() for c in (cur_text.split("\n") if "\n" in cur_text else cur_text.split(",")) if c.strip()]
+                    replaced = False
+                    for i, chunk in enumerate(chunks):
+                        if ":" in chunk and chunk.split(":", 1)[0].strip().lower() == cat:
+                            chunks[i] = val
+                            replaced = True
+                            break
+                    if replaced:
+                        new_text = delimiter.join(chunks)
+                    else:
+                        new_text = f"{cur_text}{delimiter}{val}"
+                elif cur_text:
+                    delimiter = "\n" if ("\n" in cur_text or "\n" in val) else ", "
+                    new_text = f"{cur_text}{delimiter}{val}"
+                else:
+                    new_text = val
+
+                self.prompt.setPlainText(new_text)
+                c = self.prompt.textCursor()
+                c.movePosition(QTextCursor.MoveOperation.End)
+                self.prompt.setTextCursor(c)
+                self.prompt.setFocus()
+            except Exception as e:
+                tools.LOGGER.warning(f"Error handling interactive anchor: {e}")
+        elif u_str.startswith("http://") or u_str.startswith("https://") or u_str.startswith("file://"):
+            try:
+                from qgis.PyQt.QtCore import QUrl
+                from qgis.PyQt.QtGui import QDesktopServices
+                QDesktopServices.openUrl(QUrl(u_str))
+            except Exception as e:
+                tools.LOGGER.warning(f"Error opening external URL: {e}")
 
     def _save_checkpoint(self, cycle_no, label=""):
         try:
