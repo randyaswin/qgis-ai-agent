@@ -2358,6 +2358,10 @@ class AgentDock(QDockWidget):
 
         REGISTRY.mode = self.skill_mode.currentData()
         catalog = list(REGISTRY.available().keys())
+        try:
+            live_layer_names = [lyr.name() for lyr in QgsProject.instance().mapLayers().values()]
+        except Exception:
+            live_layer_names = []
 
         # Check if previous assistant message was a clarification question without executing tools
         is_after_clarification = False
@@ -2380,7 +2384,7 @@ class AgentDock(QDockWidget):
         inherited_skills = []
         if REGISTRY.mode == "manual":
             # Manual mode: pre-load all pinned / manual skills in full before execution
-            sel = REGISTRY.select(user)
+            sel = REGISTRY.select(user, layer_names=live_layer_names)
             loaded_skills = [s.name for s in sel.get("pinned", []) + sel.get("full", [])]
             active_sess.active_skills = list(loaded_skills)
             active_sess.is_e2e = sel.get("is_e2e", False)
@@ -2392,15 +2396,15 @@ class AgentDock(QDockWidget):
             # Auto mode after clarification: automatically select skills matching the combined clarified intent
             all_user_prompts = [m.text for m in active_sess.messages if m.role == "user"] + [user]
             combined_task = "\n".join(all_user_prompts)
-            sel = REGISTRY.select(combined_task)
+            sel = REGISTRY.select(combined_task, layer_names=live_layer_names)
             loaded_skills = [s.name for s in sel.get("pinned", []) + sel.get("full", [])]
             active_sess.active_skills = list(loaded_skills)
             active_sess.is_e2e = sel.get("is_e2e", False)
-            skills_txt = prompts.skills_block(sel, catalog)
+            skills_txt = prompts.skills_block(sel, catalog) if loaded_skills else ""
         elif cont and active_sess.active_skills:
             # Auto mode continuing turn after tools were already executed: inherit and add newly needed skills
             inherited_skills = list(active_sess.active_skills)
-            new_sel = REGISTRY.select(user)
+            new_sel = REGISTRY.select(user, layer_names=live_layer_names)
             new_names = [s.name for s in new_sel.get("pinned", []) + new_sel.get("full", [])]
             added_names = [n for n in new_names if n not in inherited_skills]
 
@@ -2422,11 +2426,12 @@ class AgentDock(QDockWidget):
             sel = {"pinned": [], "full": [avail_skills[n] for n in merged_skill_names if n in avail_skills], "scores": {}}
         else:
             # Auto mode: first turn / before execution
-            sel = REGISTRY.select(user)
+            # If the request is vague, REGISTRY.select returns empty skills until clarified
+            sel = REGISTRY.select(user, layer_names=live_layer_names)
             loaded_skills = [s.name for s in sel.get("pinned", []) + sel.get("full", [])]
             active_sess.active_skills = list(loaded_skills)
             active_sess.is_e2e = sel.get("is_e2e", False)
-            skills_txt = prompts.skills_block(sel, catalog)
+            skills_txt = prompts.skills_block(sel, catalog) if loaded_skills else ""
 
         # Model and Effort selection
         selected_model = self.model_combo.currentData()

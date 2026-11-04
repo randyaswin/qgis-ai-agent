@@ -393,11 +393,87 @@ class Registry:
 
         return False
 
-    def select(self, user_prompt, already=()):
+    def is_vague_request(self, user_prompt, layer_names=None):
+        """Return True if user prompt is vague / underspecified and requires clarification before skills selection."""
+        if not user_prompt or not user_prompt.strip():
+            return True
+        text = user_prompt.strip()
+        words = text.split()
+        low = text.lower()
+
+        # 1. Greetings, test, or generic conversational calls
+        greetings = {"halo", "hello", "hi", "hey", "help", "bantuan", "tes", "test", "ping", "p"}
+        if low in greetings or (len(words) <= 2 and words[0].lower() in greetings):
+            return True
+
+        # 2. Direct utility actions on project are never vague (e.g. add basemap, zoom, export, clear)
+        direct_commands = ("basemap", "zoom", "select", "pilih", "hapus", "delete", "clear", "simpan", "save", "export", "print")
+        if any(dc in low for dc in direct_commands) and len(words) <= 6:
+            return False
+
+        # 3. If a known layer in the active project is explicitly referenced, it's not vague
+        if layer_names:
+            for lyr in layer_names:
+                if lyr and lyr.lower() in low:
+                    return False
+
+        # 4. Ultra-short generic requests (<= 3 words without direct commands)
+        # e.g. "make map", "buat peta", "bikin peta", "create map", "peta risiko", "analisis bencana"
+        if len(words) <= 3:
+            return True
+
+        # 5. Generic patterns asking for a map without specifics
+        generic_patterns = [
+            r"^(make|create|generate|produce|build|draw|render)\s+(a\s+)?(map|layout|atlas)$",
+            r"^(buat|buatkan|bikin|bikinkan|tolong buat|tolong buatkan)\s+(peta|layout|atlas)$",
+            r"^(tampilkan|lihat|tunjukkan)\s+(peta)$",
+            r"^(peta\s+risiko|peta\s+bencana|analisis\s+bencana|analisis\s+spasial)$",
+            r"^(i\s+want\s+to\s+)?(make|create|build)\s+(a\s+)?map(\s+please)?$",
+            r"^(tolong|bisa)?\s*(buatkan|bikin|buat)\s*(saya)?\s*peta\s*(dong)?$",
+            r"^(bisa|tolong)?\s*(bantu|tolong)?\s*(saya)?\s*(buat|bikin|membuat)\s*peta\??$",
+        ]
+        for pat in generic_patterns:
+            if re.search(pat, low):
+                return True
+
+        # 6. Check for named geographic location / boundary
+        has_location = bool(re.search(
+            r"\b(jakarta|bandung|surabaya|semarang|yogyakarta|jogja|bali|sumatera|sumatra|jawa|java|kalimantan|sulawesi|papua|maluku|aceh|medan|palembang|makassar|ntt|ntb|"
+            r"indonesia|malaysia|singapore|tokyo|japan|zurich|switzerland|swiss|usa|europe|asia|"
+            r"bbox)\b|"
+            r"[-+]?\d{1,3}\.\d+.*[-+]?\d{1,3}\.\d+",
+            low
+        ))
+
+        # 7. Check for specific GIS deliverable / data source / method keywords
+        has_specific_theme = bool(re.search(
+            r"\b(banjir|flood|genangan|dem|elevasi|elevation|kontur|contour|relief|hillshade|lereng|slope|curah hujan|rainfall|"
+            r"sentinel|landsat|citra|satellite|ndvi|stac|cog|overture|osm|openstreetmap|"
+            r"kepadatan|density|heatmap|penduduk|population|isochrone|jangkauan|buffer|ahp|"
+            r"kesesuaian lahan|tutupan lahan|land use|landcover|fasilitas|rumah sakit|sekolah|poi|jalan|roads|sungai|river|gempa|tsunami|longsor)\b",
+            low
+        ))
+
+        is_spatial_action = bool(re.search(r"\b(make|create|generate|build|buat|buatkan|bikin|bikinkan|petakan|tampilkan|hitung|analisis|modelkan|analyze|calculate|peta|map)\b", low))
+
+        # If it asks to create or analyze a map, but lacks either location or theme/method, it needs clarification!
+        if is_spatial_action and len(words) <= 8:
+            if not has_location or not has_specific_theme:
+                return True
+
+        return False
+
+    def select(self, user_prompt, already=(), layer_names=None):
         """Choose skills to inject. Returns dict(full=[Skill], hint=[Skill], pinned=[Skill], scores={name: score}, is_e2e=bool)."""
         is_e2e = self.is_e2e_map_request(user_prompt)
         out = {"full": [], "hint": [], "pinned": [], "scores": {}, "is_e2e": is_e2e}
         if self.mode == "off":
+            return out
+
+        if self.mode == "auto" and self.is_vague_request(user_prompt, layer_names=layer_names):
+            # In Auto mode, if request is vague and needs clarification: do NOT select or inject skills upfront!
+            # Skills must be automatically selected AFTER clarification (or before execution if clear).
+            out["is_e2e"] = False
             return out
         for n in sorted(self.pinned):
             if n in self.skills and n not in self.disabled and n not in already:
