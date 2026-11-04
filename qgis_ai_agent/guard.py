@@ -109,11 +109,11 @@ def main():
             for p in all_pids:
                 try:
                     pg = os.getpgid(p)
-                    if pg not in protected and pg > 0:
+                    if pg not in protected and pg > 1:
                         all_pgids.add(pg)
                 except Exception:
                     pass
-                if p not in protected and p > 0:
+                if p not in protected and p > 1:
                     all_pgids.add(p)
 
         # First wave: SIGTERM to process groups first, then individual processes

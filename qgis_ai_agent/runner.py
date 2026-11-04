@@ -523,12 +523,12 @@ def kill_entire_tree(root_pids, protected_pids=None):
         for pid in all_targets:
             try:
                 pg = os.getpgid(pid)
-                if pg not in protected_pids and pg > 0:
+                if pg not in protected_pids and pg > 1:
                     all_pgids.add(pg)
             except Exception:
                 pass
             # If setsid was used by child, pid itself is a process group leader
-            if pid not in protected_pids and pid > 0:
+            if pid not in protected_pids and pid > 1:
                 all_pgids.add(pid)
 
     # First wave: SIGTERM to process groups first, then individual targets
