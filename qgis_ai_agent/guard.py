@@ -70,12 +70,12 @@ def main():
         except Exception:
             pass
 
-    # 1. Linux PR_SET_PDEATHSIG: kernel sends SIGKILL if parent dies, even on kill -9 or segfault
+    # 1. Linux PR_SET_PDEATHSIG: kernel sends SIGTERM if parent dies so on_signal/kill_child_tree runs
     if sys.platform.startswith("linux"):
         try:
             libc = ctypes.CDLL(None)
             PR_SET_PDEATHSIG = 1
-            libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
+            libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
         except Exception:
             pass
 
@@ -169,22 +169,42 @@ def main():
     # 2. Watchdog thread: checks if QGIS is still alive
     def parent_watchdog():
         while True:
-            # If QGIS died, getppid() will change (reparented to 1/systemd), or os.kill(pid, 0) fails
-            if os.getppid() != parent_pid:
-                kill_child_tree()
-                os._exit(0)
+            is_dead = False
             try:
                 os.kill(parent_pid, 0)
             except OSError:
+                is_dead = True
+
+            if not is_dead and hasattr(os, "getppid"):
+                try:
+                    if os.getppid() != parent_pid:
+                        is_dead = True
+                except Exception:
+                    pass
+
+            if is_dead:
                 kill_child_tree()
                 os._exit(0)
-            time.sleep(0.3)
+            time.sleep(0.2)
 
     watchdog = threading.Thread(target=parent_watchdog, daemon=True)
     watchdog.start()
 
-    # 3. Spawn child in its own process group
-    preexec = os.setsid if hasattr(os, "setsid") else None
+    # 3. Spawn child in its own process group with kernel death signal attached to guard
+    def _child_preexec():
+        if hasattr(os, "setsid"):
+            try:
+                os.setsid()
+            except Exception:
+                pass
+        if sys.platform.startswith("linux"):
+            try:
+                libc = ctypes.CDLL(None)
+                PR_SET_PDEATHSIG = 1
+                libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
+            except Exception:
+                pass
+
     creationflags = 0
     if sys.platform == "win32" and hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -193,7 +213,7 @@ def main():
         proc = subprocess.Popen(
             child_cmd,
             cwd=cwd,
-            preexec_fn=preexec,
+            preexec_fn=_child_preexec,
             creationflags=creationflags
         )
 

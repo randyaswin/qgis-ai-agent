@@ -258,3 +258,4 @@ def get_theme():
             "thinking_border": "#e2e8f0",
             "thinking_text": "#64748b",
         }
+

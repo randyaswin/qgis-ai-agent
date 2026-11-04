@@ -2862,6 +2862,5 @@ class AgentDock(QDockWidget):
             self.session_manager.disconnect_signals()
 
     def closeEvent(self, event):
-        if hasattr(self, "session_manager") and self.session_manager:
-            self.session_manager.disconnect_signals()
+        self.shutdown()
         super().closeEvent(event)
