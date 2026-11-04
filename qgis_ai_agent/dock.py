@@ -2372,13 +2372,20 @@ class AgentDock(QDockWidget):
                     last_asst = m
                     break
             if last_asst:
-                has_tool_run = bool(last_asst.tool_calls)
+                READONLY_INSPECTION_TOOLS = {
+                    "get_project_state", "describe_layer", "describe_all_layers",
+                    "get_features", "get_selected_features", "field_stats", "sample_raster",
+                    "list_skills", "load_skill", "list_processing_providers", "list_algorithms",
+                    "describe_algorithm", "list_public_geodata_sources", "search_stac_items"
+                }
+                tool_names = [tc.get("name") if isinstance(tc, dict) else str(tc) for tc in (last_asst.tool_calls or [])]
+                has_mutating_tool_run = any(tn not in READONLY_INSPECTION_TOOLS for tn in tool_names)
                 has_clarify = (
                     any(p in (last_asst.html or "") or p in (last_asst.text or "") for p in ("prompt:", "fill:", "answer:", "send:"))
                     or "?" in (last_asst.text or "")
                     or any(k in (last_asst.text or "").lower() for k in ("klarifikasi", "konfirmasi", "pilihan", "opsi", "metode", "sumber data"))
                 )
-                if not has_tool_run and (has_clarify or not any(m.tool_calls for m in active_sess.messages)):
+                if not has_mutating_tool_run and (has_clarify or not any(m.tool_calls for m in active_sess.messages)):
                     is_after_clarification = True
 
         inherited_skills = []

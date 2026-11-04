@@ -45,8 +45,13 @@ Use `query_overture_maps`:
 - `type`: Subtype (auto-selected if omitted, e.g. `"place"`, `"building"`, `"segment"`, `"water"`).
 - `bbox`: `[xmin, ymin, xmax, ymax]` in WGS84 EPSG:4326. Defaults to current QGIS canvas extent if omitted.
 - `filter_sql`: Optional DuckDB SQL condition to filter attributes.
-- `limit`: Maximum features to fetch (default 500, can be increased as needed).
+- `limit`: Maximum features to fetch (default 500, can be increased as needed; exports to high-performance `.gpkg`).
 - `output_name`: Resulting layer name in QGIS.
+
+> [!NOTE] Hardware Safety & Chunking:
+> Vector queries export to indexed GeoPackage (`.gpkg`) to prevent memory exhaustion and UI freezes.
+> For large study areas, progressive chunking / multiple requests are encouraged.
+> If the user's requested scope is too broad (e.g. all buildings across an entire region), clarify first with the user to narrow the bounding box or filter by category before querying.
 
 ### B. Example Use Cases:
 1. **Health Facilities / Hotels / POIs in Canvas Extent:**

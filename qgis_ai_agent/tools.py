@@ -3562,7 +3562,12 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
     if filter_sql:
         where_clauses.append(f"({filter_sql})")
 
-    out_file = os.path.join(tempfile.gettempdir(), f"overture_{t_name}_{int(_time.time())}.geojson")
+    out_file = os.path.join(tempfile.gettempdir(), f"overture_{t_name}_{int(_time.time())}.gpkg")
+    if os.path.exists(out_file):
+        try:
+            os.remove(out_file)
+        except Exception:
+            pass
     s3_path = f"s3://overturemaps-us-west-2/release/2026-10-21.0/theme={t_name}/type={t_type}/*"
 
     con = duckdb.connect()
@@ -3570,6 +3575,9 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
         con.execute("INSTALL spatial; LOAD spatial; INSTALL httpfs; LOAD httpfs;")
         con.execute("SET s3_region='us-west-2';")
         con.execute("SET geometry_always_xy=true;")
+        con.execute("SET memory_limit='1GB';")
+        con.execute("SET threads=2;")
+        con.execute("SET preserve_insertion_order=false;")
 
         copy_query = f"""
         COPY (
@@ -3577,7 +3585,7 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
             FROM read_parquet('{s3_path}', hive_partitioning=1)
             WHERE {' AND '.join(where_clauses)}
             LIMIT {int(limit)}
-        ) TO '{out_file}' WITH (FORMAT GDAL, DRIVER 'GeoJSON');
+        ) TO '{out_file}' WITH (FORMAT GDAL, DRIVER 'GPKG');
         """
         con.execute(copy_query)
     except Exception as e:
@@ -3616,14 +3624,22 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
        "layer_name": S("string", "name of resulting layer in QGIS")})
 def query_duckdb_spatial(query, layer_name="DuckDB_Layer"):
     import duckdb
-    out_file = os.path.join(tempfile.gettempdir(), f"duckdb_result_{int(time.time())}.geojson")
+    out_file = os.path.join(tempfile.gettempdir(), f"duckdb_result_{int(time.time())}.gpkg")
+    if os.path.exists(out_file):
+        try:
+            os.remove(out_file)
+        except Exception:
+            pass
     con = duckdb.connect()
     try:
         con.execute("INSTALL spatial; LOAD spatial; INSTALL httpfs; LOAD httpfs;")
         con.execute("SET s3_region='us-west-2';")
         con.execute("SET geometry_always_xy=true;")
+        con.execute("SET memory_limit='1GB';")
+        con.execute("SET threads=2;")
+        con.execute("SET preserve_insertion_order=false;")
 
-        copy_query = f"COPY ({query}) TO '{out_file}' WITH (FORMAT GDAL, DRIVER 'GeoJSON');"
+        copy_query = f"COPY ({query}) TO '{out_file}' WITH (FORMAT GDAL, DRIVER 'GPKG');"
         con.execute(copy_query)
     except Exception as e:
         raise RuntimeError(f"DuckDB spatial query failed. Query: {query}. Error: {e}") from e
