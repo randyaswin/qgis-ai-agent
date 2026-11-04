@@ -72,6 +72,10 @@ def summarize_tool_result(name, result):
         return f"🦆 DuckDB spatial query '<b>{html.escape(result.get('name', ''))}</b>' executed ({result.get('features', 0)} features)"
     if name == "add_vector_layer":
         return f"Vector layer '<b>{html.escape(result.get('name', ''))}</b>' loaded ({result.get('geometry')}, {result.get('features')} features, CRS: {result.get('crs')})"
+    if name == "create_sampling_grid":
+        return f"📐 Sampling grid '<b>{html.escape(result.get('layer_name', ''))}</b>' generated ({result.get('cell_count', 0)} cells, size {result.get('cell_size', 0)})"
+    if name == "label_grid_cells":
+        return f"🏷️ Grid classification updated ({result.get('cells_updated', 0)} of {result.get('total_cells', 0)} cells labeled)"
     if name == "add_raster_layer":
         return f"Raster layer '<b>{html.escape(result.get('name', ''))}</b>' loaded ({result.get('width')}x{result.get('height')} px, {result.get('bands')} bands, CRS: {result.get('crs')})"
     if name == "add_basemap":
@@ -185,6 +189,9 @@ def categorize_tool(name, args):
     elif name in ("add_vector_layer", "add_raster_layer", "add_basemap", "remove_layer", "update_layer"):
         category = "Layer"
         primary = args.get("name") or args.get("preset") or os.path.basename(args.get("path", ""))
+    elif name in ("create_sampling_grid", "label_grid_cells", "digitize_features", "create_vector_layer", "georeference_raster"):
+        category = "Digitize / Grid"
+        primary = args.get("layer_name") or args.get("layer") or ""
     elif name == "exec_pyqgis":
         category = "PyQGIS"
         primary = (args.get("code") or "").strip().split("\n")[0][:40]

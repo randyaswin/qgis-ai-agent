@@ -30,6 +30,7 @@ from qgis.core import (
     QgsLayoutItemScaleBar, QgsLayoutItemPicture, QgsLayoutPoint, QgsLayoutSize,
     QgsLayoutMeasurement, QgsUnitTypes, QgsLayoutItemPage, QgsLayoutExporter,
     QgsSingleBandPseudoColorRenderer, QgsColorRampShader, QgsRasterShader, QgsRasterBandStats, QgsWkbTypes,
+    QgsGeometry, QgsPointXY, QgsFeature,
 )
 from qgis.PyQt.QtCore import QMetaType
 
@@ -102,15 +103,21 @@ def _layer_info(lyr):
     return d
 
 
+_HEADLESS_CANVAS = None
+
+
 def _canvas():
     iface = _iface()
     if iface and hasattr(iface, "mapCanvas"):
         return iface.mapCanvas()
-    try:
-        from qgis.gui import QgsMapCanvas
-        return QgsMapCanvas()
-    except Exception:
-        return None
+    global _HEADLESS_CANVAS
+    if _HEADLESS_CANVAS is None:
+        try:
+            from qgis.gui import QgsMapCanvas
+            _HEADLESS_CANVAS = QgsMapCanvas()
+        except Exception:
+            pass
+    return _HEADLESS_CANVAS
 
 
 def _is_valid_extent(e):
@@ -487,11 +494,11 @@ def create_vector_layer(layer_name, geometry_type="Polygon", crs="EPSG:4326", fi
         lyr = QgsVectorLayer(uri, layer_name, "memory")
         if fields:
             type_map = {
-                "int": QVariant.Int, "integer": QVariant.Int,
-                "double": QVariant.Double, "float": QVariant.Double, "real": QVariant.Double,
-                "string": QVariant.String, "text": QVariant.String
+                "int": QMetaType.Type.Int, "integer": QMetaType.Type.Int,
+                "double": QMetaType.Type.Double, "float": QMetaType.Type.Double, "real": QMetaType.Type.Double,
+                "string": QMetaType.Type.QString, "text": QMetaType.Type.QString
             }
-            qfields = [QgsField(f.get("name", "f"), type_map.get(f.get("type", "string").lower(), QVariant.String)) for f in fields]
+            qfields = [QgsField(f.get("name", "f"), type_map.get(f.get("type", "string").lower(), QMetaType.Type.QString)) for f in fields]
             lyr.dataProvider().addAttributes(qfields)
             lyr.updateFields()
 
@@ -580,6 +587,213 @@ def digitize_features(layer, features, auto_fix_geometry=True):
         "features_added": added_count,
         "total_features": lyr.featureCount(),
         "errors": errors if errors else None
+    }
+
+
+@tool("Create a regular square (fishnet) or hexagonal polygon grid over an extent or layer for raster sampling, visual interpretation, or spatial labeling.",
+      {"layer_name": S("string", "name for the new grid layer (default 'Sampling_Grid')"),
+       "extent_layer": S("string", "optional layer name or id to derive grid extent from"),
+       "bbox": S("array", "optional [xmin, ymin, xmax, ymax] extent; defaults to canvas or extent_layer"),
+       "cell_size": S("number", "spacing/size of grid cells (in layer CRS units, e.g. 100 meters for projected CRS, or 0.001 degrees for geographic)"),
+       "grid_type": S("string", "'square' (Rectangle, default) | 'hexagon'"),
+       "crs": S("string", "CRS for the grid (defaults to target extent/layer CRS or project CRS)"),
+       "output_path": S("string", "optional .gpkg or .shp path; creates memory layer if omitted")})
+def create_sampling_grid(layer_name="Sampling_Grid", extent_layer=None, bbox=None, cell_size=100.0,
+                         grid_type="square", crs=None, output_path=None):
+    import processing
+    p = QgsProject.instance()
+
+    # Determine CRS and Extent
+    target_crs = None
+    target_extent = None
+    if extent_layer:
+        lyr = _layer(extent_layer)
+        target_crs = lyr.crs()
+        target_extent = lyr.extent()
+    elif bbox and len(bbox) == 4:
+        target_extent = QgsRectangle(*bbox)
+        target_crs = QgsCoordinateReferenceSystem(crs or p.crs().authid())
+    else:
+        c = _canvas()
+        if c and _is_valid_extent(c.extent()):
+            target_extent = c.extent()
+            target_crs = p.crs()
+        else:
+            for l in p.mapLayers().values():
+                if l.isValid() and l.providerType() != "wms" and _is_valid_extent(l.extent()):
+                    target_extent = l.extent()
+                    target_crs = l.crs()
+                    break
+
+    if not target_extent or not _is_valid_extent(target_extent):
+        raise ValueError("Could not determine valid extent for sampling grid. Specify 'extent_layer' or 'bbox'.")
+
+    final_crs = QgsCoordinateReferenceSystem(crs) if crs else (target_crs or p.crs())
+    if not final_crs.isValid():
+        final_crs = p.crs()
+
+    if target_crs and target_crs != final_crs and target_crs.isValid():
+        tr = QgsCoordinateTransform(target_crs, final_crs, p)
+        target_extent = tr.transformBoundingBox(target_extent)
+
+    spacing = float(cell_size)
+    if spacing <= 0:
+        spacing = 100.0 if not final_crs.isGeographic() else 0.001
+
+    type_code = 4 if str(grid_type).lower() in ("hexagon", "hex") else 2
+
+    params = {
+        "TYPE": type_code,
+        "EXTENT": target_extent,
+        "HSPACING": spacing,
+        "VSPACING": spacing,
+        "HOVERLAY": 0,
+        "VOVERLAY": 0,
+        "CRS": final_crs,
+        "OUTPUT": output_path or "TEMPORARY_OUTPUT"
+    }
+
+    res = processing.run("native:creategrid", params)
+    out_lyr = res.get("OUTPUT")
+    if isinstance(out_lyr, str):
+        grid_lyr = QgsVectorLayer(out_lyr, layer_name, "ogr" if output_path else "memory")
+    else:
+        grid_lyr = out_lyr
+        grid_lyr.setName(layer_name)
+
+    if not grid_lyr or not grid_lyr.isValid():
+        raise RuntimeError("Failed to generate sampling grid.")
+
+    from qgis.PyQt.QtCore import QMetaType
+    f_defs = [
+        QgsField("grid_id", QMetaType.Type.Int),
+        QgsField("class", QMetaType.Type.QString),
+        QgsField("confidence", QMetaType.Type.Double),
+        QgsField("notes", QMetaType.Type.QString),
+    ]
+    existing_names = [f.name() for f in grid_lyr.fields()]
+    to_add = [f for f in f_defs if f.name() not in existing_names]
+    if to_add:
+        grid_lyr.dataProvider().addAttributes(to_add)
+        grid_lyr.updateFields()
+
+    idx_id = grid_lyr.fields().indexOf("grid_id")
+    if idx_id >= 0:
+        changes = {}
+        for seq, feat in enumerate(grid_lyr.getFeatures()):
+            changes[feat.id()] = {idx_id: seq + 1}
+        grid_lyr.dataProvider().changeAttributeValues(changes)
+
+    # Transparent fill with high-visibility boundary outline so imagery underneath stays clear
+    sym = QgsSymbol.defaultSymbol(grid_lyr.geometryType())
+    sym.setColor(QColor(0, 0, 0, 0))
+    sl = sym.symbolLayer(0)
+    if hasattr(sl, "setStrokeColor"):
+        sl.setStrokeColor(QColor("#0284c7"))
+    if hasattr(sl, "setStrokeWidth"):
+        sl.setStrokeWidth(0.35)
+    grid_lyr.setRenderer(QgsSingleSymbolRenderer(sym))
+
+    p.addMapLayer(grid_lyr)
+    _refresh()
+
+    return {
+        "layer_name": grid_lyr.name(),
+        "layer_id": grid_lyr.id(),
+        "crs": final_crs.authid(),
+        "cell_count": grid_lyr.featureCount(),
+        "cell_size": spacing,
+        "extent": [round(target_extent.xMinimum(), 4), round(target_extent.yMinimum(), 4),
+                   round(target_extent.xMaximum(), 4), round(target_extent.yMaximum(), 4)]
+    }
+
+
+@tool("Batch update classification labels, confidence scores, and notes on a sampling grid layer.",
+      {"layer": S("string", "grid layer name or id"),
+       "labels": S("array", "list of dicts: [{'grid_id': 1, 'class': 'Vegetation', 'confidence': 0.95, 'notes': 'Dense canopy'}, ...] or index-based [{'id': ..., 'class': ...}]"),
+       "auto_style": S("boolean", "automatically apply categorized symbology color-coded by class (default true)")})
+def label_grid_cells(layer, labels, auto_style=True):
+    lyr = _layer(layer)
+    if not isinstance(lyr, QgsVectorLayer):
+        raise ValueError(f"Layer '{layer}' is not a vector layer.")
+
+    fields = lyr.fields()
+    idx_id = fields.indexOf("grid_id")
+    idx_class = fields.indexOf("class")
+    idx_conf = fields.indexOf("confidence")
+    idx_notes = fields.indexOf("notes")
+
+    from qgis.PyQt.QtCore import QMetaType
+    to_add = []
+    if idx_class < 0:
+        to_add.append(QgsField("class", QMetaType.Type.QString))
+    if idx_conf < 0:
+        to_add.append(QgsField("confidence", QMetaType.Type.Double))
+    if idx_notes < 0:
+        to_add.append(QgsField("notes", QMetaType.Type.QString))
+    if to_add:
+        lyr.dataProvider().addAttributes(to_add)
+        lyr.updateFields()
+        fields = lyr.fields()
+        idx_class = fields.indexOf("class")
+        idx_conf = fields.indexOf("confidence")
+        idx_notes = fields.indexOf("notes")
+
+    grid_to_fid = {}
+    if idx_id >= 0:
+        for f in lyr.getFeatures():
+            val = f[idx_id]
+            if val is not None:
+                grid_to_fid[val] = f.id()
+
+    changes = {}
+    updated = 0
+    all_fids = set(lyr.allFeatureIds())
+    for item in labels:
+        if not isinstance(item, dict):
+            continue
+        fid = None
+        if "grid_id" in item and item["grid_id"] in grid_to_fid:
+            fid = grid_to_fid[item["grid_id"]]
+        elif "id" in item:
+            candidate_id = item["id"]
+            if candidate_id in grid_to_fid:
+                fid = grid_to_fid[candidate_id]
+            else:
+                fid = candidate_id
+
+        if fid is None or fid not in all_fids:
+            continue
+
+        feat_changes = {}
+        if "class" in item and idx_class >= 0:
+            feat_changes[idx_class] = str(item["class"])
+        if "confidence" in item and idx_conf >= 0:
+            try:
+                feat_changes[idx_conf] = float(item["confidence"])
+            except (ValueError, TypeError):
+                pass
+        if "notes" in item and idx_notes >= 0:
+            feat_changes[idx_notes] = str(item["notes"])
+
+        if feat_changes:
+            changes[fid] = feat_changes
+            updated += 1
+
+    if changes:
+        lyr.dataProvider().changeAttributeValues(changes)
+        lyr.triggerRepaint()
+
+    if auto_style and idx_class >= 0:
+        try:
+            style_categorized(layer=lyr.id(), field="class", ramp="Spectral")
+        except Exception:
+            pass
+
+    return {
+        "layer": lyr.name(),
+        "cells_updated": updated,
+        "total_cells": lyr.featureCount()
     }
 
 
@@ -980,9 +1194,35 @@ def field_stats(layer, field):
     uniq = list(lyr.uniqueValues(idx, 51))
     res = {"unique_count_sample": len(uniq), "unique_sample": [str(u) for u in uniq[:50]]}
     if lyr.fields()[idx].isNumeric():
-        vals = [f[field] for f in lyr.getFeatures() if f[field] not in (None,) and str(f[field]) != "NULL"]
-        if vals:
-            res.update(min=min(vals), max=max(vals), mean=sum(vals) / len(vals), count=len(vals))
+        f_name = lyr.fields()[idx].name()
+        req = QgsFeatureRequest().setSubsetOfAttributes([f_name], lyr.fields())
+        if hasattr(QgsFeatureRequest, "Flag") and hasattr(QgsFeatureRequest.Flag, "NoGeometry"):
+            req.setFlags(QgsFeatureRequest.Flag.NoGeometry)
+        elif hasattr(QgsFeatureRequest, "NoGeometry"):
+            req.setFlags(QgsFeatureRequest.NoGeometry)
+        count = 0
+        total = 0.0
+        min_v = float("inf")
+        max_v = float("-inf")
+        scan_limit = 100000
+        for i, f in enumerate(lyr.getFeatures(req)):
+            if i >= scan_limit:
+                res["scanned_limit"] = scan_limit
+                break
+            v = f[idx]
+            if v is not None and str(v) != "NULL":
+                try:
+                    num = float(v)
+                    count += 1
+                    total += num
+                    if num < min_v:
+                        min_v = num
+                    if num > max_v:
+                        max_v = num
+                except (ValueError, TypeError):
+                    pass
+        if count > 0:
+            res.update(min=min_v, max=max_v, mean=total / count, count=count)
     return res
 
 
@@ -1121,7 +1361,10 @@ def run_processing(algorithm, params, load=True, output_name=None):
     _sanitize_canvas_extent()
     new = [QgsProject.instance().mapLayer(i) for i in set(QgsProject.instance().mapLayers()) - before]
     if output_name and new:
-        new[0].setName(output_name)
+        # Prefer the layer matching the primary OUTPUT result key to avoid renaming the wrong layer
+        primary_id = str(res.get("OUTPUT", ""))
+        target = next((l for l in new if l.id() == primary_id), new[0])
+        target.setName(output_name)
     return {"results": {k: str(v) for k, v in res.items()}, "new_layers": [_layer_info(l) for l in new]}
 
 
@@ -1287,7 +1530,15 @@ def set_labels(layer, field=None, expression=None, size=9, color="#000000", font
 def _render(extent, width, height, layers=None):
     ms = QgsMapSettings()
     p = QgsProject.instance()
-    ms.setLayers(layers or _canvas().layers())
+    c = _canvas()
+    if layers is not None:
+        target_layers = layers
+    elif c and hasattr(c, "layers") and c.layers():
+        target_layers = c.layers()
+    else:
+        root = p.layerTreeRoot()
+        target_layers = [l for l in p.mapLayers().values() if (not root.findLayer(l.id())) or root.findLayer(l.id()).isVisible()]
+    ms.setLayers(target_layers)
     ms.setDestinationCrs(p.crs())
     ms.setExtent(extent)
     ms.setOutputSize(QSize(int(width), int(height)))
@@ -1301,7 +1552,27 @@ def _render(extent, width, height, layers=None):
 @tool("Render the current map canvas to PNG and return it as an image so you can visually verify the map.",
       {"width": S("integer", "default 1000"), "height": S("integer", "default 700")})
 def snapshot_canvas(width=1000, height=700):
-    img = _render(_canvas().extent(), width, height)
+    c = _canvas()
+    ext = c.extent() if c else None
+    if not _is_valid_extent(ext):
+        _sanitize_canvas_extent()
+        ext = c.extent() if c else None
+    if not _is_valid_extent(ext):
+        p = QgsProject.instance()
+        ext = None
+        for lyr in p.mapLayers().values():
+            if lyr.isValid() and lyr.providerType() != "wms" and _is_valid_extent(lyr.extent()):
+                trans = _safe_transform_extent(lyr.extent(), lyr.crs(), p.crs(), p)
+                if trans:
+                    if ext is None:
+                        ext = QgsRectangle(trans)
+                    else:
+                        ext.combineExtentWith(trans)
+        if ext and _is_valid_extent(ext):
+            ext.scale(1.05)
+        else:
+            ext = QgsRectangle(-180, -85, 180, 85)
+    img = _render(ext, width, height)
     buf = QBuffer()
     buf.open(QIODevice.OpenModeFlag.WriteOnly)
     img.save(buf, "PNG")
@@ -1527,8 +1798,8 @@ def _open_layout_window(lay):
         from qgis.PyQt.QtWidgets import QApplication
         QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
         return designer
-    except Exception as e:
-        LOGGER.warning(f"Failed to open layout designer window: {e}")
+    except Exception:
+        pass
     return None
 
 
@@ -3564,7 +3835,10 @@ def load_public_cog(url, name=None):
 def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, limit=500, output_name=None):
     if CANCEL_REQUESTED:
         raise RuntimeError("Execution stopped by user.")
-    import duckdb
+    try:
+        import duckdb
+    except ImportError:
+        raise RuntimeError("duckdb is required to query Overture Maps. Install it in your Python environment with: pip install duckdb")
     import time as _time
     default_types = {
         "places": "place", "buildings": "building", "transportation": "segment",
@@ -3670,7 +3944,10 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
       {"query": S("string", "DuckDB SQL query returning geometry and attributes"),
        "layer_name": S("string", "name of resulting layer in QGIS")})
 def query_duckdb_spatial(query, layer_name="DuckDB_Layer"):
-    import duckdb
+    try:
+        import duckdb
+    except ImportError:
+        raise RuntimeError("duckdb is required for DuckDB spatial queries. Install it in your Python environment with: pip install duckdb")
     out_file = os.path.join(tempfile.gettempdir(), f"duckdb_result_{int(time.time())}.gpkg")
     if os.path.exists(out_file):
         try:
