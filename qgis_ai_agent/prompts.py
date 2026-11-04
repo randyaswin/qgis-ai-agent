@@ -54,6 +54,8 @@ def build(system, context, skills_text, user, continuing, session_history=None):
         segs.append(skills_text)
     req_header = "# User request"
     if not continuing and not session_history:
-        req_header += " (Initial request: if requirements are vague/underspecified, follow Protocol 0 to clarify with max 3 questions and interactive options [🔘 Label](prompt:...) before executing tools)"
+        req_header += " (If requirements, spatial methodology, or data sources are vague or underspecified, follow Protocol 0 to clarify with flexible, non-template questions and interactive options [🔘 Label](prompt:...) before executing tools)"
+    else:
+        req_header += " (Follow-up turn: if crucial methodological forks or data source choices still need confirmation, you are fully permitted to ask follow-up clarification under Protocol 0 before executing tools)"
     segs.append(f"{req_header}\n{user}")
     return "\n\n".join(segs)

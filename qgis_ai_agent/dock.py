@@ -2369,10 +2369,12 @@ class AgentDock(QDockWidget):
                     break
             if last_asst:
                 has_tool_run = bool(last_asst.tool_calls)
-                has_clarify = ("prompt:" in (last_asst.html or "") or "fill:" in (last_asst.html or "")
-                               or "?" in (last_asst.text or "") or "klarifikasi" in (last_asst.text or "").lower()
-                               or "konfirmasi" in (last_asst.text or "").lower())
-                if not has_tool_run and has_clarify:
+                has_clarify = (
+                    any(p in (last_asst.html or "") or p in (last_asst.text or "") for p in ("prompt:", "fill:", "answer:", "send:"))
+                    or "?" in (last_asst.text or "")
+                    or any(k in (last_asst.text or "").lower() for k in ("klarifikasi", "konfirmasi", "pilihan", "opsi", "metode", "sumber data"))
+                )
+                if not has_tool_run and (has_clarify or not any(m.tool_calls for m in active_sess.messages)):
                     is_after_clarification = True
 
         inherited_skills = []
