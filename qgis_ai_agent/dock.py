@@ -6,7 +6,7 @@ import re
 import subprocess
 import time
 
-from qgis.PyQt.QtCore import Qt, QSettings, QTimer
+from qgis.PyQt.QtCore import Qt, QSettings, QTimer, QEvent
 from qgis.PyQt.QtGui import QTextCursor
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QPlainTextEdit,
@@ -23,6 +23,7 @@ from .sessions import SessionManager
 from .session_dialog import SessionManagerDialog
 from . import prompts
 from . import paths
+from . import theme
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 SKEY = "qgis_ai_agent/"
@@ -224,6 +225,7 @@ def markdown_to_clean_html(md_text):
     """Convert standard markdown into clean, elegant HTML supported by Qt rich text."""
     if not md_text:
         return ""
+    t = theme.get_theme()
     text = md_text.replace("\r\n", "\n").replace("\r", "\n")
 
     # 1. Protect & convert fenced code blocks
@@ -231,11 +233,11 @@ def markdown_to_clean_html(md_text):
     def _save_code(m):
         lang = m.group(1).strip()
         code = html.escape(m.group(2).strip("\n"))
-        lang_badge = f"<div style='color: #64748b; font-size: 10px; font-weight: bold; margin-bottom: 2px;'>{html.escape(lang.upper())}</div>" if lang else ""
+        lang_badge = f"<div style='color: {t['code_header_text']}; font-size: 10px; font-weight: bold; margin-bottom: 2px;'>{html.escape(lang.upper())}</div>" if lang else ""
         card = (
-            f"<div style='margin: 6px 0; background-color: #0f1117; border: 1px solid #232736; "
+            f"<div style='margin: 6px 0; background-color: {t['code_pre_bg']}; border: 1px solid {t['code_pre_border']}; "
             f"border-radius: 5px; padding: 8px 12px; font-family: monospace; font-size: 11px; "
-            f"color: #a5b4fc; white-space: pre-wrap;'>{lang_badge}{code}</div>"
+            f"color: {t['code_pre_text']}; white-space: pre-wrap;'>{lang_badge}{code}</div>"
         )
         idx = len(code_blocks)
         code_blocks.append(card)
@@ -255,26 +257,26 @@ def markdown_to_clean_html(md_text):
                 continue
             cols = [c.strip() for c in line.strip("|").split("|")]
             cell_tag = "th" if i == 0 else "td"
-            cell_style = "padding: 4px 8px; border: 1px solid #283040; "
+            cell_style = f"padding: 4px 8px; border: 1px solid {t['table_border']}; "
             if i == 0:
-                cell_style += "background-color: #1e293b; color: #38bdf8; font-weight: bold; font-size: 11px;"
+                cell_style += f"background-color: {t['table_th_bg']}; color: {t['table_th_text']}; font-weight: bold; font-size: 11px;"
             else:
-                bg = "#141923" if i % 2 == 1 else "#0f131a"
-                cell_style += f"background-color: {bg}; color: #cbd5e1; font-size: 11px;"
+                bg = t['table_td_odd'] if i % 2 == 1 else t['table_td_even']
+                cell_style += f"background-color: {bg}; color: {t['table_text']}; font-size: 11px;"
             row_html = "".join(f"<{cell_tag} style='{cell_style}'>{c}</{cell_tag}>" for c in cols)
             rows.append(f"<tr>{row_html}</tr>")
         body = "".join(rows)
-        return f"<table style='margin: 8px 0; border-collapse: collapse; width: 100%; border: 1px solid #283040;'>{body}</table>"
+        return f"<table style='margin: 8px 0; border-collapse: collapse; width: 100%; border: 1px solid {t['table_border']};'>{body}</table>"
 
     text = re.sub(r"(?:^\|.+\|\n?){2,}", _table_conv, text, flags=re.M)
 
     # 3. Inline code spans
-    text = re.sub(r"`([^`\n]+)`", lambda m: f"<code style='background-color: #1e2230; color: #93c5fd; padding: 1px 5px; border-radius: 3px; font-family: monospace; font-size: 11px;'>{html.escape(m.group(1))}</code>", text)
+    text = re.sub(r"`([^`\n]+)`", lambda m: f"<code style='background-color: {t['inline_code_bg']}; color: {t['inline_code_text']}; padding: 1px 5px; border-radius: 3px; font-family: monospace; font-size: 11px;'>{html.escape(m.group(1))}</code>", text)
 
     # 4. Headings
-    text = re.sub(r"^###\s+(.+)$", r"<div style='color: #f1f5f9; font-size: 13px; font-weight: bold; margin: 10px 0 4px 0;'>\1</div>", text, flags=re.M)
-    text = re.sub(r"^##\s+(.+)$", r"<div style='color: #60a5fa; font-size: 14px; font-weight: bold; margin: 12px 0 4px 0;'>\1</div>", text, flags=re.M)
-    text = re.sub(r"^#\s+(.+)$", r"<div style='color: #38bdf8; font-size: 15px; font-weight: bold; margin: 14px 0 6px 0;'>\1</div>", text, flags=re.M)
+    text = re.sub(r"^###\s+(.+)$", rf"<div style='color: {t['heading_h3']}; font-size: 13px; font-weight: bold; margin: 10px 0 4px 0;'>\1</div>", text, flags=re.M)
+    text = re.sub(r"^##\s+(.+)$", rf"<div style='color: {t['heading_h2']}; font-size: 14px; font-weight: bold; margin: 12px 0 4px 0;'>\1</div>", text, flags=re.M)
+    text = re.sub(r"^#\s+(.+)$", rf"<div style='color: {t['heading_h1']}; font-size: 15px; font-weight: bold; margin: 14px 0 6px 0;'>\1</div>", text, flags=re.M)
 
     # 5. Bold & Italic
     text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
@@ -288,31 +290,31 @@ def markdown_to_clean_html(md_text):
         if any(u_lower.startswith(p) for p in ("prompt:", "fill:", "answer:", "send:")):
             return (
                 f"<a href='{html.escape(url, quote=True)}' "
-                f"style='display: inline-block; background-color: #1e293b; color: #38bdf8; "
-                f"border: 1px solid #334155; padding: 2px 9px; border-radius: 12px; "
+                f"style='display: inline-block; background-color: {t['chip_bg']}; color: {t['chip_text']}; "
+                f"border: 1px solid {t['chip_border']}; padding: 2px 9px; border-radius: 12px; "
                 f"text-decoration: none; font-size: 11px; margin: 2px 4px 2px 0; font-weight: 500;'>"
                 f"{label}</a>"
             )
         elif u_lower.startswith("revert:"):
             return (
                 f"<a href='{html.escape(url, quote=True)}' "
-                f"style='color: #f59e0b; text-decoration: underline; font-weight: bold;'>"
+                f"style='color: {t['revert_link_text']}; text-decoration: underline; font-weight: bold;'>"
                 f"{label}</a>"
             )
         else:
             return (
                 f"<a href='{html.escape(url, quote=True)}' "
-                f"style='color: #60a5fa; text-decoration: underline;'>"
+                f"style='color: {t['link_text']}; text-decoration: underline;'>"
                 f"{label}</a>"
             )
 
     text = re.sub(r"\[([^\]\n]+)\]\(([^)\n]+)\)", _link_conv, text)
 
     # 6. Horizontal rule
-    text = re.sub(r"^---+$", r"<hr style='border: none; border-top: 1px solid #282f3d; margin: 8px 0;'>", text, flags=re.M)
+    text = re.sub(r"^---+$", rf"<hr style='border: none; border-top: 1px solid {t['hr_border']}; margin: 8px 0;'>", text, flags=re.M)
 
     # 7. Blockquotes
-    text = re.sub(r"^>\s*(.+)$", r"<div style='margin: 6px 0; border-left: 3px solid #6366f1; background-color: #151824; padding: 4px 10px; color: #94a3b8; font-style: italic;'>\1</div>", text, flags=re.M)
+    text = re.sub(r"^>\s*(.+)$", rf"<div style='margin: 6px 0; border-left: 3px solid {t['blockquote_border']}; background-color: {t['blockquote_bg']}; padding: 4px 10px; color: {t['blockquote_text']}; font-style: italic;'>\1</div>", text, flags=re.M)
 
     # 8. Block flusher (grouping paragraphs vs list items vs preformatted elements)
     lines = text.strip().split("\n")
@@ -322,7 +324,7 @@ def markdown_to_clean_html(md_text):
     def flush_p():
         if current_p:
             p_text = "<br>".join(current_p)
-            blocks.append(f"<div style='margin: 4px 0; line-height: 1.5; color: #e2e8f0;'>{p_text}</div>")
+            blocks.append(f"<div style='margin: 4px 0; line-height: 1.5; color: {t['body_p']};'>{p_text}</div>")
             current_p.clear()
 
     for line in lines:
@@ -338,10 +340,10 @@ def markdown_to_clean_html(md_text):
         m_n = re.match(r"^\s*(\d+)\.\s+(.+)$", line)
         if m_b:
             flush_p()
-            blocks.append(f"<div style='margin: 2px 0 2px 8px; color: #e2e8f0; line-height: 1.45;'><span style='color: #38bdf8; margin-right: 6px;'>•</span>{m_b.group(1)}</div>")
+            blocks.append(f"<div style='margin: 2px 0 2px 8px; color: {t['body_p']}; line-height: 1.45;'><span style='color: {t['bullet']}; margin-right: 6px;'>•</span>{m_b.group(1)}</div>")
         elif m_n:
             flush_p()
-            blocks.append(f"<div style='margin: 2px 0 2px 8px; color: #e2e8f0; line-height: 1.45;'><span style='color: #38bdf8; font-weight: bold; margin-right: 6px;'>{m_n.group(1)}.</span>{m_n.group(2)}</div>")
+            blocks.append(f"<div style='margin: 2px 0 2px 8px; color: {t['body_p']}; line-height: 1.45;'><span style='color: {t['bullet']}; font-weight: bold; margin-right: 6px;'>{m_n.group(1)}.</span>{m_n.group(2)}</div>")
         else:
             current_p.append(stripped)
     flush_p()
@@ -357,21 +359,22 @@ def markdown_to_clean_html(md_text):
 
 def render_assistant_message_html(text, model_info="", timestamp=""):
     """Render an AI Assistant message as an elegant, neatly formatted card."""
+    t = theme.get_theme()
     formatted_body = markdown_to_clean_html(text)
-    time_str = f"<span style='color: #64748b; font-size: 10px; font-weight: normal; margin-left: 6px;'>{html.escape(timestamp)}</span>" if timestamp else ""
-    meta_str = f"<span style='color: #94a3b8; font-size: 10px; font-weight: normal; margin-left: 6px;'>({html.escape(model_info)})</span>" if model_info else ""
+    time_str = f"<span style='color: {t['time_text']}; font-size: 10px; font-weight: normal; margin-left: 6px;'>{html.escape(timestamp)}</span>" if timestamp else ""
+    meta_str = f"<span style='color: {t['meta_text']}; font-size: 10px; font-weight: normal; margin-left: 6px;'>({html.escape(model_info)})</span>" if model_info else ""
 
     return (
         f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 8px 0 6px 0;'>"
         f"<tr><td>"
-        f"<div style='background-color: #171822; border: 1px solid #28283a; "
+        f"<div style='background-color: {t['assistant_card_bg']}; border: 1px solid {t['assistant_card_border']}; "
         f"border-radius: 6px; padding: 10px 12px;'>"
         f"<div style='margin-bottom: 6px; line-height: 16px;'>"
-        f"<span style='background-color: #059669; color: #ecfdf5; font-size: 10px; font-weight: bold; "
+        f"<span style='background-color: {t['agent_badge_bg']}; color: {t['agent_badge_text']}; font-size: 10px; font-weight: bold; "
         f"padding: 1px 6px; border-radius: 3px;'>AGENT</span>&nbsp;&nbsp;"
         f"{meta_str}{time_str}"
         f"</div>"
-        f"<div style='color: #e2e8f0; font-size: 12px; line-height: 1.5;'>"
+        f"<div style='color: {t['assistant_card_text']}; font-size: 12px; line-height: 1.5;'>"
         f"{formatted_body}"
         f"</div>"
         f"</div>"
@@ -382,14 +385,15 @@ def render_assistant_message_html(text, model_info="", timestamp=""):
 
 def render_user_message_html(text, attachments=None, timestamp=""):
     """Render a User message as a clean, styled card."""
-    time_str = f"<span style='color: #64748b; font-size: 10px; font-weight: normal; margin-left: 6px;'>{html.escape(timestamp)}</span>" if timestamp else ""
+    t = theme.get_theme()
+    time_str = f"<span style='color: {t['time_text']}; font-size: 10px; font-weight: normal; margin-left: 6px;'>{html.escape(timestamp)}</span>" if timestamp else ""
 
     att_html = ""
     if attachments:
         pills = []
         for a in attachments:
             fname = os.path.basename(a)
-            pills.append(f"<span style='background-color: #0f172a; border: 1px solid #1e293b; color: #38bdf8; padding: 2px 7px; border-radius: 10px; font-size: 10px; margin-right: 4px;'>📎 {html.escape(fname)}</span>")
+            pills.append(f"<span style='background-color: {t['pill_bg']}; border: 1px solid {t['pill_border']}; color: {t['chip_text']}; padding: 2px 7px; border-radius: 10px; font-size: 10px; margin-right: 4px;'>📎 {html.escape(fname)}</span>")
         att_html = f"<div style='margin-top: 6px;'>{''.join(pills)}</div>"
 
     clean_text = html.escape(text)
@@ -397,14 +401,14 @@ def render_user_message_html(text, attachments=None, timestamp=""):
     return (
         f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 8px 0 4px 0;'>"
         f"<tr><td>"
-        f"<div style='background-color: #172033; border: 1px solid #233352; "
-        f"border-left: 3px solid #3b82f6; border-radius: 6px; padding: 8px 12px;'>"
+        f"<div style='background-color: {t['user_card_bg']}; border: 1px solid {t['user_card_border']}; "
+        f"border-left: 3px solid {t['user_card_accent']}; border-radius: 6px; padding: 8px 12px;'>"
         f"<div style='margin-bottom: 4px; line-height: 16px;'>"
-        f"<span style='background-color: #2563eb; color: #eff6ff; font-size: 10px; font-weight: bold; "
+        f"<span style='background-color: {t['user_badge_bg']}; color: {t['user_badge_text']}; font-size: 10px; font-weight: bold; "
         f"padding: 1px 6px; border-radius: 3px;'>YOU</span>&nbsp;&nbsp;"
         f"{time_str}"
         f"</div>"
-        f"<div style='color: #f8fafc; font-size: 12px; line-height: 1.45; white-space: pre-wrap;'>"
+        f"<div style='color: {t['user_card_text']}; font-size: 12px; line-height: 1.45; white-space: pre-wrap;'>"
         f"{clean_text}"
         f"</div>"
         f"{att_html}"
@@ -416,16 +420,17 @@ def render_user_message_html(text, attachments=None, timestamp=""):
 
 def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_success=True, is_running=False, img_base64=None, duration=None):
     """Render a sleek vertical timeline tool node matching reference design."""
+    t = theme.get_theme()
     is_python = (category == "PyQGIS" or name == "exec_pyqgis" or "python" in name.lower())
 
     if is_running:
-        dot_color = "#c084fc" if is_python else "#38bdf8"
+        dot_color = t['tool_running_python_text'] if is_python else t['tool_running_mcp_text']
     elif is_success:
         dot_color = "#10b981"
     else:
         dot_color = "#ef4444"
 
-    dur_str = f" &bull; <span style='color: #64748b; font-size: 10px;'>{duration}s</span>" if (duration and not is_running) else ""
+    dur_str = f" &bull; <span style='color: {t['time_text']}; font-size: 10px;'>{duration}s</span>" if (duration and not is_running) else ""
 
     if is_python:
         header_desc = f"{name} &bull; Run Python Script" if (not primary_arg or primary_arg == name) else f"{name} &bull; {primary_arg}"
@@ -436,24 +441,24 @@ def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_succe
     if is_running:
         if is_python:
             out_cell = (
-                "<div style='background-color: #1e112a; border: 1px solid #6b21a8; "
-                "border-radius: 4px; padding: 4px 8px; color: #c084fc; "
-                "font-family: monospace; font-size: 10px; line-height: 1.45; font-style: italic;'>"
-                "⏳ Running Python Script in QGIS..."
-                "</div>"
+                f"<div style='background-color: {t['tool_running_python_bg']}; border: 1px solid {t['tool_running_python_border']}; "
+                f"border-radius: 4px; padding: 4px 8px; color: {t['tool_running_python_text']}; "
+                f"font-family: monospace; font-size: 10px; line-height: 1.45; font-style: italic;'>"
+                f"⏳ Running Python Script in QGIS..."
+                f"</div>"
             )
         else:
             out_cell = (
-                "<div style='background-color: #0c2340; border: 1px solid #1e4976; "
-                "border-radius: 4px; padding: 4px 8px; color: #38bdf8; "
-                "font-family: monospace; font-size: 10px; line-height: 1.45; font-style: italic;'>"
-                "⏳ Executing MCP tool in QGIS..."
-                "</div>"
+                f"<div style='background-color: {t['tool_running_mcp_bg']}; border: 1px solid {t['tool_running_mcp_border']}; "
+                f"border-radius: 4px; padding: 4px 8px; color: {t['tool_running_mcp_text']}; "
+                f"font-family: monospace; font-size: 10px; line-height: 1.45; font-style: italic;'>"
+                f"⏳ Executing MCP tool in QGIS..."
+                f"</div>"
             )
     else:
-        out_bg = "#0d1117" if is_success else "#1c1418"
-        out_border = "#21262d" if is_success else "#7f1d1d"
-        out_color = "#c9d1d9" if is_success else "#fca5a5"
+        out_bg = t['tool_out_bg'] if is_success else t['tool_out_err_bg']
+        out_border = t['tool_out_border'] if is_success else t['tool_out_err_border']
+        out_color = t['tool_out_text'] if is_success else t['tool_out_err_text']
         escaped_out = html.escape(out_str or "").replace("\n", "<br>")
         out_cell = (
             f"<div style='background-color: {out_bg}; border: 1px solid {out_border}; "
@@ -469,8 +474,8 @@ def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_succe
         cap_prefix = "📄 Layout Preview" if ("layout" in name.lower()) else "🗺️ Canvas Screenshot"
         img_html = (
             f"<div style='margin-top: 4px; text-align: left;'>"
-            f"<span style='display: inline-block; background-color: #0f172a; border: 1px solid #1e293b; "
-            f"color: #38bdf8; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-family: monospace;'>"
+            f"<span style='display: inline-block; background-color: {t['tool_img_pill_bg']}; border: 1px solid {t['tool_img_pill_border']}; "
+            f"color: {t['tool_img_pill_text']}; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-family: monospace;'>"
             f"📷 {cap_prefix} sent to AI ({kb} KB)</span>"
             f"</div>"
         )
@@ -478,11 +483,11 @@ def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_succe
     sub_table = (
         f"<table cellpadding='0' cellspacing='0' style='margin-top: 4px; margin-left: 2px; width: 100%;'>"
         f"<tr>"
-        f"<td width='34' valign='top' style='color: #64748b; font-family: monospace; font-size: 10px; font-weight: bold; padding-bottom: 3px;'>IN</td>"
-        f"<td valign='top' style='color: #94a3b8; font-family: monospace; font-size: 10px; padding-bottom: 3px; word-break: break-all;'>{in_val}</td>"
+        f"<td width='34' valign='top' style='color: {t['lbl_subtle']}; font-family: monospace; font-size: 10px; font-weight: bold; padding-bottom: 3px;'>IN</td>"
+        f"<td valign='top' style='color: {t['meta_text']}; font-family: monospace; font-size: 10px; padding-bottom: 3px; word-break: break-all;'>{in_val}</td>"
         f"</tr>"
         f"<tr>"
-        f"<td width='34' valign='top' style='color: #64748b; font-family: monospace; font-size: 10px; font-weight: bold;'>OUT</td>"
+        f"<td width='34' valign='top' style='color: {t['lbl_subtle']}; font-family: monospace; font-size: 10px; font-weight: bold;'>OUT</td>"
         f"<td valign='top'>{out_cell}</td>"
         f"</tr>"
         f"</table>"
@@ -491,13 +496,13 @@ def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_succe
     return (
         f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 0;'>"
         f"<tr>"
-        f"<td width='20' valign='top' align='center' style='border-right: 2px solid #334155; padding-right: 8px;'>"
+        f"<td width='20' valign='top' align='center' style='border-right: 2px solid {t['tool_timeline_line']}; padding-right: 8px;'>"
         f"<span style='color: {dot_color}; font-size: 13px; line-height: 16px;'>●</span>"
         f"</td>"
         f"<td valign='top' style='padding-left: 10px; padding-bottom: 10px;'>"
         f"<div style='line-height: 16px;'>"
-        f"<b style='color: #f8fafc; font-size: 11px;'>{html.escape(category)}</b>&nbsp;&nbsp;"
-        f"<span style='color: #cbd5e1; font-size: 11px;'>{header_desc}</span>{dur_str}"
+        f"<b style='color: {t['tool_header_category']}; font-size: 11px;'>{html.escape(category)}</b>&nbsp;&nbsp;"
+        f"<span style='color: {t['tool_header_desc']}; font-size: 11px;'>{header_desc}</span>{dur_str}"
         f"</div>"
         f"{sub_table}"
         f"{img_html}"
@@ -509,6 +514,7 @@ def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_succe
 
 def render_thinking_node_html(text="Thought for 1s", content=""):
     """Render a short, sleek Thinking timeline node with connected vertical line and optional expandable text."""
+    t = theme.get_theme()
     if not text:
         text = "Thought for 1s"
     body = ""
@@ -518,8 +524,8 @@ def render_thinking_node_html(text="Thought for 1s", content=""):
             clean_content = clean_content[:3000] + "<br><i>... (truncated)</i>"
         clean_content = clean_content.replace("\n", "<br>")
         body = (
-            f"<div style='margin-top: 4px; padding: 6px 10px; background-color: #0d1527; "
-            f"border-left: 2px solid #6366f1; border-radius: 4px; color: #94a3b8; "
+            f"<div style='margin-top: 4px; padding: 6px 10px; background-color: {t['thinking_bg']}; "
+            f"border-left: 2px solid #6366f1; border: 1px solid {t['thinking_border']}; border-radius: 4px; color: {t['thinking_text']}; "
             f"font-family: sans-serif; font-size: 10.5px; line-height: 1.5; font-style: italic; word-break: break-word;'>"
             f"{clean_content}"
             f"</div>"
@@ -527,11 +533,11 @@ def render_thinking_node_html(text="Thought for 1s", content=""):
     return (
         f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 0;'>"
         f"<tr>"
-        f"<td width='20' valign='top' align='center' style='border-right: 2px solid #334155; padding-right: 8px;'>"
-        f"<span style='color: #64748b; font-size: 11px; line-height: 16px;'>●</span>"
+        f"<td width='20' valign='top' align='center' style='border-right: 2px solid {t['tool_timeline_line']}; padding-right: 8px;'>"
+        f"<span style='color: {t['lbl_subtle']}; font-size: 11px; line-height: 16px;'>●</span>"
         f"</td>"
         f"<td valign='top' style='padding-left: 10px; padding-bottom: 6px;'>"
-        f"<span style='color: #94a3b8; font-size: 11px; font-weight: 500;'>{html.escape(text)}</span>"
+        f"<span style='color: {t['meta_text']}; font-size: 11px; font-weight: 500;'>{html.escape(text)}</span>"
         f"{body}"
         f"</td>"
         f"</tr>"
@@ -541,26 +547,27 @@ def render_thinking_node_html(text="Thought for 1s", content=""):
 
 def render_streaming_thinking_html(text="", elapsed=0):
     """Render live streaming thinking node while agent is actively reasoning."""
+    t = theme.get_theme()
     clean_text = html.escape(text.strip()) if text else ""
     if clean_text:
         clean_text = clean_text.replace("\n", "<br>")
         content = (
-            f"<div style='margin-top: 4px; padding: 5px 8px; background-color: #0d1527; "
-            f"border-left: 2px solid #818cf8; border-radius: 3px; color: #94a3b8; "
+            f"<div style='margin-top: 4px; padding: 5px 8px; background-color: {t['thinking_bg']}; "
+            f"border-left: 2px solid #818cf8; border: 1px solid {t['thinking_border']}; border-radius: 3px; color: {t['thinking_text']}; "
             f"font-family: sans-serif; font-size: 10.5px; font-style: italic; line-height: 1.45; word-break: break-all;'>"
             f"{clean_text}"
             f"</div>"
         )
     else:
         content = (
-            f"<div style='margin-top: 2px; color: #64748b; font-size: 10.5px; font-style: italic;'>"
+            f"<div style='margin-top: 2px; color: {t['lbl_subtle']}; font-size: 10.5px; font-style: italic;'>"
             f"Reasoning and executing internal steps..."
             f"</div>"
         )
     return (
         f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 0;'>"
         f"<tr>"
-        f"<td width='20' valign='top' align='center' style='border-right: 2px solid #334155; padding-right: 8px;'>"
+        f"<td width='20' valign='top' align='center' style='border-right: 2px solid {t['tool_timeline_line']}; padding-right: 8px;'>"
         f"<span style='color: #818cf8; font-size: 11px; line-height: 16px;'>💭</span>"
         f"</td>"
         f"<td valign='top' style='padding-left: 10px; padding-bottom: 6px;'>"
@@ -664,6 +671,7 @@ class AgentDock(QDockWidget):
 
         lbl_sess = QLabel("Session:")
         lbl_sess.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600;")
+        self.lbl_sess = lbl_sess
         self.session_combo = QComboBox()
         self.session_combo.setToolTip("Active conversation session bound to this QGIS project")
         self.session_combo.currentIndexChanged.connect(self._on_session_combo_changed)
@@ -671,6 +679,7 @@ class AgentDock(QDockWidget):
         btn_new_sess = QPushButton("➕")
         btn_new_sess.setToolTip("Start a new conversation session for this project")
         btn_new_sess.setFixedWidth(28)
+        self.btn_new_sess = btn_new_sess
         btn_new_sess.setStyleSheet("""
             QPushButton {
                 background-color: #232533;
@@ -755,6 +764,7 @@ class AgentDock(QDockWidget):
 
         lbl_model = QLabel("Model:")
         lbl_model.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600;")
+        self.lbl_model = lbl_model
         self.model_combo = QComboBox()
         self.model_combo.setEditable(True)
         self.model_combo.setToolTip("Select model or enter custom model ID")
@@ -782,6 +792,7 @@ class AgentDock(QDockWidget):
 
         lbl_skills = QLabel("Skills:")
         lbl_skills.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600;")
+        self.lbl_skills = lbl_skills
         self.skill_mode.setToolTip("Auto: smart-select on prompt or after clarification | Manual: pre-load pinned skills")
         self.skill_mode.setStyleSheet("""
             QComboBox {
@@ -926,6 +937,7 @@ class AgentDock(QDockWidget):
 
         lbl_hint = QLabel("Ctrl+Enter to send")
         lbl_hint.setStyleSheet("color: #475569; font-size: 10px; margin-left: 6px;")
+        self.lbl_hint = lbl_hint
 
         self.action_btn = QPushButton("▶ Send")
         self.action_btn.setToolTip("Execute map request (Ctrl+Enter)")
@@ -977,10 +989,143 @@ class AgentDock(QDockWidget):
         self.setWidget(w)
         self.prompt.installEventFilter(self)
         self.custom_instructions = s.value(SKEY + "custom_instructions", "")
+        self.apply_theme()
         self._build_settings_menu()
         self._on_cli_changed()
         self._on_skill_mode_changed()
         self._on_sessions_changed()
+
+    def changeEvent(self, ev):
+        if ev:
+            ev_type = ev.type()
+            pal_change = getattr(QEvent.Type, "PaletteChange", None) if hasattr(QEvent, "Type") else getattr(QEvent, "PaletteChange", 60)
+            if ev_type == pal_change:
+                if theme.get_theme_mode() == "auto":
+                    self.apply_theme()
+        super().changeEvent(ev)
+
+    def apply_theme(self):
+        """Apply active theme stylesheets to dock widgets and refresh chat view."""
+        t = theme.get_theme()
+
+        # Chat browser
+        self.log.setStyleSheet(f"""
+            QTextEdit, QTextBrowser {{
+                background-color: {t['chat_bg']};
+                color: {t['chat_text']};
+                border: 1px solid {t['chat_border']};
+                border-radius: 6px;
+                padding: 10px;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+                font-size: 12px;
+                selection-background-color: #2563eb;
+            }}
+        """)
+
+        # Prompt input
+        self.prompt.setStyleSheet(f"""
+            QPlainTextEdit {{
+                background-color: {t['prompt_bg']};
+                color: {t['prompt_text']};
+                border: 1px solid {t['prompt_border']};
+                border-radius: 5px;
+                padding: 6px;
+                font-size: 12px;
+            }}
+        """)
+
+        # Header & subtle labels
+        lbl_style = f"color: {t['lbl_subtle']}; font-size: 11px; font-weight: 600;"
+        if hasattr(self, "lbl_sess"):
+            self.lbl_sess.setStyleSheet(lbl_style)
+        if hasattr(self, "lbl_model"):
+            self.lbl_model.setStyleSheet(lbl_style)
+        if hasattr(self, "lbl_skills"):
+            self.lbl_skills.setStyleSheet(lbl_style)
+        if hasattr(self, "lbl_hint"):
+            self.lbl_hint.setStyleSheet(f"color: {t['lbl_subtle']}; font-size: 10px; margin-left: 6px;")
+
+        # ComboBoxes
+        combo_style = f"""
+            QComboBox {{
+                background-color: {t['combo_bg']};
+                color: {t['combo_text']};
+                border: 1px solid {t['combo_border']};
+                border-radius: 4px;
+                padding: 3px 6px;
+                font-size: 11px;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {t['combo_bg']};
+                color: {t['combo_text']};
+                selection-background-color: #2563eb;
+                selection-color: #ffffff;
+            }}
+        """
+        self.session_combo.setStyleSheet(combo_style)
+        self.model_combo.setStyleSheet(combo_style)
+        self.effort_combo.setStyleSheet(combo_style)
+        self.skill_mode.setStyleSheet(combo_style)
+
+        # Standard Buttons & ToolButtons
+        btn_style = f"""
+            QPushButton, QToolButton {{
+                background-color: {t['btn_bg']};
+                color: {t['btn_text']};
+                border: 1px solid {t['btn_border']};
+                border-radius: 4px;
+                padding: 4px 8px;
+                font-size: 11px;
+                font-weight: 500;
+            }}
+            QPushButton:hover, QToolButton:hover {{
+                background-color: {t['btn_hover_bg']};
+                color: {t['btn_hover_text']};
+            }}
+            QToolButton::menu-indicator {{
+                image: none;
+                width: 0px;
+            }}
+        """
+        self.revert_btn.setStyleSheet(btn_style)
+        self.settings_btn.setStyleSheet(btn_style)
+        self.btn_manage_skills.setStyleSheet(btn_style)
+        if hasattr(self, "btn_new_sess"):
+            self.btn_new_sess.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {t['btn_bg']};
+                    color: {t['btn_text']};
+                    border: 1px solid {t['btn_border']};
+                    border-radius: 4px;
+                    font-weight: bold;
+                    font-size: 12px;
+                    padding: 3px 0;
+                }}
+                QPushButton:hover {{
+                    background-color: {t['btn_hover_bg']};
+                    color: {t['btn_hover_text']};
+                }}
+            """)
+        self.attach_btn.setStyleSheet(btn_style)
+
+        # Indicator frame
+        self.indicator_frame.setStyleSheet(f"""
+            QFrame {{
+                background-color: {t['indicator_bg']};
+                border: 1px solid {t['indicator_border']};
+                border-radius: 4px;
+                padding: 3px 8px;
+            }}
+        """)
+        self.queue_label.setStyleSheet(f"color: {t['indicator_text']}; font-weight: bold; font-size: 11px;")
+
+        # Redraw existing messages in chat browser with new theme
+        self._render_active_session_log()
+
+    def _set_theme_mode(self, mode):
+        theme.set_theme_mode(mode)
+        self.apply_theme()
+        self._build_settings_menu()
 
     def eventFilter(self, obj, ev):
         if obj is self.prompt and ev.type() == ev.Type.KeyPress and ev.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) \
@@ -1169,6 +1314,19 @@ class AgentDock(QDockWidget):
             act.setChecked(mode_id == curr_mode)
             act.triggered.connect(lambda _, m=mode_id: self._set_skill_mode(m))
 
+        m_theme = self.settings_menu.addMenu("🎨 UI Theme")
+        themes = [
+            ("Auto (Follow QGIS Theme)", "auto"),
+            ("☀️ Light Theme", "light"),
+            ("🌙 Dark Theme", "dark"),
+        ]
+        curr_theme = theme.get_theme_mode()
+        for label, t_mode in themes:
+            act = m_theme.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(t_mode == curr_theme)
+            act.triggered.connect(lambda _, m=t_mode: self._set_theme_mode(m))
+
         # Output Folder action
         out_path = self.outdir.text().strip() or paths.get_default_output_dir()
         short_out = out_path if len(out_path) <= 30 else "…" + out_path[-27:]
@@ -1227,9 +1385,10 @@ class AgentDock(QDockWidget):
     def _on_stop_clicked(self):
         tools.CANCEL_REQUESTED = True
         self.runner.stop()
+        t = theme.get_theme()
         self._append_html(
-            f"<div style='margin: 6px 0; padding: 4px 8px; background-color: #450a0a; "
-            f"border-left: 3px solid #ef4444; border-radius: 3px; font-size: 11px; color: #fca5a5;'>"
+            f"<div style='margin: 6px 0; padding: 4px 8px; background-color: {t['tool_out_err_bg']}; "
+            f"border-left: 3px solid #ef4444; border-radius: 3px; font-size: 11px; color: {t['tool_out_err_text']};'>"
             f"⏹ <b>Execution stopped by user.</b>"
             f"</div>"
         )
@@ -1395,11 +1554,12 @@ class AgentDock(QDockWidget):
         self.iface.mapCanvas().refreshAllLayers()
         self._render_active_session_log()
 
+        t = theme.get_theme()
         rev_html = (
-            f"<div style='margin: 8px 0; padding: 6px 10px; background-color: #1e1b4b; "
-            f"border-left: 3px solid #818cf8; border-radius: 4px; font-size: 11px; color: #c7d2fe;'>"
+            f"<div style='margin: 8px 0; padding: 6px 10px; background-color: {t['indicator_bg']}; "
+            f"border-left: 3px solid #818cf8; border-radius: 4px; font-size: 11px; color: {t['indicator_text']};'>"
             f"⏪ <b>Reverted to Cycle {cycle_no} Checkpoint:</b> {html.escape(label_str)} ({chk.get('timestamp', '')})<br>"
-            f"<span style='color: #94a3b8; font-size: 10px;'>QGIS project layers, symbology, layouts, and conversation history successfully restored.</span>"
+            f"<span style='color: {t['meta_text']}; font-size: 10px;'>QGIS project layers, symbology, layouts, and conversation history successfully restored.</span>"
             f"</div>"
         )
         self._append_html(rev_html)
@@ -1435,14 +1595,14 @@ class AgentDock(QDockWidget):
                     is_success=tc.get("success", True)
                 )
                 self._append_html(card_html)
+            elif m.role == "user" and m.text:
+                self._append_html(render_user_message_html(m.text, timestamp=m.timestamp))
+            elif m.role == "assistant" and m.text:
+                self._append_html(render_assistant_message_html(m.text, model_info=m.model_info, timestamp=m.timestamp))
             elif m.html:
                 self._append_html(m.html)
             elif m.text:
-                if m.role == "user":
-                    self._append_html(render_user_message_html(m.text, timestamp=m.timestamp))
-                elif m.role == "assistant":
-                    self._append_html(render_assistant_message_html(m.text, model_info=m.model_info, timestamp=m.timestamp))
-                elif m.role == "tool":
+                if m.role == "tool":
                     self._append_html(render_tool_node_html("QGIS", m.text, "", "", m.text))
         self.first_turn = (sess.turns_count == 0)
         self.cont.setChecked(sess.turns_count > 0)
@@ -1729,11 +1889,12 @@ class AgentDock(QDockWidget):
                 meta.append(f"effort={effort_info}")
             header_str = " | ".join(meta)
             self._current_model_header = header_str
+            t = theme.get_theme()
             self._append_html(
                 f"<table width='100%' cellpadding='0' cellspacing='0' style='margin-top: 8px; margin-bottom: 2px;'>"
                 f"<tr><td>"
-                f"<span style='background-color: #059669; color: #ecfdf5; font-size: 10px; font-weight: bold; padding: 1px 6px; border-radius: 3px;'>AGENT</span>"
-                f"<span style='color: #64748b; font-size: 10px; margin-left: 6px;'>({html.escape(header_str)})</span>"
+                f"<span style='background-color: {t['agent_badge_bg']}; color: {t['agent_badge_text']}; font-size: 10px; font-weight: bold; padding: 1px 6px; border-radius: 3px;'>AGENT</span>"
+                f"<span style='color: {t['time_text']}; font-size: 10px; margin-left: 6px;'>({html.escape(header_str)})</span>"
                 f"</td></tr>"
                 f"</table>"
             )
@@ -2163,11 +2324,12 @@ class AgentDock(QDockWidget):
             r = subprocess.run(argv, capture_output=True, text=True, timeout=60,
                                env=paths.get_augmented_path_env())
             msg = (r.stdout + r.stderr).strip() or "OK"
+            t = theme.get_theme()
             self._append_html(
                 f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 4px 0;'>"
                 f"<tr><td>"
-                f"<div style='padding: 6px 10px; background-color: #1e293b; border: 1px solid #334155; border-radius: 4px; font-size: 11px; color: #cbd5e1;'>"
-                f"<b>Register MCP:</b> <code>{' '.join(argv)}</code><br><pre style='color: #94a3b8; margin: 4px 0 0 0;'>{html.escape(msg)}</pre></div>"
+                f"<div style='padding: 6px 10px; background-color: {t['tool_out_bg']}; border: 1px solid {t['tool_out_border']}; border-radius: 4px; font-size: 11px; color: {t['tool_out_text']};'>"
+                f"<b>Register MCP:</b> <code>{' '.join(argv)}</code><br><pre style='color: {t['meta_text']}; margin: 4px 0 0 0;'>{html.escape(msg)}</pre></div>"
                 f"</td></tr>"
                 f"</table>"
             )
@@ -2307,8 +2469,9 @@ class AgentDock(QDockWidget):
         if not self.message_queue:
             return
 
+        t = theme.get_theme()
         self._append_html(
-            f"<div style='margin: 4px 0; padding: 4px 8px; background-color: #451a1a; border-left: 3px solid #dc2626; border-radius: 3px; font-size: 11px; color: #fca5a5;'>"
+            f"<div style='margin: 4px 0; padding: 4px 8px; background-color: {t['tool_out_err_bg']}; border-left: 3px solid #dc2626; border-radius: 3px; font-size: 11px; color: {t['tool_out_err_text']};'>"
             f"⚡ <b>Interrupted</b> by user with immediate priority.</div>"
         )
         self.runner.stop()
@@ -2325,8 +2488,9 @@ class AgentDock(QDockWidget):
                 self.prompt.clear()
                 self.attachments = []
                 self._update_attachment_bar()
+                t = theme.get_theme()
                 self._append_html(
-                    f"<div style='margin: 4px 0; padding: 4px 8px; background-color: #172554; border-left: 3px solid #38bdf8; border-radius: 3px; font-size: 11px; color: #bae6fd;'>"
+                    f"<div style='margin: 4px 0; padding: 4px 8px; background-color: {t['indicator_bg']}; border-left: 3px solid {t['user_card_accent']}; border-radius: 3px; font-size: 11px; color: {t['indicator_text']};'>"
                     f"📥 <b>Message queued</b> (#{len(self.message_queue)}): <i>{html.escape(user[:120])}...</i></div>"
                 )
                 self._update_queue_ui()
@@ -2530,11 +2694,12 @@ class AgentDock(QDockWidget):
 
         badge_html = ""
         if meta_badges:
+            t = theme.get_theme()
             badge_html = (
                 f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 2px 0 6px 0;'>"
                 f"<tr><td>"
-                f"<div style='padding: 3px 8px; background-color: #1a1a26; "
-                f"border-left: 3px solid #8b5cf6; border-radius: 3px; font-size: 11px; color: #cbd5e1;'>"
+                f"<div style='padding: 3px 8px; background-color: {t['badge_meta_bg']}; "
+                f"border-left: 3px solid #8b5cf6; border-radius: 3px; font-size: 11px; color: {t['badge_meta_text']};'>"
                 f"{' &nbsp;|&nbsp; '.join(meta_badges)}"
                 f"</div>"
                 f"</td></tr>"
@@ -2649,11 +2814,12 @@ class AgentDock(QDockWidget):
                     break
             self._save_checkpoint(cycle_no, last_prompt)
 
-        revert_link = f"<span style='float: left;'><a href='revert:{cycle_no}' style='color: #38bdf8; text-decoration: none; font-size: 11px;'>↺ Revert to Cycle {cycle_no}</a></span>" if cycle_no > 0 else ""
+        t = theme.get_theme()
+        revert_link = f"<span style='float: left;'><a href='revert:{cycle_no}' style='color: {t['revert_link_text']}; text-decoration: none; font-size: 11px;'>↺ Revert to Cycle {cycle_no}</a></span>" if cycle_no > 0 else ""
         done_html = (
             f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 8px 0;'>"
             f"<tr><td>"
-            f"<div style='padding: 5px 10px; background-color: #171c24; border: 1px solid #282f3d; "
+            f"<div style='padding: 5px 10px; background-color: {t['tool_out_bg']}; border: 1px solid {t['tool_out_border']}; "
             f"border-radius: 4px; font-size: 11px; color: {status_color}; text-align: right;'>"
             f"{revert_link}"
             f"🏁 <b>Finished Cycle {cycle_no}</b> in {elapsed:.1f}s (Exit Code: {code})"

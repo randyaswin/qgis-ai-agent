@@ -1,6 +1,7 @@
 """Qt Dialog for managing, pinning, inspecting, and installing AI GIS skills."""
 import os
 from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLineEdit, QListWidget, QListWidgetItem,
     QTextEdit, QPushButton, QLabel, QSplitter, QCheckBox, QFileDialog, QInputDialog,
@@ -8,6 +9,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from .skills import REGISTRY, USER_DIR
+from . import theme
 
 
 class SkillsDialog(QDialog):
@@ -104,7 +106,8 @@ class SkillsDialog(QDialog):
             if is_disabled:
                 item.setForeground(Qt.GlobalColor.gray)
             elif is_pinned:
-                item.setForeground(Qt.GlobalColor.darkBlue)
+                color = QColor("#38bdf8") if theme.is_dark() else QColor("#1d4ed8")
+                item.setForeground(color)
             self.skill_list.addItem(item)
 
         if self.skill_list.count() > 0:
