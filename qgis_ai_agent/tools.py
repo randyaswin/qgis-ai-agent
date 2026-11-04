@@ -870,8 +870,11 @@ def _vectortile_detail(lyr):
       "Use before analysing or restyling user data.",
       {"layer": S("string", "name or id"), "sample": S("integer", "sample rows / raster sample pixels, default 5"),
        "max_unique": S("integer", "list distinct values if <= this, default 30")})
-def describe_layer(layer, sample=5, max_unique=30):
-    lyr = _layer(layer)
+def describe_layer(layer=None, sample=5, max_unique=30, layer_name=None, layer_id=None):
+    target = layer if layer is not None else (layer_name if layer_name is not None else layer_id)
+    if target is None:
+        raise ValueError("layer name or id is required for describe_layer")
+    lyr = _layer(target)
     base = {"id": lyr.id(), "name": lyr.name(), "source": lyr.publicSource(), "crs": lyr.crs().authid(),
             "valid": lyr.isValid(), "opacity": lyr.opacity() if hasattr(lyr, "opacity") else None,
             "scale_visibility": [lyr.minimumScale(), lyr.maximumScale()] if lyr.hasScaleBasedVisibility() else None}
@@ -3683,4 +3686,30 @@ def call(name, args):
         raise RuntimeError("Execution stopped by user.")
     if name not in TOOLS:
         raise ValueError(f"Unknown tool {name}")
-    return TOOLS[name]["fn"](**(args or {}))
+    fn = TOOLS[name]["fn"]
+    clean_args = dict(args or {})
+
+    # Automatic argument alias normalization
+    import inspect
+    sig = inspect.signature(fn)
+    params = sig.parameters
+    has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+    # Common aliases: layer / layer_name / layer_id / name
+    if "layer" in params and "layer" not in clean_args:
+        for alias in ("layer_name", "layer_id", "name", "target_layer"):
+            if alias in clean_args:
+                clean_args["layer"] = clean_args.pop(alias)
+                break
+    elif "layer_name" in params and "layer_name" not in clean_args:
+        for alias in ("layer", "layer_id", "name"):
+            if alias in clean_args:
+                clean_args["layer_name"] = clean_args.pop(alias)
+                break
+
+    # If function does not accept **kwargs, drop extra unexpected keys to avoid TypeError
+    if not has_var_keyword:
+        filtered_args = {k: v for k, v in clean_args.items() if k in params}
+        return fn(**filtered_args)
+
+    return fn(**clean_args)
