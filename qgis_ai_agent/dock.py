@@ -767,6 +767,48 @@ class AgentDock(QDockWidget):
         row1.addWidget(self.effort_combo)
         lay.addLayout(row1)
 
+        # Row 2: Skills Mode & Pre-load
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+
+        lbl_skills = QLabel("Skills:")
+        lbl_skills.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600;")
+        self.skill_mode.setToolTip("Auto: smart-select on prompt or after clarification | Manual: pre-load pinned skills")
+        self.skill_mode.setStyleSheet("""
+            QComboBox {
+                background-color: #171822;
+                color: #e2e8f0;
+                border: 1px solid #28283a;
+                border-radius: 4px;
+                padding: 3px 6px;
+                font-size: 11px;
+            }
+        """)
+
+        self.btn_manage_skills = QPushButton()
+        self.btn_manage_skills.setToolTip("View, pin, or manage pre-loaded skills")
+        self.btn_manage_skills.setStyleSheet("""
+            QPushButton {
+                background-color: #1e1e2a;
+                color: #38bdf8;
+                border: 1px solid #333348;
+                border-radius: 4px;
+                padding: 3px 8px;
+                font-size: 11px;
+                font-weight: 500;
+            }
+            QPushButton:hover {
+                background-color: #272738;
+                color: #7dd3fc;
+            }
+        """)
+        self.btn_manage_skills.clicked.connect(self._open_skills_dialog)
+
+        row2.addWidget(lbl_skills)
+        row2.addWidget(self.skill_mode, 1)
+        row2.addWidget(self.btn_manage_skills)
+        lay.addLayout(row2)
+
         # Chat log display (Claude Dark IDE Theme)
         self.log = QTextBrowser()
         self.log.setReadOnly(True)
@@ -1398,12 +1440,29 @@ class AgentDock(QDockWidget):
 
     def _on_skill_mode_changed(self):
         REGISTRY.mode = self.skill_mode.currentData()
+        REGISTRY.save_settings()
         s = QSettings()
         s.setValue(SKEY + "skill_mode", REGISTRY.mode)
+        self._update_skills_ui()
+
+    def _update_skills_ui(self):
+        mode = self.skill_mode.currentData() or REGISTRY.mode
+        pinned_count = len(REGISTRY.pinned)
+        if mode == "auto":
+            self.btn_manage_skills.setText("🧩 Auto Select")
+            self.btn_manage_skills.setToolTip("Skills auto-select based on task intent (or after clarification)")
+        elif mode == "manual":
+            self.btn_manage_skills.setText(f"📌 Pre-load ({pinned_count})")
+            self.btn_manage_skills.setToolTip(f"{pinned_count} skills pre-loaded into context. Click to manage.")
+        else:
+            self.btn_manage_skills.setText("🚫 Disabled")
+            self.btn_manage_skills.setToolTip("Skills injection is disabled")
 
     def _open_skills_dialog(self):
         dlg = SkillsDialog(self)
         dlg.exec()
+        REGISTRY.save_settings()
+        self._update_skills_ui()
 
     def _open_toolbox(self):
         res = tools.open_processing_toolbox()
@@ -2300,11 +2359,46 @@ class AgentDock(QDockWidget):
         REGISTRY.mode = self.skill_mode.currentData()
         catalog = list(REGISTRY.available().keys())
 
+        # Check if previous assistant message was a clarification question without executing tools
+        is_after_clarification = False
+        if cont and active_sess.messages:
+            last_asst = None
+            for m in reversed(active_sess.messages):
+                if m.role == "assistant":
+                    last_asst = m
+                    break
+            if last_asst:
+                has_tool_run = bool(last_asst.tool_calls)
+                has_clarify = ("prompt:" in (last_asst.html or "") or "fill:" in (last_asst.html or "")
+                               or "?" in (last_asst.text or "") or "klarifikasi" in (last_asst.text or "").lower()
+                               or "konfirmasi" in (last_asst.text or "").lower())
+                if not has_tool_run and has_clarify:
+                    is_after_clarification = True
+
         inherited_skills = []
-        if cont and active_sess.active_skills:
-            # Continuing turn: inherit previously selected skills
+        if REGISTRY.mode == "manual":
+            # Manual mode: pre-load all pinned / manual skills in full before execution
+            sel = REGISTRY.select(user)
+            loaded_skills = [s.name for s in sel.get("pinned", []) + sel.get("full", [])]
+            active_sess.active_skills = list(loaded_skills)
+            active_sess.is_e2e = sel.get("is_e2e", False)
+            skills_txt = prompts.skills_block(sel, catalog)
+        elif REGISTRY.mode == "off":
+            loaded_skills = []
+            skills_txt = ""
+        elif is_after_clarification:
+            # Auto mode after clarification: automatically select skills matching the combined clarified intent
+            all_user_prompts = [m.text for m in active_sess.messages if m.role == "user"] + [user]
+            combined_task = "\n".join(all_user_prompts)
+            sel = REGISTRY.select(combined_task)
+            loaded_skills = [s.name for s in sel.get("pinned", []) + sel.get("full", [])]
+            active_sess.active_skills = list(loaded_skills)
+            active_sess.is_e2e = sel.get("is_e2e", False)
+            skills_txt = prompts.skills_block(sel, catalog)
+        elif cont and active_sess.active_skills:
+            # Auto mode continuing turn after tools were already executed: inherit and add newly needed skills
             inherited_skills = list(active_sess.active_skills)
-            new_sel = REGISTRY.select(user) if REGISTRY.mode != "off" else {"pinned": [], "full": [], "hint": [], "scores": {}}
+            new_sel = REGISTRY.select(user)
             new_names = [s.name for s in new_sel.get("pinned", []) + new_sel.get("full", [])]
             added_names = [n for n in new_names if n not in inherited_skills]
 
@@ -2314,7 +2408,6 @@ class AgentDock(QDockWidget):
                 active_sess.is_e2e = True
 
             loaded_skills = merged_skill_names
-            # If new skills were added this turn, build their full bodies; otherwise a lightweight reminder
             avail_skills = REGISTRY.available() or REGISTRY.skills
             if added_names:
                 added_objs = [avail_skills[n] for n in added_names if n in avail_skills]
@@ -2326,12 +2419,12 @@ class AgentDock(QDockWidget):
                 skills_txt = f"# Active session skills: {', '.join(merged_skill_names)} (already in context)"
             sel = {"pinned": [], "full": [avail_skills[n] for n in merged_skill_names if n in avail_skills], "scores": {}}
         else:
-            # First turn or fresh session
-            sel = REGISTRY.select(user) if REGISTRY.mode != "off" else {"pinned": [], "full": [], "hint": [], "scores": {}}
+            # Auto mode: first turn / before execution
+            sel = REGISTRY.select(user)
             loaded_skills = [s.name for s in sel.get("pinned", []) + sel.get("full", [])]
             active_sess.active_skills = list(loaded_skills)
             active_sess.is_e2e = sel.get("is_e2e", False)
-            skills_txt = prompts.skills_block(sel, catalog) if REGISTRY.mode != "off" else ""
+            skills_txt = prompts.skills_block(sel, catalog)
 
         # Model and Effort selection
         selected_model = self.model_combo.currentData()
@@ -2402,10 +2495,14 @@ class AgentDock(QDockWidget):
             meta_badges.append(f"<span style='color: #c084fc;'>Effort:</span> <code>{html.escape(selected_effort)}</code>")
         if loaded_skills:
             inh_count = len(inherited_skills) if cont and inherited_skills else 0
-            if cont and inh_count > 0:
+            if REGISTRY.mode == "manual":
+                skill_tag = f"Skills ({len(loaded_skills)} pre-loaded manually):"
+            elif is_after_clarification:
+                skill_tag = f"Skills ({len(loaded_skills)} auto-selected after clarification):"
+            elif cont and inh_count > 0:
                 skill_tag = f"Skills ({len(loaded_skills)} active, inherited {inh_count}):"
             else:
-                skill_tag = f"Skills ({len(loaded_skills)}):"
+                skill_tag = f"Skills ({len(loaded_skills)} auto-selected):"
             meta_badges.append(f"<span style='color: #67e8f9;'>{skill_tag}</span> <b>{', '.join(html.escape(s) for s in loaded_skills)}</b>")
 
         badge_html = ""

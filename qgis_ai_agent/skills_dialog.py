@@ -42,7 +42,7 @@ class SkillsDialog(QDialog):
         left_layout.addWidget(self.skill_list)
 
         btn_row = QHBoxLayout()
-        self.btn_pin = QPushButton("📌 Pin (Always Active)")
+        self.btn_pin = QPushButton("📌 Pre-load / Pin Skill")
         self.btn_pin.clicked.connect(self._toggle_pin)
         self.btn_disable = QPushButton("🚫 Disable/Enable")
         self.btn_disable.clicked.connect(self._toggle_disable)
@@ -94,7 +94,7 @@ class SkillsDialog(QDialog):
             is_disabled = name in REGISTRY.disabled
             tag = []
             if is_pinned:
-                tag.append("📌 PINNED")
+                tag.append("📌 PRE-LOADED")
             if is_disabled:
                 tag.append("🚫 DISABLED")
             tag_str = f" [{', '.join(tag)}]" if tag else ""
@@ -134,6 +134,7 @@ class SkillsDialog(QDialog):
             REGISTRY.pinned.remove(name)
         else:
             REGISTRY.pinned.add(name)
+        REGISTRY.save_settings()
         self._refresh_list()
 
     def _toggle_disable(self):

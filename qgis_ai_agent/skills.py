@@ -125,7 +125,7 @@ class Registry:
     def __init__(self, dirs=None):
         self.dirs = dirs or [os.path.join(SKILLS_DIR, "vendor"), os.path.join(SKILLS_DIR, "custom"), USER_DIR]
         self.mode = "auto"          # auto | manual | off
-        self.pinned = set()         # always injected in full
+        self.pinned = set()         # always injected in full (pre-loaded)
         self.disabled = set()       # never selected or loadable
         self.max_inject = 6
         self.budget_chars = 75000   # total body chars auto-injected (modern LLM context friendly)
@@ -133,6 +133,38 @@ class Registry:
         self.extra = {"synonyms": {}, "keywords": {}}
         self._idf = {}
         self.reload()
+        self.load_settings()
+
+    def load_settings(self):
+        """Load pinned and disabled skills and mode from QSettings."""
+        try:
+            from qgis.PyQt.QtCore import QSettings
+            s = QSettings()
+            saved_pinned = s.value("qgis_ai_agent/pinned_skills", None)
+            if saved_pinned is not None:
+                if isinstance(saved_pinned, str):
+                    self.pinned = set(p.strip() for p in saved_pinned.split(",") if p.strip())
+                elif isinstance(saved_pinned, (list, set)):
+                    self.pinned = set(str(p).strip() for p in saved_pinned if str(p).strip())
+            else:
+                self.pinned = {"cartographic-symbology-and-styling", "advanced-map-layouting"}
+
+            saved_mode = s.value("qgis_ai_agent/skill_mode", "auto")
+            if saved_mode in ("auto", "manual", "off"):
+                self.mode = saved_mode
+        except Exception:
+            if not self.pinned:
+                self.pinned = {"cartographic-symbology-and-styling", "advanced-map-layouting"}
+
+    def save_settings(self):
+        """Persist pinned skills and skill mode to QSettings."""
+        try:
+            from qgis.PyQt.QtCore import QSettings
+            s = QSettings()
+            s.setValue("qgis_ai_agent/pinned_skills", ",".join(sorted(self.pinned)))
+            s.setValue("qgis_ai_agent/skill_mode", self.mode)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------ discovery
     def reload(self):
@@ -371,6 +403,11 @@ class Registry:
             if n in self.skills and n not in self.disabled and n not in already:
                 out["pinned"].append(self.skills[n])
         if self.mode == "manual":
+            # In Manual mode: pre-load all pinned skills in full; if empty, pre-load foundational baseline
+            if not out["pinned"]:
+                for bn in ("cartographic-symbology-and-styling", "advanced-map-layouting"):
+                    if bn in self.skills and bn not in self.disabled and bn not in already:
+                        out["pinned"].append(self.skills[bn])
             return out
 
         ranked = [(sc, n) for sc, n in self.rank(user_prompt) if n not in self.pinned and n not in already]
