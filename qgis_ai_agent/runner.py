@@ -37,8 +37,89 @@ def find_cli_bin(bin_name):
     return bin_name
 
 
-# In-memory cache for live CLI discovered models: cli_key -> [(label, id), ...]
+# In-memory cache for CLI models: cli_key -> [(label, id), ...]
 _CLI_MODELS_CACHE = {}
+
+# Curated fallback catalog aligned with Multica backends
+DEFAULT_ADAPTER_MODELS = {
+    "agy (Antigravity CLI)": [
+        ("Gemini 3.8 Flash (High)", "gemini-3.8-flash-high"),
+        ("Gemini 3.8 Flash (Medium)", "gemini-3.8-flash-medium"),
+        ("Gemini 3.8 Flash (Low)", "gemini-3.8-flash-low"),
+        ("Claude Sonnet 4.6 (Thinking)", "claude-sonnet-4-6"),
+        ("Claude Opus 4.6 (Thinking)", "claude-opus-4-6-thinking"),
+        ("GPT-OSS 120B (Medium)", "gpt-oss-120b-medium"),
+    ],
+    "Claude Code": [
+        ("Claude Sonnet 4.6 (Thinking)", "claude-sonnet-4-6"),
+        ("Claude Opus 4.6 (Thinking)", "claude-opus-4-6"),
+        ("Claude Sonnet (Latest)", "sonnet"),
+        ("Claude Opus (Latest)", "opus"),
+        ("Claude Haiku (Latest)", "haiku"),
+        ("Claude Haiku 4.5", "claude-haiku-4-5"),
+        ("Claude Opus 5.5", "claude-opus-5-5"),
+        ("Claude Fable 5.1", "claude-fable-5-1"),
+    ],
+    "Gemini CLI": [
+        ("Gemini 2.5 Pro", "gemini-2.5-pro"),
+        ("Gemini 2.5 Flash", "gemini-2.5-flash"),
+        ("Gemini 2.0 Flash", "gemini-2.0-flash"),
+        ("Gemini 1.5 Pro", "gemini-1.5-pro"),
+    ],
+    "Codex CLI": [
+        ("GPT-5.4", "gpt-5.4"),
+        ("GPT-5.4 Mini", "gpt-5.4-mini"),
+        ("GPT-5.6 Terra", "gpt-5.6-terra"),
+        ("o3-mini", "o3-mini"),
+        ("o1", "o1"),
+        ("GPT-4o", "gpt-4o"),
+    ],
+    "GitHub Copilot CLI": [
+        ("Claude 3.7 Sonnet", "claude-3.7-sonnet"),
+        ("Claude 3.5 Sonnet", "claude-3.5-sonnet"),
+        ("GPT-4o", "gpt-4o"),
+        ("o3-mini", "o3-mini"),
+    ],
+    "OpenCode": [
+        ("DeepSeek V4.1 Flash (Free)", "opencode/deepseek-v4.1-flash-free"),
+        ("MIMO V2.6 Flash (Free)", "opencode/mimo-v2.6-flash-free"),
+        ("Nemotron 3.5 Lightning (Free)", "opencode/nemotron-3.5-lightning-free"),
+        ("Beam (Free)", "opencode/beam-free"),
+        ("Flint 40B (Free)", "opencode/flint-40b-free"),
+        ("GLM 5.3 Flash (Free)", "opencode/glm-5.3-flash-free"),
+    ],
+    "DeepSeek / Hermes CLI": [
+        ("DeepSeek V3 (Chat)", "deepseek-chat"),
+        ("DeepSeek R1 (Reasoner)", "deepseek-reasoner"),
+        ("Hermes 3 (Llama 3.1)", "hermes-3"),
+    ],
+    "Cursor Agent": [
+        ("Claude 3.7 Sonnet", "claude-3.7-sonnet"),
+        ("Claude 3.5 Sonnet", "claude-3.5-sonnet"),
+        ("GPT-4o", "gpt-4o"),
+        ("Cursor Small", "cursor-small"),
+    ],
+    "Qwen Code": [
+        ("Qwen Max", "qwen-max"),
+        ("Qwen Plus", "qwen-plus"),
+        ("Qwen Turbo", "qwen-turbo"),
+        ("Qwen 2.5 Coder 32B", "qwen-2.5-coder-32b"),
+    ],
+    "Trae CLI": [
+        ("Claude 3.7 Sonnet", "claude-3.7-sonnet"),
+        ("GPT-4o", "gpt-4o"),
+    ],
+    "Kimi Code": [
+        ("Kimi K1.5", "kimi-k1.5"),
+        ("Moonshot v1 128k", "moonshot-v1-128k"),
+    ],
+    "Aider": [
+        ("Claude 3.7 Sonnet", "sonnet"),
+        ("GPT-4o", "gpt-4o"),
+        ("DeepSeek V3", "deepseek/deepseek-chat"),
+        ("Gemini 2.5 Pro", "gemini/gemini-2.5-pro"),
+    ],
+}
 
 
 def get_cli_models(cli_key, force_refresh=False):
@@ -75,7 +156,22 @@ def get_cli_models(cli_key, force_refresh=False):
         except Exception:
             pass
 
-    # 2. Claude Code: inspect ~/.claude.json / %APPDATA%\Claude for accessible models
+    # 2. OpenCode CLI: dynamic live models via `opencode models`
+    elif "opencode" in bin_name.lower():
+        try:
+            res = subprocess.run([bin_path, "models"], capture_output=True, text=True, timeout=4)
+            if res.returncode == 0 and res.stdout:
+                for line in res.stdout.splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        # Format clean display label
+                        parts = line.split("/")
+                        short_lbl = parts[-1] if len(parts) > 1 else line
+                        discovered.append((f"{short_lbl} ({line})", line))
+        except Exception:
+            pass
+
+    # 3. Claude Code: inspect ~/.claude.json / %APPDATA%\Claude for accessible models
     elif "claude" in bin_name.lower():
         claude_dirs = paths.get_candidate_cli_dirs("claude")
         candidate_configs = [os.path.join(d, "claude.json") for d in claude_dirs] + [os.path.join(paths.get_home_dir(), ".claude.json")]
@@ -99,7 +195,21 @@ def get_cli_models(cli_key, force_refresh=False):
                 except Exception:
                     pass
 
-    # 3. Gemini CLI: inspect settings.json across candidate paths
+    # 4. DeepSeek / Hermes CLI: inspect ~/.hermes/config.yaml
+    elif "deepseek" in bin_name.lower() or "hermes" in bin_name.lower():
+        hermes_cfg = os.path.join(paths.get_home_dir(), ".hermes", "config.yaml")
+        if os.path.exists(hermes_cfg):
+            try:
+                with open(hermes_cfg, "r", encoding="utf-8") as f:
+                    content = f.read()
+                m_match = re.search(r'^\s*default\s*:\s*([^\s#]+)', content, re.MULTILINE)
+                if m_match:
+                    h_m = m_match.group(1).strip()
+                    discovered.append((f"Hermes Configured ({h_m})", h_m))
+            except Exception:
+                pass
+
+    # 5. Gemini CLI: inspect settings.json across candidate paths
     elif "gemini" in bin_name.lower():
         gemini_dirs = paths.get_candidate_cli_dirs("gemini")
         for gdir in gemini_dirs:
@@ -115,7 +225,7 @@ def get_cli_models(cli_key, force_refresh=False):
                 except Exception:
                     pass
 
-    # 4. Codex CLI: inspect config.toml
+    # 6. Codex CLI: inspect config.toml
     elif "codex" in bin_name.lower():
         codex_dirs = paths.get_candidate_cli_dirs("codex")
         for cdir in codex_dirs:
@@ -132,25 +242,15 @@ def get_cli_models(cli_key, force_refresh=False):
                 except Exception:
                     pass
 
-    # 5. OpenCode CLI: inspect config.json
-    elif "opencode" in bin_name.lower():
-        opencode_dirs = paths.get_candidate_cli_dirs("opencode")
-        for odir in opencode_dirs:
-            cfg_path = os.path.join(odir, "config.json")
-            if os.path.exists(cfg_path):
-                try:
-                    with open(cfg_path, "r", encoding="utf-8") as f:
-                        odata = json.load(f)
-                    m = odata.get("model")
-                    if m:
-                        discovered.append((f"Configured ({m})", m))
-                        break
-                except Exception:
-                    pass
-
     # Build final list: Always place CLI Account Default at the top!
     result = [default_entry]
+    # 1. Add live discovered models first
     for lbl, val in discovered:
+        if val and not any(val == r[1] for r in result):
+            result.append((lbl, val))
+
+    # 2. Add curated adapter models (if not already present)
+    for lbl, val in DEFAULT_ADAPTER_MODELS.get(cli_key, []):
         if val and not any(val == r[1] for r in result):
             result.append((lbl, val))
 

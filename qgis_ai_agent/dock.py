@@ -959,6 +959,13 @@ class AgentDock(QDockWidget):
         self.model_combo.blockSignals(False)
         self._update_effort_visibility()
 
+        # Always trigger background discovery so newly authenticated models / remote models update asynchronously
+        if self._model_thread and self._model_thread.isRunning():
+            self._model_thread.wait(300)
+        self._model_thread = ModelDiscoveryThread(cli_name, self)
+        self._model_thread.models_ready.connect(self._on_models_discovered)
+        self._model_thread.start()
+
     def _on_models_discovered(self, cli_name, models):
         if self.cli.currentData() != cli_name:
             return
@@ -976,7 +983,7 @@ class AgentDock(QDockWidget):
                 self.model_combo.setCurrentIndex(idx)
             else:
                 self.model_combo.setEditText(curr_text)
-        elif curr_text:
+        elif curr_text and not curr_text.lower().startswith("default"):
             self.model_combo.setEditText(curr_text)
         elif self.model_combo.count() > 0:
             self.model_combo.setCurrentIndex(0)
@@ -1001,16 +1008,6 @@ class AgentDock(QDockWidget):
     def _on_cli_changed(self):
         cli_name = self.cli.currentData()
         self._populate_models_for_cli(cli_name)
-
-        # Background live model discovery if not yet cached
-        if cli_name not in _CLI_MODELS_CACHE:
-            if self._model_thread and self._model_thread.isRunning():
-                self._model_thread.wait(300)
-            self._model_thread = ModelDiscoveryThread(cli_name, self)
-            self._model_thread.models_ready.connect(self._on_models_discovered)
-            self._model_thread.start()
-
-        self._update_effort_visibility()
         s = QSettings()
         s.setValue(SKEY + "cli", cli_name)
 
