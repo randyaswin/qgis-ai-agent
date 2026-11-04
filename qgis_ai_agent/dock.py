@@ -793,16 +793,18 @@ class AgentDock(QDockWidget):
         row1.addWidget(self.effort_combo)
         lay.addLayout(row1)
 
-        # Row 2: Skills Mode & Pre-load
+        # Row 2: Output Folder (Cross-platform default on Linux, Windows, macOS)
         row2 = QHBoxLayout()
         row2.setSpacing(6)
 
-        lbl_skills = QLabel("Skills:")
-        lbl_skills.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600;")
-        self.lbl_skills = lbl_skills
-        self.skill_mode.setToolTip("Auto: smart-select on prompt or after clarification | Manual: pre-load pinned skills")
-        self.skill_mode.setStyleSheet("""
-            QComboBox {
+        lbl_output = QLabel("Output:")
+        lbl_output.setStyleSheet("color: #94a3b8; font-size: 11px; font-weight: 600;")
+        self.lbl_output = lbl_output
+
+        self.outdir_edit = QLineEdit(self.outdir.text().strip() or paths.get_default_output_dir())
+        self.outdir_edit.setToolTip("Default export directory for maps, layouts, and geoprocessing outputs across Linux, Windows, macOS")
+        self.outdir_edit.setStyleSheet("""
+            QLineEdit {
                 background-color: #171822;
                 color: #e2e8f0;
                 border: 1px solid #28283a;
@@ -811,10 +813,11 @@ class AgentDock(QDockWidget):
                 font-size: 11px;
             }
         """)
+        self.outdir_edit.textChanged.connect(self._on_outdir_text_changed)
 
-        self.btn_manage_skills = QPushButton()
-        self.btn_manage_skills.setToolTip("View, pin, or manage pre-loaded skills")
-        self.btn_manage_skills.setStyleSheet("""
+        btn_browse_out = QPushButton("📁 Browse")
+        btn_browse_out.setToolTip("Select or change the output folder")
+        btn_browse_out.setStyleSheet("""
             QPushButton {
                 background-color: #1e1e2a;
                 color: #38bdf8;
@@ -829,11 +832,11 @@ class AgentDock(QDockWidget):
                 color: #7dd3fc;
             }
         """)
-        self.btn_manage_skills.clicked.connect(self._open_skills_dialog)
+        btn_browse_out.clicked.connect(self._choose_outdir)
 
-        row2.addWidget(lbl_skills)
-        row2.addWidget(self.skill_mode, 1)
-        row2.addWidget(self.btn_manage_skills)
+        row2.addWidget(lbl_output)
+        row2.addWidget(self.outdir_edit, 1)
+        row2.addWidget(btn_browse_out)
         lay.addLayout(row2)
 
         # Chat log display (Claude Dark IDE Theme)
@@ -1096,7 +1099,8 @@ class AgentDock(QDockWidget):
         """
         self.revert_btn.setStyleSheet(btn_style)
         self.settings_btn.setStyleSheet(btn_style)
-        self.btn_manage_skills.setStyleSheet(btn_style)
+        if hasattr(self, "btn_manage_skills"):
+            self.btn_manage_skills.setStyleSheet(btn_style)
         if hasattr(self, "btn_new_sess"):
             self.btn_new_sess.setStyleSheet(f"""
                 QPushButton {{
@@ -1378,10 +1382,18 @@ class AgentDock(QDockWidget):
             self.skill_mode.setCurrentIndex(idx)
         self._build_settings_menu()
 
+    def _on_outdir_text_changed(self, text):
+        d = text.strip()
+        self.outdir.setText(d)
+        QSettings().setValue(SKEY + "outdir", d)
+        self._build_settings_menu()
+
     def _choose_outdir(self):
-        cur = self.outdir.text().strip() or paths.get_default_output_dir()
+        cur = (self.outdir_edit.text().strip() if hasattr(self, "outdir_edit") else "") or self.outdir.text().strip() or paths.get_default_output_dir()
         d = QFileDialog.getExistingDirectory(self, "Select Output Folder", cur)
         if d:
+            if hasattr(self, "outdir_edit") and self.outdir_edit.text() != d:
+                self.outdir_edit.setText(d)
             self.outdir.setText(d)
             QSettings().setValue(SKEY + "outdir", d)
             self._build_settings_menu()
@@ -1624,15 +1636,16 @@ class AgentDock(QDockWidget):
     def _update_skills_ui(self):
         mode = self.skill_mode.currentData() or REGISTRY.mode
         pinned_count = len(REGISTRY.pinned)
-        if mode == "auto":
-            self.btn_manage_skills.setText("🧩 Auto Select")
-            self.btn_manage_skills.setToolTip("Skills auto-select based on task intent (or after clarification)")
-        elif mode == "manual":
-            self.btn_manage_skills.setText(f"📌 Pre-load ({pinned_count})")
-            self.btn_manage_skills.setToolTip(f"{pinned_count} skills pre-loaded into context. Click to manage.")
-        else:
-            self.btn_manage_skills.setText("🚫 Disabled")
-            self.btn_manage_skills.setToolTip("Skills injection is disabled")
+        if hasattr(self, "btn_manage_skills"):
+            if mode == "auto":
+                self.btn_manage_skills.setText("🧩 Auto Select")
+                self.btn_manage_skills.setToolTip("Skills auto-select based on task intent (or after clarification)")
+            elif mode == "manual":
+                self.btn_manage_skills.setText(f"📌 Pre-load ({pinned_count})")
+                self.btn_manage_skills.setToolTip(f"{pinned_count} skills pre-loaded into context. Click to manage.")
+            else:
+                self.btn_manage_skills.setText("🚫 Disabled")
+                self.btn_manage_skills.setToolTip("Skills injection is disabled")
 
     def _open_skills_dialog(self):
         dlg = SkillsDialog(self)

@@ -22,7 +22,7 @@ def get_home_dir():
 
 
 def get_documents_dir():
-    """Returns user Documents directory (e.g. C:\\Users\\Name\\Documents or ~/Documents)."""
+    """Returns user Documents directory cross-platform (Linux: ~/Documents, macOS: ~/Documents, Windows: %USERPROFILE%\\Documents)."""
     try:
         from qgis.PyQt.QtCore import QStandardPaths
         loc = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
@@ -37,22 +37,42 @@ def get_documents_dir():
         if user_prof:
             cand = os.path.join(user_prof, "Documents")
             if os.path.isdir(cand):
-                return cand
+                return os.path.normpath(cand)
+        one_drive = os.environ.get("OneDrive")
+        if one_drive:
+            cand = os.path.join(one_drive, "Documents")
+            if os.path.isdir(cand):
+                return os.path.normpath(cand)
         cand = os.path.expanduser("~/Documents")
         if os.path.isdir(cand):
-            return cand
+            return os.path.normpath(cand)
+
+    # macOS fallback
+    if sys.platform == "darwin":
+        cand = os.path.expanduser("~/Documents")
+        if os.path.isdir(cand):
+            return os.path.normpath(cand)
 
     # Unix fallback
     cand = os.path.expanduser("~/Documents")
     if os.path.isdir(cand):
-        return cand
+        return os.path.normpath(cand)
     return get_home_dir()
 
 
 def get_default_output_dir():
-    """Returns the default directory for generated maps, layouts, and exports."""
+    """Returns the standardized cross-platform default directory for generated maps, layouts, and exports:
+    - Linux: ~/Documents/qgis-ai-maps
+    - macOS: ~/Documents/qgis-ai-maps
+    - Windows: %USERPROFILE%\\Documents\\qgis-ai-maps
+    """
     doc_dir = get_documents_dir()
-    return os.path.join(doc_dir, "qgis-ai-maps")
+    target_dir = os.path.join(doc_dir, "qgis-ai-maps")
+    try:
+        os.makedirs(target_dir, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.normpath(target_dir)
 
 
 def get_app_data_dir():
