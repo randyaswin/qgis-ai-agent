@@ -403,32 +403,26 @@ def add_layout_legend(layout=None, x=0, y=0, width=None, height=None, item_id=No
     lg.setLinkedMap(_map(lay, map_id))
     if layers:
         lg.setAutoUpdateModel(False)
-        from qgis.core import QgsLayerTree
-        custom_tree = QgsLayerTree()
+        root = lg.model().rootGroup()
+        root.clear()
         for n in layers:
             try:
-                custom_tree.addLayer(_layer(n))
+                lyr = _layer(n)
+                if lyr:
+                    root.addLayer(lyr)
             except Exception:
                 pass
-        lg.model().setRootGroup(custom_tree)
-        root = custom_tree
     else:
         # Auto-exclude background basemaps, hillshades, and raw grayscale tiles
-        from qgis.core import QgsLayerTree
         skip_terms = ("esri", "osm", "carto", "basemap", "hillshade", "xyz", "canvas", "satellite", "terrain")
-        custom_tree = QgsLayerTree()
-        has_filtered = False
-        for lyr in QgsProject.instance().mapLayers().values():
-            low = lyr.name().lower()
+        lg.setAutoUpdateModel(False)
+        root = lg.model().rootGroup()
+        for ch in list(root.children()):
+            low = ch.name().lower() if hasattr(ch, "name") else ""
             if any(st in low for st in skip_terms):
-                has_filtered = True
-                continue
-            custom_tree.addLayer(lyr)
-        if has_filtered and len(custom_tree.children()) > 0:
-            lg.setAutoUpdateModel(False)
-            lg.model().setRootGroup(custom_tree)
-            root = custom_tree
-        else:
+                root.removeChildNode(ch)
+        if len(root.children()) == 0:
+            lg.setAutoUpdateModel(True)
             root = lg.model().rootGroup()
     if hide_layer_titles:
         from qgis.core import QgsLegendRenderer

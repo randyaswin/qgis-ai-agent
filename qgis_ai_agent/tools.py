@@ -1310,12 +1310,13 @@ def snapshot_canvas(width=1000, height=700):
 
 @tool("Render a visual preview image of a print layout and return it as an image. ALWAYS call this after creating or modifying a layout to visually verify layout balance, check for overflowing legend items, inspect text proportions, and verify that the map fills the page before finalizing.",
       {"name": S("string", "layout name (default: first or active layout)"), "dpi": S("integer", "render DPI (default: 120)")})
-def snapshot_layout(name=None, dpi=120):
+def snapshot_layout(name=None, dpi=120, layout=None, layout_name=None, **kwargs):
     p = QgsProject.instance()
     mgr = p.layoutManager()
     lay = None
-    if name:
-        lay = mgr.layoutByName(str(name))
+    target_name = name or layout or layout_name
+    if target_name:
+        lay = mgr.layoutByName(str(target_name))
     if not lay:
         layouts = mgr.printLayouts()
         if layouts:
@@ -1327,6 +1328,11 @@ def snapshot_layout(name=None, dpi=120):
     st = QgsLayoutExporter.ImageExportSettings()
     st.dpi = int(dpi or 120)
     tmp = os.path.join(tempfile.gettempdir(), f"qgis_ai_layout_{lay.name()}.png")
+    if os.path.exists(tmp):
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
     res = ex.exportToImage(tmp, st)
     if res != QgsLayoutExporter.ExportResult.Success or not os.path.exists(tmp):
         raise RuntimeError(f"Failed to render layout preview (exporter code {res})")
@@ -2469,22 +2475,17 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
             leg.setTitle("MAP LEGEND")
             leg.setBackgroundColor(QColor(255, 255, 255, 0))
             leg.setAutoUpdateModel(False)
+            lay.addLayoutItem(leg)
 
             # Auto-prune background layers (basemaps, hillshades, raw rasters)
-            from qgis.core import QgsLayerTree
             skip_terms = ("esri", "osm", "carto", "basemap", "hillshade", "xyz", "canvas", "satellite", "terrain")
-            custom_tree = QgsLayerTree()
-            for lyr in p.mapLayers().values():
-                low = lyr.name().lower()
+            root = leg.model().rootGroup()
+            for ch in list(root.children()):
+                low = ch.name().lower() if hasattr(ch, "name") else ""
                 if any(st in low for st in skip_terms):
-                    continue
-                custom_tree.addLayer(lyr)
-            if len(custom_tree.children()) > 0:
-                leg.model().setRootGroup(custom_tree)
-            else:
+                    root.removeChildNode(ch)
+            if len(root.children()) == 0:
                 leg.setAutoUpdateModel(True)
-
-            lay.addLayoutItem(leg)
             leg.attemptMove(QgsLayoutPoint(right_x + 1.5, curr_ry + 1.0, mm))
             leg.attemptResize(QgsLayoutSize(right_w - 3.0, leg_h - 2.0, mm))
 
@@ -2562,22 +2563,19 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         leg.setLinkedMap(mp)
         leg.setTitle("LAND USE & FEATURES")
         leg.setAutoUpdateModel(False)
-        from qgis.core import QgsLayerTree
+        lay.addLayoutItem(leg)
         skip_terms = ("esri", "osm", "carto", "basemap", "hillshade", "xyz", "canvas", "satellite", "terrain")
-        custom_tree = QgsLayerTree()
-        for lyr in p.mapLayers().values():
-            if any(st in lyr.name().lower() for st in skip_terms):
-                continue
-            custom_tree.addLayer(lyr)
-        if len(custom_tree.children()) > 0:
-            leg.model().setRootGroup(custom_tree)
-        else:
+        root = leg.model().rootGroup()
+        for ch in list(root.children()):
+            low = ch.name().lower() if hasattr(ch, "name") else ""
+            if any(st in low for st in skip_terms):
+                root.removeChildNode(ch)
+        if len(root.children()) == 0:
             leg.setAutoUpdateModel(True)
         leg.setBackgroundColor(QColor(255, 255, 255, 230))
         leg.setFrameEnabled(True)
         leg.setFrameStrokeColor(QColor("#cbd5e1"))
         leg.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
-        lay.addLayoutItem(leg)
         leg.attemptMove(QgsLayoutPoint(W - m - 65.0, H - m - 58.0, mm))
         leg.attemptResize(QgsLayoutSize(60.0, 52.0, mm))
 
@@ -2768,22 +2766,19 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         leg.setLinkedMap(mp)
         leg.setTitle("CLASSIFICATION")
         leg.setAutoUpdateModel(False)
-        from qgis.core import QgsLayerTree
+        lay.addLayoutItem(leg)
         skip_terms = ("esri", "osm", "carto", "basemap", "hillshade", "xyz", "canvas", "satellite", "terrain")
-        custom_tree = QgsLayerTree()
-        for lyr in p.mapLayers().values():
-            if any(st in lyr.name().lower() for st in skip_terms):
-                continue
-            custom_tree.addLayer(lyr)
-        if len(custom_tree.children()) > 0:
-            leg.model().setRootGroup(custom_tree)
-        else:
+        root = leg.model().rootGroup()
+        for ch in list(root.children()):
+            low = ch.name().lower() if hasattr(ch, "name") else ""
+            if any(st in low for st in skip_terms):
+                root.removeChildNode(ch)
+        if len(root.children()) == 0:
             leg.setAutoUpdateModel(True)
         leg.setBackgroundColor(QColor("#f8fafc"))
         leg.setFrameEnabled(True)
         leg.setFrameStrokeColor(QColor("#cbd5e1"))
         leg.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
-        lay.addLayoutItem(leg)
         leg.attemptMove(QgsLayoutPoint(right_x, map_top, mm))
         leg.attemptResize(QgsLayoutSize(right_w, 65.0, mm))
 
@@ -2972,22 +2967,19 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         leg.setLinkedMap(mp)
         leg.setTitle("CLASSIFICATION")
         leg.setAutoUpdateModel(False)
-        from qgis.core import QgsLayerTree
+        lay.addLayoutItem(leg)
         skip_terms = ("esri", "osm", "carto", "basemap", "hillshade", "xyz", "canvas", "satellite", "terrain")
-        custom_tree = QgsLayerTree()
-        for lyr in p.mapLayers().values():
-            if any(st in lyr.name().lower() for st in skip_terms):
-                continue
-            custom_tree.addLayer(lyr)
-        if len(custom_tree.children()) > 0:
-            leg.model().setRootGroup(custom_tree)
-        else:
+        root = leg.model().rootGroup()
+        for ch in list(root.children()):
+            low = ch.name().lower() if hasattr(ch, "name") else ""
+            if any(st in low for st in skip_terms):
+                root.removeChildNode(ch)
+        if len(root.children()) == 0:
             leg.setAutoUpdateModel(True)
         leg.setBackgroundColor(QColor("#ffffff"))
         leg.setFrameEnabled(True)
         leg.setFrameStrokeColor(QColor("#cbd5e1"))
         leg.setFrameStrokeWidth(QgsLayoutMeasurement(0.25, mm))
-        lay.addLayoutItem(leg)
         leg.attemptMove(QgsLayoutPoint(right_x, curr_y, mm))
         leg.attemptResize(QgsLayoutSize(right_w, card3_h, mm))
         curr_y += card3_h + gap
@@ -3409,6 +3401,11 @@ def export_layout(name=None, path=None, dpi=300, preview=False, **kwargs):
     out = {"path": path, "success": r == QgsLayoutExporter.ExportResult.Success, "code": int(r)}
     if preview:
         tmp = os.path.join(tempfile.gettempdir(), "qgis_ai_layout_preview.png")
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
         st = QgsLayoutExporter.ImageExportSettings(); st.dpi = 80
         ex.exportToImage(tmp, st)
         with open(tmp, "rb") as fh:
@@ -3771,6 +3768,23 @@ def call(name, args):
         for alias in ("layer", "layer_id", "name"):
             if alias in clean_args:
                 clean_args["layer_name"] = clean_args.pop(alias)
+                break
+
+    # Common aliases: layout / layout_name / name
+    if "layout" in params and "layout" not in clean_args:
+        for alias in ("layout_name", "name", "target_layout"):
+            if alias in clean_args:
+                clean_args["layout"] = clean_args.pop(alias)
+                break
+    elif "layout_name" in params and "layout_name" not in clean_args:
+        for alias in ("layout", "name"):
+            if alias in clean_args:
+                clean_args["layout_name"] = clean_args.pop(alias)
+                break
+    elif "name" in params and "name" not in clean_args:
+        for alias in ("layout", "layout_name", "layer", "layer_name"):
+            if alias in clean_args:
+                clean_args["name"] = clean_args.pop(alias)
                 break
 
     # If function does not accept **kwargs, drop extra unexpected keys to avoid TypeError

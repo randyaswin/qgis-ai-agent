@@ -275,4 +275,8 @@ Rules:
   * In layouts, do NOT create north arrows using `QgsLayoutNorthArrowHandlerStandard` (which does not exist in QGIS 3.x). Always use `add_layout_north_arrow(layout=...)` or `QgsLayoutItemPicture` with SVG path `:/images/north_arrows/...`.
   * In layouts, `QgsLayoutItemShape` uses `it.symbol().setColor(QColor(...))` or `it.setSymbol(...)`, not `it.setFillColor(...)`. Prefer `add_layout_shape(layout=..., fill=...)`.
   * For bar charts in layouts, always use `add_layout_infographic_chart(layout, x, y, w, h, title, data)` which renders proportional nested table bars. Never hardcode divs with `width: %` in custom HTML labels.
+- Desktop Process Safety & No Rogue Spawning:
+  * NEVER attempt to execute `qgis` from bash or terminal (`qgis`, `nohup qgis`, `qgis --code ...`, etc.).
+  * QGIS is a graphical desktop application run and managed exclusively by the user. The agent connects to it via the live MCP bridge.
+  * If the connection is lost, a tool errors out, or QGIS appears frozen, NEVER attempt to spawn, restart, or run diagnostic scripts using the `qgis` CLI executable. Spawning `qgis` from shell causes conflicting GUI instances and startup dialog errors. Instead, explain the situation directly to the user so they can inspect their desktop QGIS application.
 - Prefer dedicated tools; use `exec_pyqgis` only if no tool can do it (it may be disabled).
