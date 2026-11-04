@@ -166,8 +166,24 @@ def main():
     if hasattr(signal, "SIGHUP"):
         signal.signal(signal.SIGHUP, on_signal)
 
-    # 2. Watchdog thread: checks if QGIS is still alive
+    # 2. Watchdog thread: checks if QGIS is still alive cross-platform (Linux, macOS, Windows)
     def parent_watchdog():
+        # Windows: Use native WaitForSingleObject for instant event notification if available
+        if sys.platform == "win32":
+            try:
+                kernel32 = ctypes.windll.kernel32
+                SYNCHRONIZE = 0x00100000
+                h_parent = kernel32.OpenProcess(SYNCHRONIZE, False, parent_pid)
+                if h_parent:
+                    # Blocks until parent process terminates
+                    kernel32.WaitForSingleObject(h_parent, 0xFFFFFFFF)
+                    kernel32.CloseHandle(h_parent)
+                    kill_child_tree()
+                    os._exit(0)
+            except Exception:
+                pass
+
+        # Polling fallback (Linux / macOS / generic)
         while True:
             is_dead = False
             try:
@@ -190,7 +206,72 @@ def main():
     watchdog = threading.Thread(target=parent_watchdog, daemon=True)
     watchdog.start()
 
-    # 3. Spawn child in its own process group with kernel death signal attached to guard
+    # 2b. Stdin pipe EOF monitor (instant notification when QGIS closes its QProcess stdin handle)
+    def stdin_eof_monitor():
+        try:
+            while True:
+                chunk = sys.stdin.read(1024)
+                if not chunk:
+                    break
+        except Exception:
+            pass
+        kill_child_tree()
+        os._exit(0)
+
+    eof_thread = threading.Thread(target=stdin_eof_monitor, daemon=True)
+    eof_thread.start()
+
+    # 3. Windows Job Object (Kernel-level child process tree containment)
+    h_job = None
+    if sys.platform == "win32":
+        try:
+            kernel32 = ctypes.windll.kernel32
+            h_job = kernel32.CreateJobObjectW(None, None)
+            if h_job:
+                class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+                    _fields_ = [
+                        ('PerProcessUserTimeLimit', ctypes.c_int64),
+                        ('PerJobUserTimeLimit', ctypes.c_int64),
+                        ('LimitFlags', ctypes.c_uint32),
+                        ('MinimumWorkingSetSize', ctypes.c_size_t),
+                        ('MaximumWorkingSetSize', ctypes.c_size_t),
+                        ('ActiveProcessLimit', ctypes.c_uint32),
+                        ('Affinity', ctypes.c_size_t),
+                        ('PriorityClass', ctypes.c_uint32),
+                        ('SchedulingClass', ctypes.c_uint32),
+                    ]
+                class IO_COUNTERS(ctypes.Structure):
+                    _fields_ = [
+                        ('ReadOperationCount', ctypes.c_uint64),
+                        ('WriteOperationCount', ctypes.c_uint64),
+                        ('OtherOperationCount', ctypes.c_uint64),
+                        ('ReadTransferCount', ctypes.c_uint64),
+                        ('WriteTransferCount', ctypes.c_uint64),
+                        ('OtherTransferCount', ctypes.c_uint64),
+                    ]
+                class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+                    _fields_ = [
+                        ('BasicLimitInformation', JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                        ('IoInfo', IO_COUNTERS),
+                        ('ProcessMemoryLimit', ctypes.c_size_t),
+                        ('JobMemoryLimit', ctypes.c_size_t),
+                        ('PeakProcessMemoryLimit', ctypes.c_size_t),
+                        ('PeakJobMemoryLimit', ctypes.c_size_t),
+                    ]
+                JobObjectExtendedLimitInformation = 9
+                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+                info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                kernel32.SetInformationJobObject(
+                    h_job,
+                    JobObjectExtendedLimitInformation,
+                    ctypes.byref(info),
+                    ctypes.sizeof(info)
+                )
+        except Exception:
+            h_job = None
+
+    # 4. Spawn child in its own process group with kernel death signal attached to guard
     def _child_preexec():
         if hasattr(os, "setsid"):
             try:
@@ -216,6 +297,13 @@ def main():
             preexec_fn=_child_preexec,
             creationflags=creationflags
         )
+
+        # On Windows, assign child to Job Object so Windows kernel enforces termination on close
+        if h_job and hasattr(proc, "_handle"):
+            try:
+                ctypes.windll.kernel32.AssignProcessToJobObject(h_job, proc._handle)
+            except Exception:
+                pass
 
         # Write child PID to PID tracking file so runner can immediately target it directly
         if pid_file:
