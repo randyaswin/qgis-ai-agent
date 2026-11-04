@@ -28,20 +28,34 @@ When aligning a non-spatial raster (e.g., scanned historical map, JPEG drone sur
 | **Thin Plate Spline (TPS)** | 4 | Local rubber-sheeting | Exact fit at GCPs with smooth minimal-energy deformation | Historical maps, severely warped paper, local non-linear stretching. |
 | **Projective** | 4 | Homography | Perspective tilt and oblique view angles | Oblique drone or handheld building facade photographs. |
 
-### 1.2 Ground Control Point (GCP) Selection Strategy: Corner Grids vs. Objects
-- **CRITICAL: Gunakan Titik Sudut Grid Koordinat Peta (Map Graticule / Neatline Corners), BUKAN Objek Semata!**
-  - Jika citra atau peta hasil scan memiliki garis/cross/tik grid koordinat atau 4 sudut neatline peta dengan angka koordinat yang jelas, **WAJIB** gunakan perpotongan garis grid koordinat atau ke-4 sudut kotak grid tersebut sebagai GCP utama!
-  - Mengapa? Mengambil GCP semata-mata dari objek darat (seperti atap rumah, tikungan sungai yang dinamis) pada peta cetak sering menyebabkan **distorsi gepeng / skew / non-orthogonal** karena objek tersebut tidak mewakili proyeksi kartografis matematis lembar peta.
-  - Tarik dari 4 sudut neatline / grid intersection terluar peta ke koordinat proyeksi aslinya (misal UTM Zone atau Geographic Lat/Long). Ini menjamin aspek rasio (aspect ratio), orientasi utara, dan skala peta tetap tegak lurus dan tidak melar/gepeng.
-- **Corner Anchors:** Selalu letakkan GCP sedekat mungkin ke 4 sudut terluar grid peta untuk mengunci batas transformasi.
-- **Uniform Grid Distribution:** Distribusikan GCP interior secara merata mengikuti grid perpotongan koordinat (misal interval 1 km atau 1 menit).
-- **Non-Collinear Rule:** Jangan pernah meletakkan semua GCP pada satu garis lurus.
+### 1.2 Ground Control Point (GCP) Selection Strategy: Corner Grids vs. Image-to-Map Matching (Objek Pembanding)
+
+Terdapat 2 skenario utama dalam penentuan GCP:
+
+#### Skenario A: Peta Memiliki Garis/Tik Grid Koordinat (Map Graticule / Neatline)
+- **Prioritas Utama:** Jika citra atau peta hasil scan memiliki garis/cross/tik grid koordinat atau 4 sudut neatline peta dengan label angka koordinat yang jelas:
+  - **WAJIB** gunakan perpotongan garis grid koordinat atau 4 sudut terluar grid peta tersebut sebagai GCP utama!
+  - Tarik langsung dari piksel sudut grid peta $[X_p, Y_p]$ ke angka koordinat referensinya $[X_m, Y_m]$. Ini menjamin skala X dan Y tetap seimbang dan peta tidak melar/gepeng.
+
+#### Skenario B: Citra/Peta Tanpa Grid Koordinat (Image-to-Map Object Matching)
+- **Jika citra/peta tidak memiliki grid koordinat atau batas lembar koordinat:**
+  - Lakukan **Image-to-Map Matching** dengan membandingkan objek-objek identik yang ada pada citra mentah dengan layer referensi peta yang sudah tergeoreferensi (misalnya Google Satellite, OSM Basemap, atau layer batas jalan/sungai vektor).
+  - **Kriteria Objek Pembanding yang Baik:**
+    1. **Persilangan Jalan / Jembatan:** Titik tengah perempatan jalan utama atau abutment jembatan permanen (fitur paling stabil dan tidak bergeser).
+    2. **Sudut Struktur Permanen:** Sudut bangunan monumental/fasilitas publik, dermaga pelabuhan, mercusuar, atau monumen.
+    3. **Sudut Lapangan Olahraga / Landasan Pacu:** Sudut landasan pacu bandara (*runway threshold*) atau sudut stadion.
+    4. **Fitur Alam yang Tajam & Stabil:** Pertemuan percabangan sungai berbatu atau puncak bukit runcing. (Hindari garis pantai pasir, semak, tepi hutan, atau pohon karena posisinya dinamis/berubah antar waktu).
+  - **Distribusi Titik Objek Pembanding:**
+    - **Corner Anchors:** Cari objek pembanding sedekat mungkin ke 4 sudut terluar citra untuk mengunci bounding box agar ujung-ujung citra tidak melenceng.
+    - **Persebaran Merata:** Sebar minimal 4–8 titik objek pembanding secara merata di 4 kuadran dan bagian tengah (jangan mengelompok di satu sisi saja).
+    - **Non-Collinear:** Jangan memilih titik objek yang berada pada satu garis lurus yang sama.
 
 ---
 
-### 1.3 Transformation Method: Helmert vs Affine vs Polynomial
-- Jika peta merupakan peta proyeksi standar yang hanya butuh orientasi tegak dan rotasi skala tanpa melengkungkan lembar kertas: gunakan **Helmert** (linear conformal) atau **Affine (Polynomial 1)**.
-- Hindari penggunaan derajat tinggi jika hanya memiliki titik terbatas karena akan membuat citra terdistorsi/gepeng secara agresif di luar titik ikat.
+### 1.3 Transformation Method: Helmert vs Affine vs Polynomial vs TPS
+- **Helmert (Similarity):** 4 DOF ($X, Y$, rotasi, skala seragam). Menjaga bentuk asli dan aspek rasio tetap 1:1. Sangat disarankan saat georeferensi berbasis objek jika tidak ingin citra tertarik gepeng.
+- **Affine (Polynomial 1):** 6 DOF. Mengizinkan skala independen X/Y dan kemiringan (*shear*). Sangat baik untuk peta orthogonal atau jika ada sedikit perbedaan skala antar sumbu.
+- **Polynomial 2 / Thin Plate Spline (TPS):** Gunakan TPS hanya jika citra mengalami distorsi lokal nyata (misalnya foto udara miring atau peta kertas kusut), dan pastikan titik pembanding tersebar rapat di seluruh area.
 
 ### 1.3 Residual Error & Root Mean Square Error (RMSE)
 For each GCP, the residual error represents the distance between its true map position and its transformed position:

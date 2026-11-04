@@ -4,23 +4,24 @@ Panduan penting mengenai kesalahan umum (*anti-patterns*) pada proses georeferen
 
 ---
 
-## 1. Anti-Pattern Georeferensi: Mengikat GCP pada Objek Bukan Titik Grid Koordinat (Menghasilkan Peta Gepeng / Distorsi Ekstrem)
+## 1. Strategi Pemilihan GCP: Grid Koordinat vs. Membandingkan Objek (Image-to-Map Matching)
 
-### Kesalahan yang Terjadi:
-- Mengambil GCP hanya dari objek fisik di dalam peta (misalnya atap rumah, tikungan jalan kecil, atau muara sungai) tanpa menggunakan grid koordinat (*graticule*) atau perpotongan garis batas lembar peta (*neatline*).
-- **Dampaknya:**
-  1. Peta menjadi **gepeng, terpuntir miring, atau terdistorsi melengkung** karena objek darat tidak memiliki kontrol matematis terhadap proyeksi kartografis lembar peta.
-  2. Rasio aspek (*aspect ratio*) sumbu X dan Y rusak sehingga skala horizontal dan vertikal menjadi tidak seragam.
-  3. Objek darat pada peta cetak sering kali disederhanakan (*cartographic generalization*) oleh kartografer aslinya sehingga koordinat aslinya berbeda dari posisi gambar.
+### Skenario 1: Jika Peta Memiliki Grid Koordinat / Neatline
+- Selalu prioritaskan **4 sudut grid koordinat** atau perpotongan garis kisi koordinat (graticule intersection) yang tercetak pada lembar peta.
+- Tarik dari piksel sudut grid peta langsung ke angka koordinat referensi kartografinya.
 
-### Solusi Praktis yang Benar:
-1. **Gunakan 4 Titik Sudut Grid Koordinat Peta (Map Frame / Graticule Intersections):**
-   - Lembar peta selalu memiliki garis grid koordinat (misalnya interval 1.000 meter UTM atau interval derajat menit geografis) dengan angka koordinat yang tercetak jelas di tepi peta (*neatline*).
-   - Selalu ambil minimal **4 sudut grid terluar** sebagai GCP utama ($[X_{pixel}, Y_{pixel}] \rightarrow [X_{map}, Y_{map}]$).
-   - Tarik koordinat langsung ke koordinat angka yang tertera di grid tersebut.
-2. **Pilih Model Transformasi yang Tepat:**
-   - Gunakan **Helmert** (jika hanya rotasi, translasi, dan skala seragam tanpa merusak bentuk asli) atau **Affine / Polynomial 1** (untuk menjaga garis paralel grid tetap lurus dan paralel).
-   - Hindari Polynomial order 2/3 atau Thin Plate Spline jika titik GCP sedikit, karena akan menimbulkan efek tarikan "karet" (*rubber-sheeting*) yang meliuk-liuk atau gepeng di luar titik ikat.
+### Skenario 2: Jika Peta/Citra TIDAK Memiliki Grid Koordinat
+- Gunakan teknik **Image-to-Map Matching** (membandingkan fitur objek fisik yang identik antara citra mentah dan peta dasar bergeoreferensi seperti Google Satellite / OSM):
+  1. **Pilih Objek Permanen & Tidak Berubah:**
+     - Perempatan / pertigaan jalan utama permanen.
+     - Sudut jembatan beton atau ujung dermaga.
+     - Sudut lapangan olahraga atau sudut bangunan fasilitas publik yang tegas.
+     - Percabangan saluran irigasi atau sungai berbatu (hindari tepian air lumpur/pasir yang mudah berpindah).
+  2. **Kunci 4 Sudut Luar (Corner Anchors):**
+     - Cari objek pembanding yang letaknya sedekat mungkin dengan 4 sudut terluar citra agar batas tepi citra tidak mengalami flaring/melenceng.
+  3. **Gunakan Transformasi Helmert (Similarity) atau Affine:**
+     - Helmert mempertahankan bentuk objek asli (aspek rasio 1:1, tidak gepeng).
+     - Hindari Polynomial derajat tinggi jika titik objek sedikit, karena bisa membuat area di antara objek tertarik melengkung secara anomali.
 
 ---
 
@@ -42,3 +43,4 @@ Panduan penting mengenai kesalahan umum (*anti-patterns*) pada proses georeferen
    - Ketika mendigitasi poligon zonasi yang bersebelahan (misalnya zona perumahan berdampingan dengan zona perdagangan atau sempadan sungai), aktifkan fitur **Avoid Overlap** / snapping topologi agar batas bersama (*shared boundary*) saling menempel rapat tanpa celah (*slivers*) dan tanpa poligon bertumpuk.
 3. **Kapan Boleh Menggunakan `polygonize`?**
    - Hanya gunakan `polygonize` jika raster adalah **solid raster mask** satu warna penuh tanpa arsiran tekstur (misal masking biner air hasil thresholding NDWI, atau mask bangunan solid hitam-putih).
+
