@@ -96,6 +96,22 @@ def summarize_tool_result(name, result):
         return f"Skill guide '<b>{html.escape(result.get('skill', ''))}</b>' loaded"
     if name == "list_skills":
         return f"Found {len(result)} relevant skills"
+    if name in ("run_command", "Bash", "Terminal", "execute_command", "bash"):
+        out = result.get("output") or result.get("stdout") or result.get("text") or str(result)
+        out_clean = re.sub(r"\s+", " ", str(out)).strip()
+        return html.escape(out_clean[:250] + ("..." if len(out_clean) > 250 else "")) or "Command finished"
+    if name in ("read_file", "view_file", "Read"):
+        cnt = result.get("content") or str(result)
+        lines = str(cnt).splitlines()
+        return f"File read ({len(lines)} lines)"
+    if name in ("write_file", "write_to_file", "replace_file_content", "Edit"):
+        return "File updated successfully"
+    if name in ("grep_search", "find_by_name", "Glob", "Grep"):
+        return "Search completed"
+    if name in ("invoke_subagent", "subagent", "browser_subagent"):
+        return "Subagent task finished"
+    if name in ("search_web", "web_fetch", "open_browser_url", "read_url_content", "WebSearch"):
+        return "Web request finished"
     if name == "zoom_to":
         return "Canvas view centered"
     # Fallback to compact JSON
@@ -109,7 +125,26 @@ def categorize_tool(name, args):
     primary = ""
     category = "QGIS"
 
-    if name in ("read_note", "write_note", "append_note", "search_notes", "delete_note", "list_notes"):
+    if name in ("run_command", "Bash", "Terminal", "execute_command", "bash"):
+        category = "Terminal"
+        cmd = args.get("CommandLine") or args.get("command") or args.get("cmd") or ""
+        primary = cmd.strip().split("\n")[0][:45]
+    elif name in ("read_file", "view_file", "Read", "read_resource", "load_file"):
+        category = "File (Read)"
+        primary = os.path.basename(args.get("Path") or args.get("path") or args.get("file_path") or "")
+    elif name in ("write_file", "write_to_file", "replace_file_content", "multi_replace_file_content", "Edit", "sed_file"):
+        category = "File (Write)"
+        primary = os.path.basename(args.get("Path") or args.get("path") or args.get("file_path") or "")
+    elif name in ("grep_search", "find_by_name", "Glob", "Grep"):
+        category = "Search"
+        primary = args.get("pattern") or args.get("query") or args.get("path") or ""
+    elif name in ("invoke_subagent", "subagent", "browser_subagent"):
+        category = "Subagent"
+        primary = args.get("Role") or args.get("TypeName") or args.get("name") or ""
+    elif name in ("search_web", "web_fetch", "open_browser_url", "read_url_content", "WebSearch"):
+        category = "Web"
+        primary = args.get("query") or args.get("url") or ""
+    elif name in ("read_note", "write_note", "append_note", "search_notes", "delete_note", "list_notes"):
         category = "Second-brain"
         primary = args.get("path") or args.get("query") or ""
     elif name == "query_overture_maps":
@@ -152,9 +187,11 @@ def format_in_args(args):
     """Format input arguments as compact key-value pairs for the IN row."""
     if not args:
         return "()"
+    if isinstance(args, str):
+        return args[:80] + ("..." if len(args) > 80 else "")
     parts = []
     for k, v in args.items():
-        if k in ("code",) and isinstance(v, str):
+        if k in ("code", "CommandLine", "command", "cmd", "script") and isinstance(v, str):
             first_line = v.strip().split("\n")[0][:50]
             parts.append(f"{k}={first_line!r}...")
         elif isinstance(v, str):
@@ -520,6 +557,9 @@ class AgentDock(QDockWidget):
         self._has_mcp_call_in_turn = False
         self._last_finalized_thinking_html = None
         self._last_event_time = 0
+        self._cli_line_buffer = ""
+        self._active_cli_conv_id = None
+        self._active_internal_tools = {}
         self.message_queue = []
         self.attachments = []
         s = QSettings()
@@ -1116,7 +1156,8 @@ class AgentDock(QDockWidget):
             f"⏹ <b>Execution stopped by user.</b>"
             f"</div>"
         )
-        self._done(-9)
+        if not self.runner.running():
+            self._done(-9)
 
     def _on_log_anchor_clicked(self, url):
         u_str = url.toString() if hasattr(url, "toString") else str(url)
@@ -1401,45 +1442,62 @@ class AgentDock(QDockWidget):
         try:
             active_sess = self.session_manager.get_active_session()
             proj_workspace = self.session_manager.get_workspace_dir(active_sess.id)
-            cli_id = active_sess.detect_and_store_cli_session_id(proj_workspace, active_sess.cli)
+            cli_id = getattr(self, "_active_cli_conv_id", None) or active_sess.detect_and_store_cli_session_id(proj_workspace, active_sess.cli)
 
             # 1. Antigravity CLI transcript
+            candidate_brain_dirs = []
             if cli_id:
-                p = os.path.expanduser(f"~/.gemini/antigravity/brain/{cli_id}/.system_generated/logs/transcript.jsonl")
-                if os.path.exists(p):
-                    with open(p, "r", encoding="utf-8") as f:
-                        lines = f.readlines()
-                    for line in reversed(lines[-40:]):
-                        try:
-                            d = json.loads(line)
-                            th = d.get("thinking")
-                            if th and isinstance(th, str) and th.strip():
-                                return th.strip()
-                        except Exception:
-                            pass
+                candidate_brain_dirs.append(os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{cli_id}"))
+                candidate_brain_dirs.append(os.path.expanduser(f"~/.gemini/antigravity/brain/{cli_id}"))
+
+            for parent_dir in [os.path.expanduser("~/.gemini/antigravity-cli/brain"), os.path.expanduser("~/.gemini/antigravity/brain")]:
+                if os.path.exists(parent_dir):
+                    subdirs = sorted(
+                        [os.path.join(parent_dir, d) for d in os.listdir(parent_dir) if os.path.isdir(os.path.join(parent_dir, d))],
+                        key=os.path.getmtime,
+                        reverse=True
+                    )
+                    for sd in subdirs[:4]:
+                        if sd not in candidate_brain_dirs:
+                            candidate_brain_dirs.append(sd)
+
+            for b_dir in candidate_brain_dirs:
+                for tname in ["transcript.jsonl", "transcript_full.jsonl"]:
+                    p = os.path.join(b_dir, ".system_generated", "logs", tname)
+                    if os.path.exists(p) and (time.time() - os.path.getmtime(p) < 400):
+                        with open(p, "r", encoding="utf-8") as f:
+                            lines = f.readlines()
+                        for line in reversed(lines[-40:]):
+                            try:
+                                d = json.loads(line)
+                                th = d.get("thinking")
+                                if th and isinstance(th, str) and th.strip():
+                                    return th.strip()
+                            except Exception:
+                                pass
 
             # 2. Claude Code projects transcript
-            norm_ws = proj_workspace.replace("/", "-").replace(os.sep, "-")
-            claude_dir = os.path.expanduser(f"~/.claude/projects/{norm_ws}")
-            if os.path.exists(claude_dir):
+            claude_projects_dir = os.path.expanduser("~/.claude/projects")
+            if os.path.exists(claude_projects_dir):
                 import glob
-                files = sorted(glob.glob(os.path.join(claude_dir, "*.jsonl")), key=os.path.getmtime, reverse=True)
-                if files:
-                    with open(files[0], "r", encoding="utf-8") as f:
-                        lines = f.readlines()
-                    for line in reversed(lines[-50:]):
-                        try:
-                            d = json.loads(line)
-                            msg = d.get("message", {})
-                            cnt = msg.get("content")
-                            if isinstance(cnt, list):
-                                for b in cnt:
-                                    if isinstance(b, dict) and b.get("type") == "thinking":
-                                        th = b.get("thinking")
-                                        if th and th.strip():
-                                            return th.strip()
-                        except Exception:
-                            pass
+                files = sorted(glob.glob(os.path.join(claude_projects_dir, "**", "*.jsonl"), recursive=True), key=os.path.getmtime, reverse=True)
+                for fpath in files[:6]:
+                    if time.time() - os.path.getmtime(fpath) < 400:
+                        with open(fpath, "r", encoding="utf-8") as f:
+                            lines = f.readlines()
+                        for line in reversed(lines[-50:]):
+                            try:
+                                d = json.loads(line)
+                                msg = d.get("message", {})
+                                cnt = msg.get("content")
+                                if isinstance(cnt, list):
+                                    for b in cnt:
+                                        if isinstance(b, dict) and b.get("type") == "thinking":
+                                            th = b.get("thinking")
+                                            if th and th.strip():
+                                                return th.strip()
+                            except Exception:
+                                pass
         except Exception:
             pass
         return ""
@@ -1527,28 +1585,227 @@ class AgentDock(QDockWidget):
         c.insertText(text)
         self.log.ensureCursorVisible()
 
-    def _on_cli_output(self, text):
-        clean = self._clean_ansi(text)
-        if not clean:
-            return
+    def _on_internal_tool_start(self, tool_id, name, args):
+        self.is_agent_streaming = False
+        cat, prim = categorize_tool(name, args)
+        in_str = format_in_args(args)
+        now = time.time()
 
-        rem = clean
+        running_node_html = render_tool_node_html(
+            cat, name, prim, in_str, "", is_success=True, is_running=True
+        )
+
+        c = self.log.textCursor()
+        c.movePosition(QTextCursor.MoveOperation.End)
+        if c.positionInBlock() > 0:
+            c.insertBlock()
+        start_pos = c.position()
+        c.insertHtml(running_node_html)
+        c.insertBlock()
+        end_pos = c.position()
+        self.log.setTextCursor(c)
+        self.log.ensureCursorVisible()
+
+        self._active_internal_tools[tool_id] = {
+            "name": name,
+            "category": cat,
+            "primary": prim,
+            "args": args or {},
+            "in_str": in_str,
+            "start_time": now,
+            "pos": (start_pos, end_pos)
+        }
+
+        from qgis.PyQt.QtCore import QEventLoop
+        from qgis.PyQt.QtWidgets import QApplication
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+
+    def _on_internal_tool_done(self, tool_id, name, output, duration=None, success=True):
+        info = self._active_internal_tools.pop(tool_id, None)
+        if not info and name:
+            for k, v in list(self._active_internal_tools.items()):
+                if v.get("name") == name:
+                    info = self._active_internal_tools.pop(k)
+                    break
+
+        cat = info.get("category", "Terminal") if info else "Terminal"
+        tname = info.get("name", name) if info else (name or "Tool")
+        prim = info.get("primary", "") if info else ""
+        in_str = info.get("in_str", "") if info else ""
+        tool_start = info.get("start_time", time.time()) if info else time.time()
+        pos = info.get("pos") if info else None
+
+        if duration is None:
+            duration = max(0.1, round(time.time() - tool_start, 1))
+
+        clean_summary = format_out_result(tname, output if isinstance(output, (dict, list)) else {"output": output})
+
+        full_node_html = render_tool_node_html(
+            cat, tname, prim, in_str, clean_summary, is_success=success, is_running=False, duration=duration
+        )
+
+        replaced = False
+        if pos:
+            start_pos, end_pos = pos
+            doc_len = self.log.document().characterCount()
+            if start_pos <= doc_len and end_pos <= doc_len:
+                rep_c = self.log.textCursor()
+                rep_c.setPosition(start_pos)
+                rep_c.setPosition(end_pos, QTextCursor.MoveMode.KeepAnchor)
+                rep_c.insertHtml(full_node_html)
+                rep_c.insertBlock()
+                self.log.setTextCursor(rep_c)
+                self.log.ensureCursorVisible()
+                replaced = True
+
+        if not replaced:
+            self._append_html(full_node_html)
+
+        active_sess = self.session_manager.get_active_session()
+        active_sess.add_tool_record(
+            name=tname,
+            args=info.get("args", {}) if info else {},
+            summary=clean_summary,
+            success=success,
+            html_card=full_node_html
+        )
+
+    def _handle_json_event(self, data):
+        # 1. Capture conversation/session ID if present
+        conv_id = (
+            data.get("conversation_id")
+            or data.get("session_id")
+            or (data.get("step_update", {}).get("conversation_id") if isinstance(data.get("step_update"), dict) else None)
+            or (data.get("result", {}).get("conversation_id") if isinstance(data.get("result"), dict) else None)
+        )
+        if conv_id and not getattr(self, "_active_cli_conv_id", None):
+            self._active_cli_conv_id = str(conv_id)
+            active_sess = self.session_manager.get_active_session()
+            active_sess.cli_session_id = str(conv_id)
+
+        ev_name = data.get("event")
+        top_type = data.get("type")
+
+        # 2. Antigravity CLI (agy) / Gemini stream-json events
+        if ev_name == "step_update":
+            su = data.get("step_update", {})
+            stype = su.get("step_type")
+            state = su.get("state")
+            step_idx = su.get("step_index", 0)
+
+            if stype == "tool":
+                tname = su.get("tool_name") or su.get("tool_info", {}).get("name") or "tool"
+                # If tool is a direct QGIS MCP call, MCP server handles it directly
+                is_qgis_mcp = (
+                    tname.startswith("mcp__qgis")
+                    or (tname == "call_mcp_tool" and su.get("tool_info", {}).get("parameters", {}).get("ServerName") == "qgis")
+                )
+                if not is_qgis_mcp:
+                    tid = f"step_{step_idx}_{tname}"
+                    if state == "ACTIVE":
+                        targs = su.get("tool_info", {}).get("parameters", {})
+                        self._on_internal_tool_start(tool_id=tid, name=tname, args=targs)
+                    elif state == "DONE":
+                        tout = su.get("tool_info", {}).get("output", "")
+                        dur = su.get("duration_seconds")
+                        self._on_internal_tool_done(tool_id=tid, name=tname, output=tout, duration=dur)
+
+            elif stype == "agent_response":
+                # Check for thinking update from transcript if thinking is not yet populated
+                if not self._thinking_text:
+                    th = self._extract_recent_thinking()
+                    if th:
+                        self._thinking_text = th
+                        self._update_thinking_stream()
+
+                delta = su.get("text_delta", "")
+                if delta:
+                    self._handle_raw_text_chunk(delta)
+
+        elif ev_name == "result":
+            if self._thinking_active:
+                self._finalize_thinking_node(discard_if_empty=False)
+
+        # 3. Claude Code stream-json events
+        elif top_type == "stream_event":
+            cev = data.get("event", {})
+            cev_type = cev.get("type")
+
+            if cev_type == "content_block_start":
+                cb = cev.get("content_block", {})
+                cb_type = cb.get("type")
+                if cb_type == "thinking":
+                    if not self._thinking_active:
+                        self._start_thinking_node()
+                elif cb_type == "tool_use":
+                    tname = cb.get("name", "")
+                    tid = cb.get("id", "")
+                    if not tname.startswith("mcp__qgis"):
+                        self._on_internal_tool_start(tool_id=tid, name=tname, args=cb.get("input", {}))
+
+            elif cev_type == "content_block_delta":
+                delta = cev.get("delta", {})
+                dtype = delta.get("type")
+                if dtype == "thinking_delta":
+                    th_part = delta.get("thinking", "")
+                    if th_part:
+                        if not self._thinking_active:
+                            self._start_thinking_node()
+                        self._update_thinking_stream(th_part)
+                elif dtype == "text_delta":
+                    txt_part = delta.get("text", "")
+                    if txt_part:
+                        if self._thinking_active:
+                            self._finalize_thinking_node(discard_if_empty=False)
+                        self._stream_agent_text(txt_part)
+
+            elif cev_type == "content_block_stop":
+                if self._thinking_active:
+                    self._finalize_thinking_node(discard_if_empty=False)
+
+        elif top_type == "assistant":
+            msg = data.get("message", {})
+            for b in msg.get("content", []):
+                if isinstance(b, dict) and b.get("type") == "tool_use":
+                    tname = b.get("name", "")
+                    tid = b.get("id", "")
+                    if not tname.startswith("mcp__qgis") and tid not in self._active_internal_tools:
+                        self._on_internal_tool_start(tool_id=tid, name=tname, args=b.get("input", {}))
+
+        elif top_type == "user":
+            msg = data.get("message", {})
+            for b in msg.get("content", []):
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    tid = b.get("tool_use_id", "")
+                    tout = b.get("content", "")
+                    self._on_internal_tool_done(tool_id=tid, name="", output=tout)
+
+        # 4. Codex CLI events
+        elif top_type == "item.completed":
+            item = data.get("item", {})
+            if item.get("type") == "message":
+                for part in item.get("content", []):
+                    if part.get("type") == "text":
+                        self._stream_agent_text(part.get("text", ""))
+
+    def _handle_raw_text_chunk(self, text):
+        rem = text
         while rem:
             if not self._in_explicit_tag:
                 m_open = re.search(r"<(?:thinking|thought|think)>", rem, re.IGNORECASE)
                 if m_open:
                     pre = rem[:m_open.start()]
                     if pre.strip():
-                        discard = getattr(self, "_has_mcp_call_in_turn", False) and not bool(self._thinking_text and self._thinking_text.strip())
-                        self._finalize_thinking_node(discard_if_empty=discard)
+                        if self._thinking_active:
+                            self._finalize_thinking_node(discard_if_empty=False)
                         self._stream_agent_text(pre)
                     rem = rem[m_open.end():]
                     self._in_explicit_tag = True
                     if not self._thinking_active:
                         self._start_thinking_node()
                 else:
-                    discard = getattr(self, "_has_mcp_call_in_turn", False) and not bool(self._thinking_text and self._thinking_text.strip())
-                    self._finalize_thinking_node(discard_if_empty=discard)
+                    if self._thinking_active and rem.strip():
+                        self._finalize_thinking_node(discard_if_empty=False)
                     self._stream_agent_text(rem)
                     rem = ""
             else:
@@ -1563,11 +1820,43 @@ class AgentDock(QDockWidget):
                     self._update_thinking_stream(rem)
                     rem = ""
 
+    def _on_cli_output(self, text):
+        clean = self._clean_ansi(text)
+        if not clean:
+            return
+
+        self._cli_line_buffer += clean
+        lines = self._cli_line_buffer.split("\n")
+        self._cli_line_buffer = lines.pop()
+
+        for line in lines:
+            line_str = line.strip()
+            if not line_str:
+                continue
+
+            is_json = False
+            if line_str.startswith("{") and line_str.endswith("}"):
+                try:
+                    data = json.loads(line_str)
+                    if isinstance(data, dict):
+                        is_json = True
+                        self._handle_json_event(data)
+                except Exception:
+                    pass
+
+            if not is_json:
+                self._handle_raw_text_chunk(line + "\n")
+
     def _on_tool_called(self, name, args):
         self.is_agent_streaming = False
         self._has_mcp_call_in_turn = True
-        # Tool call / script execution is an MCP call: discard empty thinking placeholder immediately
-        self._finalize_thinking_node(discard_if_empty=True)
+        # If thinking text was generated or in transcript, extract it before finalizing
+        if not self._thinking_text:
+            th = self._extract_recent_thinking()
+            if th:
+                self._thinking_text = th
+        discard = not bool(self._thinking_text and self._thinking_text.strip())
+        self._finalize_thinking_node(discard_if_empty=discard)
         cat, prim = categorize_tool(name, args)
         in_str = format_in_args(args)
         now = time.time()
@@ -1824,7 +2113,11 @@ class AgentDock(QDockWidget):
             self._update_queue_ui()
             self.indicator_timer.stop()
             return
-        if self._thinking_active and not self._active_running_tool:
+        if self._thinking_active and not self._active_running_tool and not self._active_internal_tools:
+            if not self._thinking_text:
+                th = self._extract_recent_thinking()
+                if th:
+                    self._thinking_text = th
             self._update_thinking_stream()
         self._update_queue_ui()
 
@@ -1908,6 +2201,9 @@ class AgentDock(QDockWidget):
         self._current_assistant_text = ""
         self._has_mcp_call_in_turn = False
         self._last_finalized_thinking_html = None
+        self._cli_line_buffer = ""
+        self._active_cli_conv_id = None
+        self._active_internal_tools = {}
         tools.CANCEL_REQUESTED = False
 
         REGISTRY.mode = self.skill_mode.currentData()
@@ -2072,7 +2368,12 @@ class AgentDock(QDockWidget):
         if not getattr(self, "_is_turn_active", True):
             return
         self._is_turn_active = False
-        discard = getattr(self, "_has_mcp_call_in_turn", False) and not bool(self._thinking_text and self._thinking_text.strip())
+        # Check if thinking text can be extracted from transcripts if empty
+        if not self._thinking_text:
+            th = self._extract_recent_thinking()
+            if th:
+                self._thinking_text = th
+        discard = not bool(self._thinking_text and self._thinking_text.strip())
         final_th_html = self._finalize_thinking_node(discard_if_empty=discard)
         self.indicator_timer.stop()
         self._active_tool_pos = None
@@ -2093,14 +2394,14 @@ class AgentDock(QDockWidget):
             pass
 
         raw_asst_text = self._current_assistant_text.strip()
-        if raw_asst_text:
+        th_block = final_th_html or getattr(self, "_last_finalized_thinking_html", None)
+        if raw_asst_text or th_block:
             card_html = render_assistant_message_html(
                 raw_asst_text,
                 model_info=self._current_model_header,
                 timestamp=now_str
-            )
-            th_block = final_th_html or getattr(self, "_last_finalized_thinking_html", None)
-            if th_block and not getattr(self, "_has_mcp_call_in_turn", False):
+            ) if raw_asst_text else ""
+            if th_block:
                 full_card_html = th_block + card_html
             else:
                 full_card_html = card_html

@@ -103,35 +103,46 @@ def main():
             except Exception:
                 pass
 
-        # First wave: SIGTERM to processes and process groups
+        # Pre-collect process groups while PIDs are still alive
+        all_pgids = set()
+        if hasattr(os, "getpgid") and hasattr(os, "killpg"):
+            for p in all_pids:
+                try:
+                    pg = os.getpgid(p)
+                    if pg not in protected and pg > 0:
+                        all_pgids.add(pg)
+                except Exception:
+                    pass
+                if p not in protected and p > 0:
+                    all_pgids.add(p)
+
+        # First wave: SIGTERM to process groups first, then individual processes
+        for pg in all_pgids:
+            try:
+                os.killpg(pg, signal.SIGTERM)
+            except Exception:
+                pass
+
         for p in all_pids:
             if p not in protected:
                 try:
                     os.kill(p, signal.SIGTERM)
                 except Exception:
                     pass
-                try:
-                    if hasattr(os, "getpgid") and hasattr(os, "killpg"):
-                        pg = os.getpgid(p)
-                        if pg not in protected and pg > 0:
-                            os.killpg(pg, signal.SIGTERM)
-                except Exception:
-                    pass
 
         time.sleep(0.06)
 
-        # Second wave: SIGKILL to guarantee all processes terminate
+        # Second wave: SIGKILL to process groups first, then individual processes
+        for pg in all_pgids:
+            try:
+                os.killpg(pg, signal.SIGKILL)
+            except Exception:
+                pass
+
         for p in all_pids:
             if p not in protected:
                 try:
                     os.kill(p, signal.SIGKILL)
-                except Exception:
-                    pass
-                try:
-                    if hasattr(os, "getpgid") and hasattr(os, "killpg"):
-                        pg = os.getpgid(p)
-                        if pg not in protected and pg > 0:
-                            os.killpg(pg, signal.SIGKILL)
                 except Exception:
                     pass
 

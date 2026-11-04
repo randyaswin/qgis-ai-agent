@@ -184,6 +184,7 @@ ADAPTERS = {
             + ([f"--conversation={session_id}"] if (cont and session_id) else (["-c"] if cont else []))
             + (["--dangerously-skip-permissions"] if auto else [])
             + (["--model", model] if model else [])
+            + ["--output-format", "stream-json"]
             + ["-p", p]
         ),
         "register": ["agy", "mcp", "add", "qgis", PY, BRIDGE],
@@ -204,6 +205,7 @@ ADAPTERS = {
             + (["--dangerously-skip-permissions"] if auto else ["--allowedTools", "mcp__qgis"])
             + (["--model", model] if model else [])
             + (["--effort", effort.lower()] if effort and effort.lower() != "default" else [])
+            + ["--output-format", "stream-json", "--verbose", "--include-partial-messages"]
             + ["-p", p]
         ),
         "register": ["claude", "mcp", "add", "--scope", "user", "qgis", PY, BRIDGE],
@@ -223,6 +225,7 @@ ADAPTERS = {
             + (["--resume", session_id] if (cont and session_id) else (["--resume", "latest"] if cont else (["--session-id", session_id] if session_id else [])))
             + (["--yolo"] if auto else ["--allowed-mcp-server-names", "qgis"])
             + (["-m", model] if model else [])
+            + ["--output-format", "stream-json"]
             + ["-p", p]
         ),
         "register": ["gemini", "mcp", "add", "--scope", "user", "qgis", PY, BRIDGE],
@@ -241,6 +244,7 @@ ADAPTERS = {
             + (["--full-auto", "--skip-git-repo-check"] if auto else ["--skip-git-repo-check"])
             + (["-m", model] if model else [])
             + (["-c", f'model_reasoning_effort="{effort.lower()}"'] if effort and effort.lower() != "default" else [])
+            + ["--json"]
             + [p]
         ),
         "register": ["codex", "mcp", "add", "qgis", "--", PY, BRIDGE],
@@ -318,35 +322,47 @@ def kill_entire_tree(root_pids, protected_pids=None):
                     pass
         return
 
-    # First wave: SIGTERM to target processes and their process groups
+    # Pre-collect process groups while PIDs are still alive
+    all_pgids = set()
+    if hasattr(os, "getpgid") and hasattr(os, "killpg"):
+        for pid in all_targets:
+            try:
+                pg = os.getpgid(pid)
+                if pg not in protected_pids and pg > 0:
+                    all_pgids.add(pg)
+            except Exception:
+                pass
+            # If setsid was used by child, pid itself is a process group leader
+            if pid not in protected_pids and pid > 0:
+                all_pgids.add(pid)
+
+    # First wave: SIGTERM to process groups first, then individual targets
+    for pg in all_pgids:
+        try:
+            os.killpg(pg, signal.SIGTERM)
+        except Exception:
+            pass
+
     for pid in all_targets:
         if pid not in protected_pids:
             try:
                 os.kill(pid, signal.SIGTERM)
             except Exception:
                 pass
-            try:
-                if hasattr(os, "getpgid") and hasattr(os, "killpg"):
-                    pg = os.getpgid(pid)
-                    if pg not in protected_pids and pg > 0:
-                        os.killpg(pg, signal.SIGTERM)
-            except Exception:
-                pass
 
     time.sleep(0.06)
 
-    # Second wave: SIGKILL to force kill everything surviving
+    # Second wave: SIGKILL to process groups first, then individual targets
+    for pg in all_pgids:
+        try:
+            os.killpg(pg, signal.SIGKILL)
+        except Exception:
+            pass
+
     for pid in all_targets:
         if pid not in protected_pids:
             try:
                 os.kill(pid, signal.SIGKILL)
-            except Exception:
-                pass
-            try:
-                if hasattr(os, "getpgid") and hasattr(os, "killpg"):
-                    pg = os.getpgid(pid)
-                    if pg not in protected_pids and pg > 0:
-                        os.killpg(pg, signal.SIGKILL)
             except Exception:
                 pass
 
