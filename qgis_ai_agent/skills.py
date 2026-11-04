@@ -17,9 +17,11 @@ import shutil
 import subprocess
 import tempfile
 
+from . import paths
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILLS_DIR = os.path.join(HERE, "skills")
-USER_DIR = os.path.expanduser("~/.qgis_ai_agent/skills")
+USER_DIR = paths.get_skills_dir()
 
 STOP = set("""a an the and or of to in on for with from by is are be this that it as at into per use using make
 create build please could would should show display get find give want will can all any some their there here

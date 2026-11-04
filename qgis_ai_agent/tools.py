@@ -13,6 +13,7 @@ import os
 import tempfile
 import time
 import traceback
+from . import paths
 
 from qgis.PyQt.QtCore import QSize, QBuffer, QIODevice
 from qgis.PyQt.QtGui import QColor, QFont
@@ -267,7 +268,7 @@ def save_project(path=None):
     if not path:
         path = p.fileName()
     if not path:
-        out_dir = os.path.expanduser("~/qgis-ai-maps")
+        out_dir = paths.get_default_output_dir()
         os.makedirs(out_dir, exist_ok=True)
         title = p.title() or "QGIS_Project"
         clean_title = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in title).strip("_") or "QGIS_Project"
@@ -3336,7 +3337,7 @@ def export_layout(name=None, path=None, dpi=300, preview=False, **kwargs):
         avail = [l.name() for l in mgr.printLayouts()]
         raise ValueError(f"No layout {target_name!r}. Available: {avail}")
     if not target_path:
-        out_dir = os.path.expanduser("~/qgis-ai-maps")
+        out_dir = paths.get_default_output_dir()
         os.makedirs(out_dir, exist_ok=True)
         target_path = os.path.join(out_dir, f"{target_name}.png")
     path = target_path

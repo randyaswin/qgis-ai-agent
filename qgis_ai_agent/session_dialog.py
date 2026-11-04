@@ -1,5 +1,6 @@
 """Dialog for managing project chat sessions, switching branches, and exporting history."""
 import os
+from . import paths
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
@@ -173,7 +174,7 @@ class SessionManagerDialog(QDialog):
         s = self.sm.sessions[sid]
         save_path, _ = QFileDialog.getSaveFileName(
             self, "Export Chat History",
-            os.path.expanduser(f"~/chat_{s.name.replace(' ', '_').lower()}.md"),
+            os.path.join(paths.get_documents_dir(), f"chat_{s.name.replace(' ', '_').lower()}.md"),
             "Markdown (*.md);;JSON (*.json)"
         )
         if save_path:

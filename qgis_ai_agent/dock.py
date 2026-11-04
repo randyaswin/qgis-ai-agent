@@ -22,6 +22,7 @@ from .skills_dialog import SkillsDialog
 from .sessions import SessionManager
 from .session_dialog import SessionManagerDialog
 from . import prompts
+from . import paths
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 SKEY = "qgis_ai_agent/"
@@ -580,7 +581,7 @@ class AgentDock(QDockWidget):
         self.indicator_timer.timeout.connect(self._pulse_indicator)
 
         # Internal configuration storage
-        self.outdir = QLineEdit(s.value(SKEY + "outdir", os.path.expanduser("~/qgis-ai-maps")))
+        self.outdir = QLineEdit(s.value(SKEY + "outdir", paths.get_default_output_dir()))
         self.cli = QComboBox()
         av = available()
         for name in ADAPTERS:
@@ -1093,7 +1094,7 @@ class AgentDock(QDockWidget):
             act.triggered.connect(lambda _, m=mode_id: self._set_skill_mode(m))
 
         # Output Folder action
-        out_path = self.outdir.text().strip() or os.path.expanduser("~/qgis-ai-maps")
+        out_path = self.outdir.text().strip() or paths.get_default_output_dir()
         short_out = out_path if len(out_path) <= 30 else "…" + out_path[-27:]
         act_outdir = self.settings_menu.addAction(f"📁 Output Folder ({short_out})")
         act_outdir.setToolTip(f"Change output folder (Current: {out_path})")
@@ -1137,7 +1138,7 @@ class AgentDock(QDockWidget):
         self._build_settings_menu()
 
     def _choose_outdir(self):
-        cur = self.outdir.text().strip() or os.path.expanduser("~/qgis-ai-maps")
+        cur = self.outdir.text().strip() or paths.get_default_output_dir()
         d = QFileDialog.getExistingDirectory(self, "Select Output Folder", cur)
         if d:
             self.outdir.setText(d)
@@ -1444,16 +1445,17 @@ class AgentDock(QDockWidget):
             proj_workspace = self.session_manager.get_workspace_dir(active_sess.id)
             cli_id = getattr(self, "_active_cli_conv_id", None) or active_sess.detect_and_store_cli_session_id(proj_workspace, active_sess.cli)
 
-            # 1. Antigravity CLI transcript
+            # 1. Antigravity CLI transcript (cross-platform discovery)
             candidate_brain_dirs = []
             if cli_id:
-                candidate_brain_dirs.append(os.path.expanduser(f"~/.gemini/antigravity-cli/brain/{cli_id}"))
-                candidate_brain_dirs.append(os.path.expanduser(f"~/.gemini/antigravity/brain/{cli_id}"))
+                for parent_dir in paths.get_candidate_cli_dirs("agy"):
+                    candidate_brain_dirs.append(os.path.join(parent_dir, "brain", cli_id))
 
-            for parent_dir in [os.path.expanduser("~/.gemini/antigravity-cli/brain"), os.path.expanduser("~/.gemini/antigravity/brain")]:
-                if os.path.exists(parent_dir):
+            for parent_dir in paths.get_candidate_cli_dirs("agy"):
+                b_parent = os.path.join(parent_dir, "brain")
+                if os.path.exists(b_parent):
                     subdirs = sorted(
-                        [os.path.join(parent_dir, d) for d in os.listdir(parent_dir) if os.path.isdir(os.path.join(parent_dir, d))],
+                        [os.path.join(b_parent, d) for d in os.listdir(b_parent) if os.path.isdir(os.path.join(b_parent, d))],
                         key=os.path.getmtime,
                         reverse=True
                     )
@@ -1476,28 +1478,38 @@ class AgentDock(QDockWidget):
                             except Exception:
                                 pass
 
-            # 2. Claude Code projects transcript
-            claude_projects_dir = os.path.expanduser("~/.claude/projects")
-            if os.path.exists(claude_projects_dir):
-                import glob
-                files = sorted(glob.glob(os.path.join(claude_projects_dir, "**", "*.jsonl"), recursive=True), key=os.path.getmtime, reverse=True)
-                for fpath in files[:6]:
-                    if time.time() - os.path.getmtime(fpath) < 400:
-                        with open(fpath, "r", encoding="utf-8") as f:
-                            lines = f.readlines()
-                        for line in reversed(lines[-50:]):
-                            try:
-                                d = json.loads(line)
-                                msg = d.get("message", {})
-                                cnt = msg.get("content")
-                                if isinstance(cnt, list):
-                                    for b in cnt:
-                                        if isinstance(b, dict) and b.get("type") == "thinking":
-                                            th = b.get("thinking")
-                                            if th and th.strip():
-                                                return th.strip()
-                            except Exception:
-                                pass
+            # 2. Claude Code projects transcript (cross-platform encoded slugs)
+            slugs = paths.get_workspace_project_slugs(proj_workspace)
+            candidate_claude_files = []
+            for cdir in paths.get_candidate_cli_dirs("claude"):
+                proj_base = os.path.join(cdir, "projects")
+                if os.path.exists(proj_base):
+                    for slug in slugs:
+                        sp = os.path.join(proj_base, slug)
+                        if os.path.exists(sp):
+                            import glob
+                            candidate_claude_files.extend(glob.glob(os.path.join(sp, "*.jsonl")))
+                    import glob
+                    candidate_claude_files.extend(glob.glob(os.path.join(proj_base, "**", "*.jsonl"), recursive=True))
+
+            files = sorted(set(candidate_claude_files), key=os.path.getmtime, reverse=True)
+            for fpath in files[:6]:
+                if time.time() - os.path.getmtime(fpath) < 400:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+                    for line in reversed(lines[-50:]):
+                        try:
+                            d = json.loads(line)
+                            msg = d.get("message", {})
+                            cnt = msg.get("content")
+                            if isinstance(cnt, list):
+                                for b in cnt:
+                                    if isinstance(b, dict) and b.get("type") == "thinking":
+                                        th = b.get("thinking")
+                                        if th and th.strip():
+                                            return th.strip()
+                        except Exception:
+                            pass
         except Exception:
             pass
         return ""
@@ -1560,7 +1572,13 @@ class AgentDock(QDockWidget):
         self._current_assistant_text += text
         if not self.is_agent_streaming:
             cli_label = self.cli.currentData()
-            model_info = self.model_combo.currentData() or self.model_combo.currentText().strip()
+            model_info = self.model_combo.currentData()
+            if not model_info:
+                txt = self.model_combo.currentText().strip()
+                if txt and not txt.lower().startswith("default"):
+                    model_info = txt
+                else:
+                    model_info = ""
             effort_info = self.effort_combo.currentData() if self.effort_combo.isVisible() else ""
             meta = [cli_label]
             if model_info:
@@ -2001,8 +2019,7 @@ class AgentDock(QDockWidget):
         argv = self._adapter()["register"]
         try:
             r = subprocess.run(argv, capture_output=True, text=True, timeout=60,
-                               env={**os.environ, "PATH": os.path.expanduser("~/.local/bin") + os.pathsep
-                                    + os.path.expanduser("~/.npm-global/bin") + os.pathsep + os.environ.get("PATH", "")})
+                               env=paths.get_augmented_path_env())
             msg = (r.stdout + r.stderr).strip() or "OK"
             self._append_html(
                 f"<table width='100%' cellpadding='0' cellspacing='0' style='margin: 4px 0;'>"
@@ -2192,7 +2209,7 @@ class AgentDock(QDockWidget):
             self.attachments = []
             self._update_attachment_bar()
 
-        outdir = self.outdir.text().strip() or os.path.expanduser("~/qgis-ai-maps")
+        outdir = self.outdir.text().strip() or paths.get_default_output_dir()
         os.makedirs(outdir, exist_ok=True)
         active_sess = self.session_manager.get_active_session()
         cont = self.cont.isChecked() and (not self.first_turn or active_sess.turns_count > 0)
@@ -2243,7 +2260,17 @@ class AgentDock(QDockWidget):
             skills_txt = prompts.skills_block(sel, catalog) if REGISTRY.mode != "off" else ""
 
         # Model and Effort selection
-        selected_model = self.model_combo.currentData() or self.model_combo.currentText().strip() or None
+        selected_model = self.model_combo.currentData()
+        if selected_model is not None and str(selected_model).strip() == "":
+            selected_model = None
+        elif not selected_model:
+            txt = self.model_combo.currentText().strip()
+            if txt and not txt.lower().startswith("default"):
+                selected_model = txt
+            else:
+                selected_model = None
+        if selected_model and "default" in selected_model.lower():
+            selected_model = None
         selected_effort = self.effort_combo.currentData() if self.effort_combo.isVisible() else None
 
         # Update active session metadata

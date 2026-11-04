@@ -13,9 +13,10 @@ import time
 import uuid
 
 from qgis.core import QgsProject
+from . import paths
 
-PROJECTS_DIR = os.path.expanduser("~/.qgis_ai_agent/projects")
-ENDPOINT_DIR = os.path.expanduser("~/.qgis_ai_agent")
+PROJECTS_DIR = paths.get_projects_dir()
+ENDPOINT_DIR = paths.get_app_data_dir()
 AUTOSAVE_REGISTRY_FILE = os.path.join(ENDPOINT_DIR, "project_autosaves.json")
 
 
@@ -172,14 +173,12 @@ class Session:
 
         norm_ws = os.path.normcase(os.path.realpath(workspace_dir))
         raw_ws = os.path.normcase(os.path.abspath(workspace_dir))
+        slugs = paths.get_workspace_project_slugs(workspace_dir)
 
         # 1. agy (Antigravity CLI) - Cross-platform search paths (Linux, macOS, Windows)
-        candidate_cache_files = [
-            os.path.expanduser("~/.gemini/antigravity-cli/cache/last_conversations.json"),
-            os.path.join(os.environ.get("APPDATA", ""), "gemini", "antigravity-cli", "cache", "last_conversations.json"),
-            os.path.join(os.environ.get("LOCALAPPDATA", ""), "gemini", "antigravity-cli", "cache", "last_conversations.json"),
-            os.path.join(os.environ.get("USERPROFILE", ""), ".gemini", "antigravity-cli", "cache", "last_conversations.json"),
-        ]
+        candidate_cache_files = []
+        for d in paths.get_candidate_cli_dirs("agy"):
+            candidate_cache_files.append(os.path.join(d, "cache", "last_conversations.json"))
         for cache_file in candidate_cache_files:
             if cache_file and os.path.exists(cache_file):
                 try:
@@ -194,11 +193,10 @@ class Session:
                     pass
 
         # 2. Claude Code session detection (Linux, macOS, Windows)
-        candidate_claude_dirs = [
-            os.path.expanduser("~/.claude/sessions"),
-            os.path.join(os.environ.get("USERPROFILE", ""), ".claude", "sessions"),
-            os.path.join(os.environ.get("APPDATA", ""), "Claude", "sessions"),
-        ]
+        candidate_claude_dirs = []
+        for d in paths.get_candidate_cli_dirs("claude"):
+            candidate_claude_dirs.append(os.path.join(d, "sessions"))
+            candidate_claude_dirs.append(d)
         for claude_dir in candidate_claude_dirs:
             if claude_dir and os.path.exists(claude_dir):
                 try:
@@ -207,7 +205,24 @@ class Session:
                         key=lambda p: os.path.getmtime(p),
                         reverse=True
                     )
-                    if recent and (time.time() - os.path.getmtime(recent[0]) < 180):
+                    if recent and (time.time() - os.path.getmtime(recent[0]) < 240):
+                        cid = os.path.splitext(os.path.basename(recent[0]))[0]
+                        self.cli_session_id = str(cid)
+                        return self.cli_session_id
+                except Exception:
+                    pass
+
+        # 3. OpenCode session detection (Linux, macOS, Windows)
+        for d in paths.get_candidate_cli_dirs("opencode"):
+            sess_dir = os.path.join(d, "sessions")
+            if os.path.exists(sess_dir):
+                try:
+                    recent = sorted(
+                        [os.path.join(sess_dir, f) for f in os.listdir(sess_dir)],
+                        key=lambda p: os.path.getmtime(p),
+                        reverse=True
+                    )
+                    if recent and (time.time() - os.path.getmtime(recent[0]) < 240):
                         cid = os.path.splitext(os.path.basename(recent[0]))[0]
                         self.cli_session_id = str(cid)
                         return self.cli_session_id

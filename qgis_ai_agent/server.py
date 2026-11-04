@@ -12,9 +12,10 @@ from qgis.PyQt.QtCore import QObject, pyqtSignal
 from qgis.PyQt.QtNetwork import QTcpServer, QHostAddress
 
 from . import tools
+from . import paths
 
-ENDPOINT_DIR = os.path.expanduser("~/.qgis_ai_agent")
-ENDPOINT_FILE = os.path.join(ENDPOINT_DIR, "endpoint.json")
+ENDPOINT_DIR = paths.get_app_data_dir()
+ENDPOINT_FILE = paths.get_endpoint_file()
 
 
 class ToolServer(QObject):

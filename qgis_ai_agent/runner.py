@@ -13,32 +13,27 @@ import uuid
 
 from qgis.PyQt.QtCore import QObject, QProcess, QProcessEnvironment, QThread, pyqtSignal
 
+from . import paths
+
 GUARD = os.path.join(os.path.dirname(__file__), "guard.py")
 BRIDGE = os.path.join(os.path.dirname(__file__), "mcp_bridge.py")
 PY = shutil.which("python3") or shutil.which("python") or sys.executable
 
 
 def find_cli_bin(bin_name):
-    """Finds CLI binary across standard and user npm/local paths."""
+    """Finds CLI binary across standard and user npm/local/cargo paths cross-platform."""
     p = shutil.which(bin_name)
     if p:
         return p
-    extra_paths = [
-        os.path.expanduser("~/.local/bin"),
-        os.path.expanduser("~/.npm-global/bin"),
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        os.path.join(os.environ.get("APPDATA", ""), "npm"),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "npm"),
-    ]
-    for ep in extra_paths:
+    for ep in paths.get_extra_bin_paths():
         candidate = os.path.join(ep, bin_name)
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        if os.path.isfile(candidate) and (os.access(candidate, os.X_OK) or sys.platform == "win32"):
             return candidate
         if sys.platform == "win32":
-            candidate_cmd = os.path.join(ep, bin_name + ".cmd")
-            if os.path.isfile(candidate_cmd):
-                return candidate_cmd
+            for ext in [".cmd", ".bat", ".exe"]:
+                candidate_cmd = os.path.join(ep, bin_name + ext)
+                if os.path.isfile(candidate_cmd):
+                    return candidate_cmd
     return bin_name
 
 
@@ -49,7 +44,10 @@ _CLI_MODELS_CACHE = {}
 def get_cli_models(cli_key, force_refresh=False):
     """Dynamically discover models available for a given AI CLI.
     Returns list of (display_label, model_id) tuples.
+    Default option is ALWAYS ('Default (CLI / Account Default)', '') so no model is forced.
     """
+    default_entry = ("Default (CLI / Account Default)", "")
+
     if not force_refresh and cli_key in _CLI_MODELS_CACHE:
         return _CLI_MODELS_CACHE[cli_key]
 
@@ -62,7 +60,7 @@ def get_cli_models(cli_key, force_refresh=False):
     # 1. Antigravity CLI: dynamic live models via `agy models`
     if "agy" in bin_name.lower():
         try:
-            res = subprocess.run([bin_path, "models"], capture_output=True, text=True, timeout=5)
+            res = subprocess.run([bin_path, "models"], capture_output=True, text=True, timeout=4)
             if res.returncode == 0 and res.stdout:
                 clean = re.sub(r'\x1b\[[0-9;?]*[A-Za-z]|\r', '', res.stdout)
                 for line in clean.splitlines():
@@ -77,81 +75,87 @@ def get_cli_models(cli_key, force_refresh=False):
         except Exception:
             pass
 
-    # 2. Claude Code: inspect ~/.claude.json for accessible/additional models
+    # 2. Claude Code: inspect ~/.claude.json / %APPDATA%\Claude for accessible models
     elif "claude" in bin_name.lower():
-        claude_models = [
-            ("Claude 3.7 Sonnet (Recommended)", "sonnet"),
-            ("Claude 3.7 Sonnet (Extended Thinking)", "claude-3-7-sonnet-20250219"),
-            ("Claude 3.5 Haiku (Fast)", "haiku"),
-            ("Claude 3.5 Sonnet", "claude-3-5-sonnet"),
-            ("Claude 3 Opus", "opus"),
-        ]
-        try:
-            cfg_path = os.path.expanduser("~/.claude.json")
+        claude_dirs = paths.get_candidate_cli_dirs("claude")
+        candidate_configs = [os.path.join(d, "claude.json") for d in claude_dirs] + [os.path.join(paths.get_home_dir(), ".claude.json")]
+        for cfg_path in candidate_configs:
             if os.path.exists(cfg_path):
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    cdata = json.load(f)
-                add_models = cdata.get("additionalModelOptionsCache") or []
-                for am in add_models:
-                    if isinstance(am, dict) and "value" in am:
-                        val = am["value"]
-                        lbl = am.get("label") or am.get("description") or val
-                        if not any(val == m[1] for m in claude_models):
-                            claude_models.append((f"{lbl} ({val})", val))
-        except Exception:
-            pass
-        discovered = claude_models
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        cdata = json.load(f)
+                    cfg_m = cdata.get("model") or cdata.get("orgModelDefaultCache")
+                    if cfg_m and isinstance(cfg_m, str):
+                        discovered.append((f"Account Default ({cfg_m})", cfg_m))
+                    add_models = cdata.get("additionalModelOptionsCache") or []
+                    for am in add_models:
+                        if isinstance(am, dict) and "value" in am:
+                            val = am["value"]
+                            lbl = am.get("label") or am.get("description") or val
+                            if not any(val == m[1] for m in discovered):
+                                discovered.append((f"{lbl} ({val})", val))
+                    if discovered:
+                        break
+                except Exception:
+                    pass
 
-    # 3. Gemini CLI: inspect ~/.gemini/settings.json or active Gemini family
+    # 3. Gemini CLI: inspect settings.json across candidate paths
     elif "gemini" in bin_name.lower():
-        gemini_models = [
-            ("Gemini 2.5 Pro (High Reasoning)", "gemini-2.5-pro"),
-            ("Gemini 2.5 Flash (Fast & Capable)", "gemini-2.5-flash"),
-            ("Gemini 2.0 Flash (Multimodal)", "gemini-2.0-flash"),
-            ("Gemini 1.5 Pro", "gemini-1.5-pro"),
-            ("Gemini 1.5 Flash", "gemini-1.5-flash"),
-        ]
-        try:
-            cfg_path = os.path.expanduser("~/.gemini/settings.json")
+        gemini_dirs = paths.get_candidate_cli_dirs("gemini")
+        for gdir in gemini_dirs:
+            cfg_path = os.path.join(gdir, "settings.json")
             if os.path.exists(cfg_path):
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    sdata = json.load(f)
-                custom_m = sdata.get("model")
-                if custom_m and not any(custom_m == m[1] for m in gemini_models):
-                    gemini_models.insert(0, (f"Custom ({custom_m})", custom_m))
-        except Exception:
-            pass
-        discovered = gemini_models
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        sdata = json.load(f)
+                    custom_m = sdata.get("model")
+                    if custom_m:
+                        discovered.append((f"Configured ({custom_m})", custom_m))
+                        break
+                except Exception:
+                    pass
 
-    # 4. Codex CLI: inspect ~/.codex/config.toml
+    # 4. Codex CLI: inspect config.toml
     elif "codex" in bin_name.lower():
-        codex_models = [
-            ("o3-mini (Reasoning)", "o3-mini"),
-            ("o1 (Deep Reasoning)", "o1"),
-            ("gpt-4o (Omni)", "gpt-4o"),
-            ("gpt-4.5-preview", "gpt-4.5-preview"),
-        ]
-        try:
-            cfg_path = os.path.expanduser("~/.codex/config.toml")
+        codex_dirs = paths.get_candidate_cli_dirs("codex")
+        for cdir in codex_dirs:
+            cfg_path = os.path.join(cdir, "config.toml")
             if os.path.exists(cfg_path):
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    content = f.read()
-                match = re.search(r'^\s*model\s*=\s*["\']([^"\']+)["\']', content, re.MULTILINE)
-                if match:
-                    cm = match.group(1).strip()
-                    if not any(cm == m[1] for m in codex_models):
-                        codex_models.insert(0, (f"Configured ({cm})", cm))
-        except Exception:
-            pass
-        discovered = codex_models
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    match = re.search(r'^\s*model\s*=\s*["\']([^"\']+)["\']', content, re.MULTILINE)
+                    if match:
+                        cm = match.group(1).strip()
+                        discovered.append((f"Configured ({cm})", cm))
+                        break
+                except Exception:
+                    pass
 
-    if not discovered:
-        discovered = adapter.get("default_models", [])
+    # 5. OpenCode CLI: inspect config.json
+    elif "opencode" in bin_name.lower():
+        opencode_dirs = paths.get_candidate_cli_dirs("opencode")
+        for odir in opencode_dirs:
+            cfg_path = os.path.join(odir, "config.json")
+            if os.path.exists(cfg_path):
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        odata = json.load(f)
+                    m = odata.get("model")
+                    if m:
+                        discovered.append((f"Configured ({m})", m))
+                        break
+                except Exception:
+                    pass
 
-    if discovered:
-        _CLI_MODELS_CACHE[cli_key] = discovered
+    # Build final list: Always place CLI Account Default at the top!
+    result = [default_entry]
+    for lbl, val in discovered:
+        if val and not any(val == r[1] for r in result):
+            result.append((lbl, val))
 
-    return discovered
+    _CLI_MODELS_CACHE[cli_key] = result
+    return result
 
 
 class ModelDiscoveryThread(QThread):
@@ -170,20 +174,12 @@ class ModelDiscoveryThread(QThread):
 ADAPTERS = {
     "agy (Antigravity CLI)": {
         "bin": "agy",
-        "default_models": [
-            ("Gemini 3.8 Flash (High)", "gemini-3.8-flash-high"),
-            ("Gemini 3.8 Flash (Medium)", "gemini-3.8-flash-medium"),
-            ("Gemini 3.8 Flash (Low)", "gemini-3.8-flash-low"),
-            ("Claude Sonnet 4.6 (Thinking)", "claude-sonnet-4-6"),
-            ("Claude Opus 4.6 (Thinking)", "claude-opus-4-6-thinking"),
-            ("GPT-OSS 120B (Medium)", "gpt-oss-120b-medium"),
-        ],
         "supports_effort": False,
         "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
             ["agy"]
             + ([f"--conversation={session_id}"] if (cont and session_id) else (["-c"] if cont else []))
             + (["--dangerously-skip-permissions"] if auto else [])
-            + (["--model", model] if model else [])
+            + (["--model", model] if (model and model.strip()) else [])
             + ["--output-format", "stream-json"]
             + ["-p", p]
         ),
@@ -191,19 +187,12 @@ ADAPTERS = {
     },
     "Claude Code": {
         "bin": "claude",
-        "default_models": [
-            ("Claude 3.7 Sonnet (Recommended)", "sonnet"),
-            ("Claude 3.7 Sonnet (Extended Thinking)", "claude-3-7-sonnet-20250219"),
-            ("Claude 3.5 Haiku (Fast)", "haiku"),
-            ("Claude 3.5 Sonnet", "claude-3-5-sonnet"),
-            ("Claude 3 Opus", "opus"),
-        ],
         "supports_effort": True,
         "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
             ["claude"]
             + (["--resume", session_id] if (cont and session_id) else (["-c"] if cont else []))
             + (["--dangerously-skip-permissions"] if auto else ["--allowedTools", "mcp__qgis"])
-            + (["--model", model] if model else [])
+            + (["--model", model] if (model and model.strip()) else [])
             + (["--effort", effort.lower()] if effort and effort.lower() != "default" else [])
             + ["--output-format", "stream-json", "--verbose", "--include-partial-messages"]
             + ["-p", p]
@@ -212,19 +201,12 @@ ADAPTERS = {
     },
     "Gemini CLI": {
         "bin": "gemini",
-        "default_models": [
-            ("Gemini 2.5 Pro (High Reasoning)", "gemini-2.5-pro"),
-            ("Gemini 2.5 Flash (Fast & Capable)", "gemini-2.5-flash"),
-            ("Gemini 2.0 Flash (Multimodal)", "gemini-2.0-flash"),
-            ("Gemini 1.5 Pro", "gemini-1.5-pro"),
-            ("Gemini 1.5 Flash", "gemini-1.5-flash"),
-        ],
         "supports_effort": False,
         "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
             ["gemini"]
             + (["--resume", session_id] if (cont and session_id) else (["--resume", "latest"] if cont else (["--session-id", session_id] if session_id else [])))
             + (["--yolo"] if auto else ["--allowed-mcp-server-names", "qgis"])
-            + (["-m", model] if model else [])
+            + (["-m", model] if (model and model.strip()) else [])
             + ["--output-format", "stream-json"]
             + ["-p", p]
         ),
@@ -232,28 +214,141 @@ ADAPTERS = {
     },
     "Codex CLI": {
         "bin": "codex",
-        "default_models": [
-            ("o3-mini (Reasoning)", "o3-mini"),
-            ("o1 (Deep Reasoning)", "o1"),
-            ("gpt-4o (Omni)", "gpt-4o"),
-            ("gpt-4.5-preview", "gpt-4.5-preview"),
-        ],
         "supports_effort": lambda m: bool(m and (m.startswith("o1") or m.startswith("o3") or "reasoning" in m.lower())),
         "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
             (["codex", "exec", "resume", session_id] if (cont and session_id) else (["codex", "exec", "resume", "--last"] if cont else ["codex", "exec"]))
             + (["--full-auto", "--skip-git-repo-check"] if auto else ["--skip-git-repo-check"])
-            + (["-m", model] if model else [])
+            + (["-m", model] if (model and model.strip()) else [])
             + (["-c", f'model_reasoning_effort="{effort.lower()}"'] if effort and effort.lower() != "default" else [])
             + ["--json"]
             + [p]
         ),
         "register": ["codex", "mcp", "add", "qgis", "--", PY, BRIDGE],
     },
+    "GitHub Copilot CLI": {
+        "bin": "copilot",
+        "supports_effort": False,
+        "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
+            (["copilot"] if shutil.which("copilot") else ["gh", "copilot"])
+            + (["--resume", session_id] if (cont and session_id) else (["--continue"] if cont else []))
+            + (["--yolo"] if auto else [])
+            + (["--model", model] if (model and model.strip()) else [])
+            + ["-p", p]
+        ),
+        "register": ["copilot", "mcp", "add", "qgis", PY, BRIDGE],
+    },
+    "OpenCode": {
+        "bin": "opencode",
+        "supports_effort": False,
+        "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
+            ["opencode"]
+            + (["--session", session_id] if (cont and session_id) else (["-c"] if cont else []))
+            + (["--auto"] if auto else [])
+            + (["--model", model] if (model and model.strip()) else [])
+            + ["--prompt", p]
+        ),
+        "register": ["opencode", "mcp", "add", "qgis", PY, BRIDGE],
+    },
+    "DeepSeek / Hermes CLI": {
+        "bin": "deepseek",
+        "supports_effort": True,
+        "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
+            ([find_cli_bin("deepseek") or find_cli_bin("hermes") or "deepseek"])
+            + (["--resume", session_id] if (cont and session_id) else (["--continue"] if cont else []))
+            + (["--yolo"] if auto else [])
+            + (["-m", model] if (model and model.strip()) else [])
+            + (["--reasoning", effort.lower()] if effort and effort.lower() != "default" else [])
+            + ["-z", p]
+        ),
+        "register": ["deepseek", "mcp", "add", "qgis", PY, BRIDGE],
+    },
+    "Cursor Agent": {
+        "bin": "cursor-agent",
+        "supports_effort": False,
+        "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
+            ([find_cli_bin("cursor-agent") or find_cli_bin("cursor") or "cursor-agent"])
+            + (["--resume", session_id] if (cont and session_id) else (["-c"] if cont else []))
+            + (["--auto"] if auto else [])
+            + (["--model", model] if (model and model.strip()) else [])
+            + ["-p", p]
+        ),
+        "register": ["cursor-agent", "mcp", "add", "qgis", PY, BRIDGE],
+    },
+    "Qwen Code": {
+        "bin": "qwen",
+        "supports_effort": False,
+        "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
+            ([find_cli_bin("qwen") or find_cli_bin("qwen-code") or "qwen"])
+            + (["-c"] if cont else [])
+            + (["--yolo"] if auto else [])
+            + (["--model", model] if (model and model.strip()) else [])
+            + ["-p", p]
+        ),
+        "register": ["qwen", "mcp", "add", "qgis", PY, BRIDGE],
+    },
+    "Trae CLI": {
+        "bin": "trae",
+        "supports_effort": False,
+        "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
+            ([find_cli_bin("trae") or find_cli_bin("traecli") or "trae"])
+            + (["-c"] if cont else [])
+            + (["--model", model] if (model and model.strip()) else [])
+            + ["-p", p]
+        ),
+        "register": ["trae", "mcp", "add", "qgis", PY, BRIDGE],
+    },
+    "Kimi Code": {
+        "bin": "kimi",
+        "supports_effort": False,
+        "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
+            ([find_cli_bin("kimi") or find_cli_bin("kimi-cli") or "kimi"])
+            + (["-c"] if cont else [])
+            + (["--model", model] if (model and model.strip()) else [])
+            + ["-p", p]
+        ),
+        "register": ["kimi", "mcp", "add", "qgis", PY, BRIDGE],
+    },
+    "Aider": {
+        "bin": "aider",
+        "supports_effort": False,
+        "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
+            ["aider", "--no-git", "--no-auto-commits"]
+            + (["--yes"] if auto else [])
+            + (["--model", model] if (model and model.strip()) else [])
+            + ["--message", p]
+        ),
+        "register": ["aider"],
+    },
 }
 
 
+def is_bin_available(bin_name):
+    if shutil.which(bin_name):
+        return True
+    found = find_cli_bin(bin_name)
+    return bool(found and (os.path.isabs(found) and os.path.exists(found)))
+
+
 def available():
-    return {k: bool(shutil.which(v["bin"]) or find_cli_bin(v["bin"]) != v["bin"]) for k, v in ADAPTERS.items()}
+    res = {}
+    for k, v in ADAPTERS.items():
+        bin_name = v.get("bin", "")
+        if bin_name == "copilot":
+            is_avail = is_bin_available("copilot") or bool(shutil.which("gh"))
+        elif bin_name == "deepseek":
+            is_avail = is_bin_available("deepseek") or is_bin_available("hermes") or is_bin_available("dsh")
+        elif bin_name == "cursor-agent":
+            is_avail = is_bin_available("cursor-agent") or is_bin_available("cursor")
+        elif bin_name == "qwen":
+            is_avail = is_bin_available("qwen") or is_bin_available("qwen-code")
+        elif bin_name == "trae":
+            is_avail = is_bin_available("trae") or is_bin_available("traecli")
+        elif bin_name == "kimi":
+            is_avail = is_bin_available("kimi") or is_bin_available("kimi-cli")
+        else:
+            is_avail = is_bin_available(bin_name)
+        res[k] = is_avail
+    return res
 
 
 def get_process_descendants(root_pid, protected_pids=None):
@@ -402,16 +497,8 @@ class CliRunner(QObject):
         self._current_pid_file = os.path.join(tempfile.gettempdir(), f"qgis_ai_{uuid.uuid4().hex[:12]}.pid")
         env.insert("QGIS_AI_PID_FILE", self._current_pid_file)
 
-        # Cross-platform binary discovery (Linux, macOS Homebrew, Windows npm/AppData)
-        extra_paths = [
-            os.path.expanduser("~/.local/bin"),
-            os.path.expanduser("~/.npm-global/bin"),
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            os.path.join(os.environ.get("APPDATA", ""), "npm"),
-            os.path.join(os.environ.get("LOCALAPPDATA", ""), "npm"),
-        ]
-        valid_paths = [p for p in extra_paths if p and os.path.isdir(p)]
+        # Cross-platform binary discovery (Linux, macOS Homebrew, Windows npm/AppData/Cargo)
+        valid_paths = paths.get_extra_bin_paths()
         if valid_paths:
             env.insert("PATH", os.pathsep.join(valid_paths + [env.value("PATH")]))
 

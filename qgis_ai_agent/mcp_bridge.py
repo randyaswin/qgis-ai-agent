@@ -12,7 +12,22 @@ import os
 import socket
 import sys
 
-ENDPOINT_FILE = os.path.expanduser("~/.qgis_ai_agent/endpoint.json")
+try:
+    from . import paths
+    ENDPOINT_FILE = paths.get_endpoint_file()
+except Exception:
+    try:
+        import paths
+        ENDPOINT_FILE = paths.get_endpoint_file()
+    except Exception:
+        _u = os.environ.get("USERPROFILE")
+        _home = _u if (_u and os.path.isdir(_u)) else os.path.expanduser("~")
+        _appdata = os.environ.get("APPDATA")
+        if sys.platform == "win32" and _appdata and os.path.isdir(_appdata):
+            _cand = os.path.join(_appdata, "qgis_ai_agent", "endpoint.json")
+            ENDPOINT_FILE = _cand if os.path.exists(_cand) else os.path.join(_home, ".qgis_ai_agent", "endpoint.json")
+        else:
+            ENDPOINT_FILE = os.path.join(_home, ".qgis_ai_agent", "endpoint.json")
 _counter = [0]
 
 
