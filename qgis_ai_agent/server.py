@@ -57,6 +57,8 @@ class ToolServer(QObject):
             s.disconnected.connect(lambda s=s: (self.buffers.pop(s, None), s.deleteLater()))
 
     def _on_read(self, sock):
+        if sock not in self.buffers:
+            return
         self.buffers[sock] = self.buffers.get(sock, b"") + bytes(sock.readAll())
         while b"\n" in self.buffers[sock]:
             line, self.buffers[sock] = self.buffers[sock].split(b"\n", 1)

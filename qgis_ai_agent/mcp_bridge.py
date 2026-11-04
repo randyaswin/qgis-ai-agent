@@ -39,14 +39,22 @@ def qgis_rpc(method, params=None):
         raise RuntimeError("QGIS Copilot plugin is not running. Open QGIS and enable the plugin.")
     _counter[0] += 1
     req = {"token": ep["token"], "id": _counter[0], "method": method, "params": params or {}}
-    with socket.create_connection(("127.0.0.1", ep["port"]), timeout=600) as s:
-        s.sendall((json.dumps(req) + "\n").encode())
-        buf = b""
-        while b"\n" not in buf:
-            chunk = s.recv(1 << 20)
-            if not chunk:
-                break
-            buf += chunk
+    timeout_sec = float(os.environ.get("QGIS_AI_TIMEOUT", "300"))
+    buf = b""
+    try:
+        with socket.create_connection(("127.0.0.1", ep["port"]), timeout=timeout_sec) as s:
+            s.sendall((json.dumps(req) + "\n").encode())
+            while b"\n" not in buf:
+                chunk = s.recv(1 << 20)
+                if not chunk:
+                    break
+                buf += chunk
+    except ConnectionRefusedError:
+        raise RuntimeError("QGIS Copilot plugin port is not responding. Ensure QGIS is running and the plugin is active.")
+    except socket.timeout:
+        raise RuntimeError(f"QGIS operation timed out after {int(timeout_sec)}s.")
+    if not buf:
+        raise RuntimeError("QGIS Copilot plugin closed connection without response.")
     resp = json.loads(buf.split(b"\n", 1)[0], parse_constant=lambda c: None)
     if "error" in resp:
         raise RuntimeError(resp["error"] + ("\n" + resp["trace"] if resp.get("trace") else ""))
