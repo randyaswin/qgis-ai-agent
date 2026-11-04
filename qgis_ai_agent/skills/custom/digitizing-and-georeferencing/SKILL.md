@@ -28,13 +28,20 @@ When aligning a non-spatial raster (e.g., scanned historical map, JPEG drone sur
 | **Thin Plate Spline (TPS)** | 4 | Local rubber-sheeting | Exact fit at GCPs with smooth minimal-energy deformation | Historical maps, severely warped paper, local non-linear stretching. |
 | **Projective** | 4 | Homography | Perspective tilt and oblique view angles | Oblique drone or handheld building facade photographs. |
 
-### 1.2 Ground Control Point (GCP) Selection Strategy
-- **Corner Anchors:** Always place GCPs close to the four corners of the image to anchor the transformation bounding box.
-- **Uniform Grid Distribution:** Distribute interior GCPs evenly across the scene. Avoid clustering points in one quadrant.
-- **Non-Collinear Rule:** Never place all GCPs along a single linear road or river, as collinear points cause mathematical matrix singularity.
-- **Identifiable Landmarks:** Use sharp, unambiguous intersections:
-  - Road center junctions, bridge abutments, canal corners, historical monument bases.
-  - Avoid seasonal features like tree tops, shoreline water edges, or movable parking lines.
+### 1.2 Ground Control Point (GCP) Selection Strategy: Corner Grids vs. Objects
+- **CRITICAL: Gunakan Titik Sudut Grid Koordinat Peta (Map Graticule / Neatline Corners), BUKAN Objek Semata!**
+  - Jika citra atau peta hasil scan memiliki garis/cross/tik grid koordinat atau 4 sudut neatline peta dengan angka koordinat yang jelas, **WAJIB** gunakan perpotongan garis grid koordinat atau ke-4 sudut kotak grid tersebut sebagai GCP utama!
+  - Mengapa? Mengambil GCP semata-mata dari objek darat (seperti atap rumah, tikungan sungai yang dinamis) pada peta cetak sering menyebabkan **distorsi gepeng / skew / non-orthogonal** karena objek tersebut tidak mewakili proyeksi kartografis matematis lembar peta.
+  - Tarik dari 4 sudut neatline / grid intersection terluar peta ke koordinat proyeksi aslinya (misal UTM Zone atau Geographic Lat/Long). Ini menjamin aspek rasio (aspect ratio), orientasi utara, dan skala peta tetap tegak lurus dan tidak melar/gepeng.
+- **Corner Anchors:** Selalu letakkan GCP sedekat mungkin ke 4 sudut terluar grid peta untuk mengunci batas transformasi.
+- **Uniform Grid Distribution:** Distribusikan GCP interior secara merata mengikuti grid perpotongan koordinat (misal interval 1 km atau 1 menit).
+- **Non-Collinear Rule:** Jangan pernah meletakkan semua GCP pada satu garis lurus.
+
+---
+
+### 1.3 Transformation Method: Helmert vs Affine vs Polynomial
+- Jika peta merupakan peta proyeksi standar yang hanya butuh orientasi tegak dan rotasi skala tanpa melengkungkan lembar kertas: gunakan **Helmert** (linear conformal) atau **Affine (Polynomial 1)**.
+- Hindari penggunaan derajat tinggi jika hanya memiliki titik terbatas karena akan membuat citra terdistorsi/gepeng secara agresif di luar titik ikat.
 
 ### 1.3 Residual Error & Root Mean Square Error (RMSE)
 For each GCP, the residual error represents the distance between its true map position and its transformed position:
@@ -173,9 +180,58 @@ digitize_features(
 
 ---
 
-## 5. Automated Raster-to-Vector Digitization (Vectorization)
+## 5. Digitasi Manual vs. Automated Vectorization (Kapan Boleh & Dilarang Pakai Raster-to-Vector)
 
-When digitizing high-contrast scanned plans, flood masks, building footprint masks, or land cover classifications:
+### 5.1 BAHAYA: Jangan Gunakan Raster-to-Vector (`polygonize`) pada Citra Bertema / Pola Bertekstur (Hatched / Textured Fills)
+- **Gejala Kesalahan:** Pada peta zonasi, tata ruang (RTRW/RDTR), atau geologi, area sering diwarnai dengan **hatching / arsiran / pola garis-garis / titik bertekstur** (seperti pola permukiman bergaris miring, semak belukar bertitik).
+- **Hasil Buruk Jika Menggunakan Raster-to-Vector (`gdal:polygonize`):**
+  - Tool raster-to-vector menganggap setiap garis arsiran, celah warna, atau titik piksel sebagai batas poligon tersendiri!
+  - Akibatnya: menghasilkan ribuan poligon kurus bergerigi dengan jutaan vertex (menyerupai serpihan benang/kisi-kisi), padahal di dunia nyata zona tersebut hanyalah **1 atau sedikit poligon blok zonasi utuh dengan sedikit vertex di sudut-sudut batasnya**.
+- **ATURAN WAJIB (Rule of Thumb):**
+  1. **Jika peta bertema tekstur/arsiran/zonasi:** **JANGAN PERNAH** menjalankan `raster-to-vector` atau `polygonize` langsung pada raster berwarna berarsir!
+  2. **Gunakan Digitasi Sudut Poligon (Vertex Boundary Digitizing):**
+     - Identifikasi batas luar (*outer boundary*) dari zonasi tersebut.
+     - Lakukan digitasi hanya pada titik-titik sudut (corners/vertex) batas poligon menggunakan `digitize_features()` atau snapping manual.
+     - Poligon blok zonasi yang benar biasanya hanya memiliki 4 sampai 15 vertex sudut, menghasilkan geometri yang bersih, mulus, dan valid secara topologis.
+  3. **Jika Poligon Saling Bersebelahan:**
+     - Gunakan fitur snapping dan topologi (Avoid Overlap / Shared Boundaries) sehingga batas antar-zonasi menempel sempurna tanpa celah (*slivers*) dan tanpa digitasi ganda.
+
+---
+
+## 6. Programmatic Clean Polygon Digitizing (Sudut-ke-Sudut Tanpa Tekstur)
+
+Gunakan `digitize_features` untuk membuat poligon ringkas langsung dari koordinat sudut-sudutnya:
+
+```python
+# Contoh digitasi poligon zonasi permukiman (hanya sudut-sudut terluar):
+digitize_features(
+    layer="zonasi_rdtr",
+    features=[
+        {
+            "geometry": [
+                [95.3421, 5.5684],   # Sudut Barat Laut
+                [95.3582, 5.5721],   # Sudut Timur Laut
+                [95.3610, 5.5580],   # Sudut Tenggara
+                [95.3490, 5.5530],   # Sudut Selatan
+                [95.3395, 5.5592],   # Sudut Barat Daya
+                [95.3421, 5.5684]    # Tutup kembali ke titik awal
+            ],
+            "attributes": {
+                "kode_zona": "R-1",
+                "nama_zona": "Perumahan Kepadatan Tinggi",
+                "keterangan": "Digitasi batas luar zonasi"
+            }
+        }
+    ],
+    auto_fix_geometry=True
+)
+```
+
+---
+
+## 7. Automated Raster-to-Vector Digitization (Hanya Untuk Binary Mask Kontras Tinggi Tanpa Tekstur)
+
+HANYA gunakan pipeline ini untuk raster yang sudah berupa **solid binary mask** (misal hasil ekstraksi air, batas kontur vektor murni, atau masking bangunan yang solid):
 
 ### The Vectorization Pipeline
 ```

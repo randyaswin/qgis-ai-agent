@@ -27,29 +27,85 @@ When interpreting optical imagery (drone RGB, high-resolution aerial surveys, or
 
 ---
 
-## 2. The Two Classification Workflows
+## 2. The Three Classification & Digitization Workflows
 
-Depending on the task requirements, choose between:
+Depending on the task requirements and map characteristics, choose between:
 
 ```mermaid
 flowchart TD
-    A["Raster Imagery (Drone / Satellite / Basemap)"] --> B{"Choose Workflow"}
+    A["Raster Imagery (Drone / Satellite / Scanned Map)"] --> B{"Pola Isi Raster?"}
     
-    B -->|"AI Vision / Visual Inspection"| C["1. Generate Sampling Grid (Square Fishnet)"]
-    C --> D["2. Capture Canvas / Tile Snapshot"]
-    D --> E["3. Multimodal LLM Vision Classification"]
-    E --> F["4. Batch Label Polygon Attributes"]
-    F --> G["5. Auto-Categorized Symbology"]
+    B -->|"Peta Tata Ruang / Arsir / Zonasi"| C["Workflow C: Digitasi Sudut Poligon (Vertex Boundary)"]
+    C --> C1["Identifikasi Batas Luar Zona (Outer Extent)"]
+    C1 --> C2["Digitasi Titik Sudut/Vertex Saja (4-15 Titik)"]
+    C2 --> C3["Hindari polygonize! Gunakan digitize_features"]
     
-    B -->|"Spectral & Statistical"| H["1. Spectral Index (NDVI / NDWI)"]
-    H --> I["2. Zonal Statistics per Grid Cell"]
-    I --> J["3. Rule-Based Thresholding"]
-    J --> G
+    B -->|"Klasifikasi Grid Sel Teratur (Square Fishnet)"| D["Workflow A: Grid-Based Sampling & Visual Labeling"]
+    D --> D1["1. Generate Sampling Grid (Square Fishnet)"]
+    D1 --> D2["2. Multimodal Vision / Labeling"]
+    D2 --> D3["3. Batch Label Polygon Attributes"]
+    
+    B -->|"Spektral & Mask Kontras Solid"| E["Workflow B: Spectral / Threshold Masking"]
+    E --> E1["1. Thresholding / Zonal Statistics"]
+    E1 --> E2["2. Vektorisasi Mask Solid Bersih"]
 ```
+
+> [!CAUTION]
+> **PERINGATAN PENTING UNTUK PETA ARSIRAN / BERTEKSTUR:**
+> Jika raster adalah peta hasil scan yang memiliki **arsiran garis (hatching) atau pola bertekstur** (misalnya pola perumahan bergaris diagonal seperti pada peta zonasi RDTR), **JANGAN PERNAH gunakan `gdal:polygonize` / raster-to-vector**. Menjalankan raster-to-vector pada area bertekstur akan menghasilkan ribuan poligon kurus bergerigi (menyerupai serpihan benang/sisir) karena setiap celah arsiran dianggap poligon.
+> **Solusi:** Gunakan **Workflow C** (Digitasi Sudut Poligon / Vertex Boundary Digitizing) dengan menentukan koordinat sudut-sudut poligonnya langsung!
 
 ---
 
-## 3. Workflow A: Grid-Based Visual & AI Vision Classification
+## 3. Workflow C: Digitasi Sudut Poligon (Vertex Boundary Digitizing Tanpa Raster-to-Vector)
+
+Gunakan workflow ini saat mendigitasi zona peruntukan ruang, persil lahan, atau blok bangunan dari peta rencana:
+
+### Langkah 1: Tentukan Titik-Titik Sudut (Corner Vertices)
+Zona peruntukan ruang (seperti kawasan perumahan atau perdagangan) di dunia nyata adalah satu kesatuan poligon kontinu dengan sedikit sudut.
+1. Temukan koordinat batas terluar zona (outer envelope).
+2. Catat titik sudut belokan batas (biasanya hanya 4–15 titik sudut).
+
+### Langkah 2: Buat Poligon Bersih Menggunakan `digitize_features`
+```python
+# 1. Pastikan layer vektor target sudah ada
+create_vector_layer(
+    layer_name="zonasi_perumahan",
+    geometry_type="Polygon",
+    crs="EPSG:4326",  # Sesuaikan dengan CRS proyek
+    fields=[
+        {"name": "nama_zona", "type": "string"},
+        {"name": "kode_zona", "type": "string"}
+    ]
+)
+
+# 2. Digitasi hanya sudut-sudut terluar poligon
+digitize_features(
+    layer="zonasi_perumahan",
+    features=[
+        {
+            "geometry": [
+                [95.3421, 5.5684],   # Sudut 1
+                [95.3582, 5.5721],   # Sudut 2
+                [95.3610, 5.5580],   # Sudut 3
+                [95.3490, 5.5530],   # Sudut 4
+                [95.3395, 5.5592],   # Sudut 5
+                [95.3421, 5.5684]    # Kembali ke Sudut 1
+            ],
+            "attributes": {
+                "nama_zona": "Perumahan Kepadatan Sedang",
+                "kode_zona": "R-2"
+            }
+        }
+    ],
+    auto_fix_geometry=True
+)
+```
+*Hasil:* Poligon bersih, ringan, tanpa ribuan vertex bergerigi, dan siap digunakan untuk analisis tata ruang.
+
+---
+
+## 4. Workflow A: Grid-Based Visual & AI Vision Classification
 
 Use this workflow to partition an area into discrete square evaluation cells (e.g. $50\text{ m} \times 50\text{ m}$ or $100\text{ m} \times 100\text{ m}$) and assign classes like Land Cover, Disaster Damage Grade, or Rooftop Solar Presence.
 
