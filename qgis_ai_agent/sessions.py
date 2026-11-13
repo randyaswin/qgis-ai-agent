@@ -82,6 +82,38 @@ def get_last_autosave_info():
     return get_autosave_info_for_current_project()
 
 
+def _compact_tool_args(args, max_str=320, max_items=12, depth=0):
+    """Bound oversized tool argument payloads before persisting session history."""
+    if args is None or isinstance(args, (bool, int, float)):
+        return args
+    if isinstance(args, str):
+        if len(args) > max_str:
+            return f"{args[:max_str]}...(+{len(args) - max_str} chars)"
+        return args
+    if isinstance(args, dict):
+        if depth >= 2:
+            return f"<dict:{len(args)} keys>"
+        out = {}
+        for idx, (k, v) in enumerate(args.items()):
+            if idx >= max_items:
+                out["__truncated_keys__"] = len(args) - max_items
+                break
+            if k == "__image__" and isinstance(v, str):
+                out[k] = f"<base64:{len(v)} chars>"
+            else:
+                out[k] = _compact_tool_args(v, max_str=max_str, max_items=max_items, depth=depth + 1)
+        return out
+    if isinstance(args, (list, tuple)):
+        if depth >= 2 and len(args) > max_items:
+            return f"<list:{len(args)} items>"
+        out = [_compact_tool_args(x, max_str=max_str, max_items=max_items, depth=depth + 1) for x in args[:max_items]]
+        if len(args) > max_items:
+            out.append(f"...(+{len(args) - max_items} items)")
+        return out
+    s = str(args)
+    return s[:max_str] + (f"...(+{len(s) - max_str} chars)" if len(s) > max_str else "")
+
+
 class Message:
     def __init__(self, role, text="", html="", model_info="", tool_calls=None, timestamp=None, msg_id=None):
         self.id = msg_id or str(uuid.uuid4())
@@ -92,12 +124,12 @@ class Message:
         self.tool_calls = tool_calls or []
         self.timestamp = timestamp or time.strftime("%Y-%m-%d %H:%M:%S")
 
-    def to_dict(self):
+    def to_dict(self, include_html=True):
         return {
             "id": self.id,
             "role": self.role,
             "text": self.text,
-            "html": self.html,
+            "html": self.html if include_html else "",
             "model_info": self.model_info,
             "tool_calls": self.tool_calls,
             "timestamp": self.timestamp,
@@ -134,8 +166,8 @@ class Session:
         self.cli_session_id = str(cli_session_id or "")
         self.checkpoints = list(checkpoints or [])
 
-    def add_checkpoint(self, cycle, filename, prompt="", msg_count=0):
-        """Record a completed cycle checkpoint with its project file reference and message offset."""
+    def add_checkpoint(self, cycle, filename, prompt="", msg_count=0, max_keep=10):
+        """Record a completed cycle checkpoint and return evicted oldest checkpoint filenames."""
         self.checkpoints = [c for c in self.checkpoints if c.get("cycle") != cycle]
         self.checkpoints.append({
             "cycle": int(cycle),
@@ -145,6 +177,12 @@ class Session:
             "msg_count": int(msg_count),
         })
         self.checkpoints.sort(key=lambda c: c.get("cycle", 0))
+        evicted = []
+        if max_keep and max_keep > 0 and len(self.checkpoints) > max_keep:
+            overflow = len(self.checkpoints) - int(max_keep)
+            evicted = [c.get("filename") for c in self.checkpoints[:overflow] if c.get("filename")]
+            self.checkpoints = self.checkpoints[overflow:]
+        return evicted
 
     def get_checkpoints(self):
         return list(self.checkpoints)
@@ -245,10 +283,13 @@ class Session:
         return msg
 
     def add_tool_record(self, name, args, summary="", success=True, html_card="", image=None):
+        summary_str = str(summary) if summary else ""
+        if len(summary_str) > 2000:
+            summary_str = summary_str[:2000] + "..."
         rec = {
             "name": name,
-            "args": args,
-            "summary": summary,
+            "args": _compact_tool_args(args),
+            "summary": summary_str,
             "success": success,
             "has_image": bool(image),
             "timestamp": time.strftime("%H:%M:%S"),
@@ -330,7 +371,7 @@ class Session:
                 lines.append(f"**Action:** `{m.text}` ({m.timestamp})")
         return "\n".join(lines)
 
-    def to_dict(self):
+    def to_dict(self, include_html=True):
         return {
             "id": self.id,
             "name": self.name,
@@ -344,7 +385,7 @@ class Session:
             "is_e2e": self.is_e2e,
             "cli_session_id": self.cli_session_id,
             "checkpoints": self.checkpoints,
-            "messages": [m.to_dict() for m in self.messages],
+            "messages": [m.to_dict(include_html=include_html) for m in self.messages],
         }
 
     @classmethod
@@ -516,17 +557,17 @@ class SessionManager:
         finally:
             self._saving = False
 
-    def save_project_sessions(self):
+    def save_project_sessions(self, autosave_qgz=True):
         pid = self.get_project_id()
         p = QgsProject.instance()
         cur_file = p.fileName()
-        data = {
+        base_meta = {
             "project_id": pid,
             "project_file": cur_file or "",
             "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "active_session_id": self.active_session_id,
-            "sessions": [s.to_dict() for s in self.sessions.values()],
         }
+        data = {**base_meta, "sessions": [s.to_dict(include_html=True) for s in self.sessions.values()]}
 
         # 1. Write to local project store on disk
         sfile = self.get_sessions_file()
@@ -542,7 +583,8 @@ class SessionManager:
         if cur_file and os.path.isabs(cur_file):
             try:
                 was_dirty = p.isDirty()
-                manifest_json = json.dumps(data, ensure_ascii=False)
+                compact_data = {**base_meta, "sessions": [s.to_dict(include_html=False) for s in self.sessions.values()]}
+                manifest_json = json.dumps(compact_data, ensure_ascii=False)
                 p.writeEntry("qgis_ai_agent", "project_id", pid)
                 p.writeEntry("qgis_ai_agent", "session_manifest", manifest_json)
                 if not was_dirty:
@@ -550,8 +592,9 @@ class SessionManager:
             except Exception:
                 pass
 
-        # 3. Auto-save QGIS project to disk across iterations (only if already saved on disk)
-        self.autosave_qgis_project()
+        # 3. Auto-save QGIS project to disk across iterations when requested (only if already saved on disk)
+        if autosave_qgz:
+            self.autosave_qgis_project()
 
     # ------------------------------------------------------------ session lifecycle
     def get_active_session(self):

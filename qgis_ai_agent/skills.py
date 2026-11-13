@@ -78,19 +78,26 @@ def tokens(text):
     return [t for t in all_toks if t not in STOP and len(t) > 1]
 
 
+def _bigrams(seq):
+    return [" ".join((seq[i], seq[i + 1])) for i in range(len(seq) - 1)]
+
+
 class Skill:
-    def __init__(self, name, description, path, source, keywords="", always=False, size=0, references=None):
+    def __init__(self, name, description, path, source, keywords="", always=False, size=0, references=None, body_text=None):
         self.name, self.description, self.path, self.source = name, description, path, source
         self.keywords, self.always, self.size = keywords, always, size
         self.references = references or []
+        self._body = body_text.strip() if body_text is not None else None
 
     @property
     def file(self):
         return os.path.join(self.path, "SKILL.md")
 
     def body(self):
-        with open(self.file, encoding="utf-8") as f:
-            return parse_frontmatter(f.read())[1].strip()
+        if self._body is None:
+            with open(self.file, encoding="utf-8") as f:
+                self._body = parse_frontmatter(f.read())[1].strip()
+        return self._body
 
     def brief(self):
         return {"name": self.name, "source": self.source, "description": self.description[:400],
@@ -122,16 +129,35 @@ class Registry:
         "open-map-stack",
     )
 
+    DEFAULT_MANUAL_PINNED = (
+        "cartographic-symbology-and-styling",
+        "advanced-map-layouting",
+    )
+
+    SUPERSEDED_BY_CUSTOM = {
+        "cartography-geoviz": ("cartographic-symbology-and-styling",),
+        "qgis-agents-map-generator": ("advanced-map-layouting",),
+        "qgis-impl-print-layouts": ("advanced-map-layouting",),
+        "qgis-core-coordinate-systems": ("coordinate-systems-and-crs",),
+        "qgis-errors-projections": ("coordinate-systems-and-crs",),
+        "qgis-impl-georeferencing": ("digitizing-and-georeferencing",),
+        "terrain-hydrology": ("hydrology-watershed-and-coastal-analysis", "terrain-relief-map"),
+        "geo-data-engineering": ("automated-data-cleaning-and-topology-qa",),
+    }
+
     def __init__(self, dirs=None):
         self.dirs = dirs or [os.path.join(SKILLS_DIR, "vendor"), os.path.join(SKILLS_DIR, "custom"), USER_DIR]
         self.mode = "auto"          # auto | manual | off
-        self.pinned = set()         # always injected in full (pre-loaded)
+        self.pinned = set()         # manually pre-loaded skills (manual mode)
         self.disabled = set()       # never selected or loadable
-        self.max_inject = 6
-        self.budget_chars = 75000   # total body chars auto-injected (modern LLM context friendly)
+        self.max_inject = 4
+        self.budget_chars = 45000   # bounded token budget for focused skill injection
         self.skills = {}
         self.extra = {"synonyms": {}, "keywords": {}}
         self._idf = {}
+        self._phrases = {}
+        self._bigrams = {}
+        self._prefixes = {}
         self.reload()
         self.load_settings()
 
@@ -147,21 +173,29 @@ class Registry:
                 elif isinstance(saved_pinned, (list, set)):
                     self.pinned = set(str(p).strip() for p in saved_pinned if str(p).strip())
             else:
-                self.pinned = {"cartographic-symbology-and-styling", "advanced-map-layouting"}
+                self.pinned = set(self.DEFAULT_MANUAL_PINNED)
+
+            saved_disabled = s.value("qgis_ai_agent/disabled_skills", None)
+            if saved_disabled is not None:
+                if isinstance(saved_disabled, str):
+                    self.disabled = set(p.strip() for p in saved_disabled.split(",") if p.strip())
+                elif isinstance(saved_disabled, (list, set)):
+                    self.disabled = set(str(p).strip() for p in saved_disabled if str(p).strip())
 
             saved_mode = s.value("qgis_ai_agent/skill_mode", "auto")
             if saved_mode in ("auto", "manual", "off"):
                 self.mode = saved_mode
         except Exception:
             if not self.pinned:
-                self.pinned = {"cartographic-symbology-and-styling", "advanced-map-layouting"}
+                self.pinned = set(self.DEFAULT_MANUAL_PINNED)
 
     def save_settings(self):
-        """Persist pinned skills and skill mode to QSettings."""
+        """Persist pinned and disabled skills and skill mode to QSettings."""
         try:
             from qgis.PyQt.QtCore import QSettings
             s = QSettings()
             s.setValue("qgis_ai_agent/pinned_skills", ",".join(sorted(self.pinned)))
+            s.setValue("qgis_ai_agent/disabled_skills", ",".join(sorted(self.disabled)))
             s.setValue("qgis_ai_agent/skill_mode", self.mode)
         except Exception:
             pass
@@ -198,8 +232,10 @@ class Registry:
         rd = os.path.join(path, "references")
         if os.path.isdir(rel_ref := rd):
             refs = sorted(f for f in os.listdir(rel_ref) if f.endswith((".md", ".txt", ".json", ".csv")))
+        stripped_body = body.strip()
         return Skill(name, meta.get("description", "").strip(), path, rel.replace(os.sep, "/"),
-                     meta.get("keywords", ""), meta.get("always", "").lower() == "true", len(body), refs)
+                     meta.get("keywords", ""), meta.get("always", "").lower() == "true",
+                     len(stripped_body), refs, body_text=stripped_body)
 
     def _doc_terms(self, s):
         weighted = {}
@@ -220,6 +256,31 @@ class Registry:
                 df[t] = df.get(t, 0) + 1
         n = max(len(self._docs), 1)
         self._idf = {t: math.log(1 + n / (1 + c)) for t, c in df.items()}
+
+        self._phrases = {}
+        self._bigrams = {}
+        self._prefixes = {}
+        for name, s in self.skills.items():
+            extra_kws = self.extra.get("keywords", {}).get(s.name, [])
+            raw_phrases = [s.name.replace("-", " ").lower()]
+            if s.keywords:
+                raw_phrases.extend(kw.strip().lower() for kw in s.keywords.split(",") if kw.strip())
+            raw_phrases.extend(kw.strip().lower() for kw in extra_kws if kw.strip())
+            self._phrases[name] = tuple(dict.fromkeys(p for p in raw_phrases if " " in p))
+
+            bg = set()
+            for chunk in (s.name.replace("-", " "), s.keywords, s.description, *extra_kws):
+                if chunk:
+                    bg.update(_bigrams(tokens(chunk)))
+            self._bigrams[name] = bg
+
+            pref = {}
+            for t, w in self._docs[name].items():
+                if len(t) >= 6:
+                    p5 = t[:5]
+                    if w > pref.get(p5, 0.0):
+                        pref[p5] = w
+            self._prefixes[name] = pref
 
     # ------------------------------------------------------------ query
     def available(self):
@@ -242,9 +303,14 @@ class Registry:
                     out.extend(tokens(v))
         return out
 
-    def rank(self, query, names=None):
+    def rank(self, query, names=None, layer_names=None):
         pool = names if names is not None else self.available()
         q = self._expand(query)
+        q_counts = {}
+        for t in q:
+            q_counts[t] = q_counts.get(t, 0) + 1
+        q_bigrams = set(_bigrams(q))
+        layer_tokens = set(tokens(" ".join(str(x) for x in (layer_names or ()) if x))) if layer_names else set()
         low = query.lower()
         res = []
 
@@ -264,24 +330,40 @@ class Registry:
         for n in pool:
             s = self.skills[n]
             terms = self._docs.get(n, {})
-            score = sum(terms[t] * self._idf.get(t, 1.0) for t in set(q) if t in terms)
+            score = sum(
+                terms[t] * self._idf.get(t, 1.0) * (1.0 + 0.25 * math.log(cnt))
+                for t, cnt in q_counts.items()
+                if t in terms
+            )
+
+            # Prefix fallback for morphological inflections (tokens >= 6 chars)
+            pref_map = self._prefixes.get(n, {})
+            if pref_map:
+                matched_pref = set()
+                for t in q_counts:
+                    if len(t) >= 6 and t not in terms:
+                        p5 = t[:5]
+                        if p5 in pref_map and p5 not in matched_pref:
+                            matched_pref.add(p5)
+                            score += 0.45 * pref_map[p5] * self._idf.get(t, 1.0)
+
+            # Bigram overlap bonus
+            skill_bigrams = self._bigrams.get(n)
+            if skill_bigrams and q_bigrams:
+                score += len(q_bigrams & skill_bigrams) * 2.5
+
+            # Active project layer context boost (only reinforces existing topical signal)
+            if score > 0 and layer_tokens:
+                score += 1.5 * sum(1 for lt in layer_tokens if terms.get(lt, 0.0) >= 2.5)
 
             # Direct skill name match
             clean_name = s.name.replace("-", " ")
             if clean_name in low:
                 score += 15.0
 
-            # Multi-word phrase matching from keywords and extra keywords
-            # Gives huge boost when exact multi-word concepts (e.g. "city planning", "tata ruang", "network accessibility") match
-            all_phrases = []
-            if s.keywords:
-                all_phrases.extend([kw.strip().lower() for kw in s.keywords.split(",") if " " in kw.strip()])
-            for extra_kw in self.extra.get("keywords", {}).get(s.name, []):
-                if " " in extra_kw.strip():
-                    all_phrases.append(extra_kw.strip().lower())
-
-            for phrase in set(all_phrases):
-                if phrase and phrase in low:
+            # Precomputed multi-word phrase matching from keywords and extra keywords
+            for phrase in self._phrases.get(n, ()):
+                if phrase in low:
                     score += 20.0
 
             # Prefer purpose-built custom skills
@@ -436,8 +518,15 @@ class Registry:
             if re.search(pat, low):
                 return True
 
-        # 6. Check for named geographic location / boundary
-        has_location = bool(re.search(
+        # 6. Check for attached references / geospatial file paths / loaded project context
+        has_attached_file = (
+            "# user attached references / files:" in low
+            or bool(re.search(r"\.(?:tif|tiff|png|jpg|jpeg|webp|pdf|shp|gpkg|geojson|kml|csv|las|laz)\b", low))
+        )
+        has_project_context = bool(layer_names) or has_attached_file
+
+        # 7. Check for named geographic location / boundary
+        has_location = has_project_context or bool(re.search(
             r"\b(jakarta|bandung|surabaya|semarang|yogyakarta|jogja|bali|sumatera|sumatra|jawa|java|kalimantan|sulawesi|papua|maluku|aceh|medan|palembang|makassar|ntt|ntb|"
             r"indonesia|malaysia|singapore|tokyo|japan|zurich|switzerland|swiss|usa|europe|asia|"
             r"bbox)\b|"
@@ -445,18 +534,22 @@ class Registry:
             low
         ))
 
-        # 7. Check for specific GIS deliverable / data source / method keywords
+        # 8. Check for specific GIS deliverable / data source / method keywords
         has_specific_theme = bool(re.search(
             r"\b(banjir|flood|genangan|dem|elevasi|elevation|kontur|contour|relief|hillshade|lereng|slope|curah hujan|rainfall|"
-            r"sentinel|landsat|citra|satellite|ndvi|stac|cog|overture|osm|openstreetmap|"
-            r"kepadatan|density|heatmap|penduduk|population|isochrone|jangkauan|buffer|ahp|"
-            r"kesesuaian lahan|tutupan lahan|land use|landcover|fasilitas|rumah sakit|sekolah|poi|jalan|roads|sungai|river|gempa|tsunami|longsor)\b",
+            r"sentinel|landsat|citra|satellite|ndvi|nbr|lst|stac|cog|overture|osm|openstreetmap|"
+            r"kepadatan|density|heatmap|penduduk|population|isochrone|jangkauan|buffer|overlay|network|ahp|"
+            r"digitasi|digitiz|georeferen|gcp|grid|fishnet|klasifikasi|classification|lulc|zonasi|rtrw|rdtr|persil|parcel|"
+            r"sempadan|kdb|klb|rth|twi|strahler|slr|cleanup|cleaning|topologi|topology|sliver|duplikat|duplicate|"
+            r"orthomosaic|drone|uav|lidar|bathymetry|batimetri|watershed|das|kriging|idw|interpolasi|interpolation|"
+            r"kesesuaian lahan|tutupan lahan|land use|landcover|fasilitas|rumah sakit|sekolah|poi|jalan|roads|sungai|river|"
+            r"gempa|tsunami|longsor|landslide|karhutla|wildfire|uhi|kekeringan|drought)\b",
             low
         ))
 
-        is_spatial_action = bool(re.search(r"\b(make|create|generate|build|buat|buatkan|bikin|bikinkan|petakan|tampilkan|hitung|analisis|modelkan|analyze|calculate|peta|map)\b", low))
+        is_spatial_action = bool(re.search(r"\b(make|create|generate|build|buat|buatkan|bikin|bikinkan|petakan|tampilkan|hitung|analisis|modelkan|analyze|calculate|peta|map|digitasi|digitize|georeferen|klasifikasi|classify|interpretasi)\b", low))
 
-        # If it asks to create or analyze a map, but lacks either location or theme/method, it needs clarification!
+        # If it asks to create or analyze a map, but lacks either location/context or theme/method, it needs clarification!
         if is_spatial_action and len(words) <= 8:
             if not has_location or not has_specific_theme:
                 return True
@@ -475,30 +568,38 @@ class Registry:
             # Skills must be automatically selected AFTER clarification (or before execution if clear).
             out["is_e2e"] = False
             return out
-        for n in sorted(self.pinned):
-            if n in self.skills and n not in self.disabled and n not in already:
-                out["pinned"].append(self.skills[n])
         if self.mode == "manual":
-            # In Manual mode: pre-load all pinned skills in full; if empty, pre-load foundational baseline
+            # In Manual mode: pre-load pinned skills in full; if empty, pre-load foundational baseline
+            for n in sorted(self.pinned):
+                if n in self.skills and n not in self.disabled and n not in already:
+                    out["pinned"].append(self.skills[n])
             if not out["pinned"]:
-                for bn in ("cartographic-symbology-and-styling", "advanced-map-layouting"):
+                for bn in self.DEFAULT_MANUAL_PINNED:
                     if bn in self.skills and bn not in self.disabled and bn not in already:
                         out["pinned"].append(self.skills[bn])
             return out
 
-        ranked = [(sc, n) for sc, n in self.rank(user_prompt) if n not in self.pinned and n not in already]
+        # In Auto mode: only skills explicitly marked always=True are automatically pre-loaded
         for n, s in self.skills.items():
-            if s.always and n not in self.disabled and n not in already and n not in self.pinned:
+            if s.always and n not in self.disabled and n not in already:
                 out["pinned"].append(s)
+
+        always_names = {s.name for s in out["pinned"]}
+        ranked = [(sc, n) for sc, n in self.rank(user_prompt, layer_names=layer_names) if n not in always_names and n not in already]
 
         # In E2E map tasks: cartography and layout skills are mandatory
         mandatory_names = []
         if is_e2e:
-            already_names = set(already) | {s.name for s in out["pinned"]}
+            already_names = set(already) | always_names
+            ranked_scores = dict(ranked)
             # 1. Best cartography skill (prefer specialized if strongly matched, else foundational symbology & styling)
             carto_candidate = None
-            specialized_carto = [n for _, n in ranked if n in self.CARTOGRAPHY_SKILLS and n != "cartographic-symbology-and-styling" and n not in already_names and n not in self.disabled]
-            if specialized_carto and dict(ranked).get(specialized_carto[0], 0) >= 15.0:
+            specialized_carto = [
+                n for _, n in ranked
+                if n in self.CARTOGRAPHY_SKILLS and n != "cartographic-symbology-and-styling"
+                and n not in already_names and n not in self.disabled
+            ]
+            if specialized_carto and ranked_scores.get(specialized_carto[0], 0) >= 15.0:
                 carto_candidate = specialized_carto[0]
             elif "cartographic-symbology-and-styling" in self.skills and "cartographic-symbology-and-styling" not in already_names and "cartographic-symbology-and-styling" not in self.disabled:
                 carto_candidate = "cartographic-symbology-and-styling"
@@ -524,15 +625,15 @@ class Registry:
             return out
 
         top = ranked[0][0] if ranked else 5.0
-        floor = min(8.0, max(2.0, 0.15 * top)) if ranked else 0.0
+        floor = min(10.0, max(2.0, 0.25 * top)) if ranked else 0.0
         budget = self.budget_chars
-        max_items = self.max_inject if not is_e2e else max(self.max_inject, len(mandatory_names) + 3)
+        max_items = self.max_inject if not is_e2e else max(self.max_inject, len(mandatory_names) + 2)
 
         # Determine prioritized selection list
         selection_candidates = []
         seen = set(mandatory_names)
+        ranked_scores = dict(ranked)
 
-        # Top domain skills from ranking
         for sc, n in ranked:
             if n in self.skills and n not in seen and sc >= floor:
                 selection_candidates.append((sc, n))
@@ -545,16 +646,25 @@ class Registry:
 
         ordered_queue.extend(top_domain)
         for mn in mandatory_names:
-            sc = dict(ranked).get(mn, 8.0)
+            sc = ranked_scores.get(mn, 8.0)
             ordered_queue.append((sc, mn))
-
         ordered_queue.extend(cand_rest)
+
+        active_customs = (
+            set(always_names)
+            | set(mandatory_names)
+            | {cn for _, cn in selection_candidates[:max_items] if cn in self.skills and self.skills[cn].source == "custom"}
+        )
 
         for sc, n in ordered_queue:
             if n not in self.skills:
                 continue
             s = self.skills[n]
             out["scores"][n] = sc
+            superseded_by = self.SUPERSEDED_BY_CUSTOM.get(n, ())
+            if superseded_by and any(c in active_customs for c in superseded_by):
+                out["hint"].append(s)
+                continue
             if len(out["full"]) < max_items and s.size <= budget:
                 out["full"].append(s)
                 budget -= s.size

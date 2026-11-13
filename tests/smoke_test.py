@@ -145,4 +145,142 @@ assert 3 in received_ids, "Missing tools/call response from bridge"
 assert 4 in received_ids, "Missing exec_pyqgis response from bridge"
 print(res["err"][-500:])
 srv.stop()
+
+# Expanded audit checks: LOGGER, layout_tools QgsLineSymbol, schemas, avoid_overlap, helmert RMSE, skills & dock summaries
+tools.LOGGER.info("smoke test logger info")
+tools.LOGGER.warning("smoke test logger warning")
+
+from qgis_ai_agent import layout_tools, skills, dock
+assert hasattr(layout_tools, "QgsLineSymbol"), "QgsLineSymbol missing in layout_tools"
+
+# Verify updated tool schemas
+assert "avoid_overlap" in tools.TOOLS["digitize_features"]["inputSchema"]["properties"]
+assert "snap_tolerance" in tools.TOOLS["digitize_features"]["inputSchema"]["properties"]
+assert "show_labels" in tools.TOOLS["create_sampling_grid"]["inputSchema"]["properties"]
+assert "opacity" in tools.TOOLS["style_categorized"]["inputSchema"]["properties"]
+assert "color_map" in tools.TOOLS["style_categorized"]["inputSchema"]["properties"]
+
+# Verify avoid_overlap & snap_tolerance in digitize_features
+ov_res = T("digitize_features", {
+    "layer": "poly_test",
+    "features": [{"geometry": [[106.85, -6.2], [106.95, -6.2], [106.95, -6.1], [106.85, -6.2]], "attributes": {"tag": "zone_b"}}],
+    "avoid_overlap": True,
+    "snap_tolerance": 0.005,
+})
+assert ov_res["features_added"] == 1 and ov_res["total_features"] == 2, f"Unexpected overlap digitize result: {ov_res}"
+
+# Verify helmert transform + RMSE diagnostics on a synthetic raster
+from osgeo import gdal as _gdal
+synth_img = os.path.join(out, "synth_scan.tif")
+drv = _gdal.GetDriverByName("GTiff")
+sds = drv.Create(synth_img, 100, 100, 1, _gdal.GDT_Byte)
+sds.GetRasterBand(1).Fill(128)
+sds = None
+georef_out = os.path.join(out, "synth_georef.tif")
+gres = T("georeference_raster", {
+    "image_path": synth_img,
+    "output_path": georef_out,
+    "gcps": [[0, 0, 106.8, -6.1], [100, 100, 106.9, -6.2]],
+    "transform": "helmert",
+    "crs": "EPSG:4326",
+    "load_to_canvas": True,
+})
+assert gres["gcp_count"] == 2 and "rmse_pixels" in gres and len(gres["gcp_residuals"]) == 2, f"Helmert RMSE check failed: {gres}"
+assert gres["rmse_pixels"] < 0.01, f"Expected near-zero Helmert 2-GCP residual, got {gres['rmse_pixels']}"
+
+# Verify skills registry, keywords_id, vague request, and disabled persistence
+reg = skills.REGISTRY
+assert "raster-interpretation-and-grid-labeling" in reg.skills, "Missing raster-interpretation-and-grid-labeling skill"
+assert "raster-interpretation-and-grid-labeling" in reg.extra.get("keywords", {}), "Missing keywords_id entry for raster-interpretation-and-grid-labeling"
+assert not reg.is_vague_request("klasifikasi grid tutupan lahan dari citra ini", layer_names=["synth_georef"]), "Prompt with loaded layers should not be vague"
+assert not reg.is_vague_request("digitasi batas zonasi dari file scan_peta.png"), "Prompt with image attachment should not be vague"
+sel_grid = reg.select("buat sampling fishnet grid labeling untuk interpretasi citra", layer_names=["synth_georef"])
+grid_names = [s.name for s in sel_grid["full"] + sel_grid["hint"]]
+assert "raster-interpretation-and-grid-labeling" in grid_names, f"Expected grid labeling skill, got {grid_names}"
+
+# Verify summarize_tool_result formatting
+assert "RMSE=" in dock.summarize_tool_result("georeference_raster", gres)
+assert "Digitized +1 features" in dock.summarize_tool_result("digitize_features", ov_res)
+assert "cells generated" in dock.summarize_tool_result("create_sampling_grid", grid_res) or "Sampling grid" in dock.summarize_tool_result("create_sampling_grid", grid_res)
+
+# --- Phase 2: performance, memory bounds, new skills, & auto skill selection ---
+from qgis_ai_agent import sessions, prompts
+
+# 1. Streaming Welford vector stats + NoGeometry/chunked calculate_field
+d_titik = T("describe_layer", {"layer": "titik"})
+assert d_titik["scanned"] == 8 and d_titik["invalid_geometries_sampled"] == 0 and d_titik["invalid_geometries_checked"] == 8, d_titik
+pop_stat = next(fs for fs in d_titik["fields"] if fs["name"] == "pop")
+assert pop_stat["min"] == 0.0 and pop_stat["max"] == 7000.0 and pop_stat["mean"] == 3500.0 and pop_stat["sum"] == 28000.0, pop_stat
+calc_attr = T("calculate_field", {"layer": "titik", "field": "pop2", "expression": '"pop" * 2', "field_type": "double"})
+assert calc_attr["updated"] == 8 and calc_attr["eval_error"] is None, calc_attr
+calc_geom = T("calculate_field", {"layer": "poly_test", "field": "poly_area", "expression": "$area", "field_type": "double"})
+assert calc_geom["updated"] == 2 and calc_geom["eval_error"] is None, calc_geom
+
+# 2. Compact tool args, checkpoint eviction cap, manifest trimming, tail reader, prompt cache
+comp = sessions._compact_tool_args({"big": "x" * 1000, "arr": list(range(30)), "__image__": "abc"})
+assert "...(+" in comp["big"] and len(comp["arr"]) == 13 and comp["__image__"] == "<base64:3 chars>", comp
+
+chk_sess = sessions.Session(name="Test")
+chk_sess.add_user_message("hello", "<div>raw_card</div>")
+evicted_all = []
+for cyc in range(1, 14):
+    evicted_all.extend(chk_sess.add_checkpoint(cyc, f"checkpoint_cycle_{cyc}.qgz", prompt=f"Cycle {cyc}"))
+assert len(chk_sess.checkpoints) == 10, f"Expected 10 checkpoints kept, got {len(chk_sess.checkpoints)}"
+assert [c["cycle"] for c in chk_sess.checkpoints] == list(range(4, 14)), chk_sess.checkpoints
+assert evicted_all == ["checkpoint_cycle_1.qgz", "checkpoint_cycle_2.qgz", "checkpoint_cycle_3.qgz"], evicted_all
+assert chk_sess.to_dict(include_html=False)["messages"][0]["html"] == "", "Compact manifest must omit HTML"
+
+tail_path = os.path.join(out, "large_transcript.jsonl")
+with open(tail_path, "w", encoding="utf-8") as tf:
+    for i in range(250):
+        tf.write(json.dumps({"idx": i, "thinking": "pad " * 60 if i < 249 else "final_thought"}) + "\n")
+tail_lines = dock._tail_lines(tail_path, max_bytes=4096, max_lines=5)
+assert len(tail_lines) == 5 and json.loads(tail_lines[-1])["thinking"] == "final_thought", tail_lines
+
+sp1 = prompts.system_prompt("3.40", out, "auto")
+sp2 = prompts.system_prompt("3.40", out, "auto")
+assert sp1 == sp2 and prompts._AGENT_MD_CACHE["text"] is not None
+
+# 3. Four new custom skills registered with cached _body
+new_custom_skills = (
+    "urban-planning-and-zoning-rtrw",
+    "multi-hazard-and-environmental-modeling",
+    "hydrology-watershed-and-coastal-analysis",
+    "automated-data-cleaning-and-topology-qa",
+)
+for sk_name in new_custom_skills:
+    assert sk_name in reg.skills, f"Missing new custom skill: {sk_name}"
+    assert sk_name in reg.extra.get("keywords", {}), f"Missing keywords_id entry: {sk_name}"
+    assert reg.skills[sk_name]._body is not None and len(reg.skills[sk_name].body()) > 200, f"Expected cached body for {sk_name}"
+
+# 4. Improved auto skill selection: zero pinned leakage on non-E2E tasks, deduplicated vendor skills, <= 45k budget
+orig_mode = reg.mode
+try:
+    reg.mode = "auto"
+    sel_clean = reg.select("bersihkan topologi sliver polygon dan perbaiki geometri invalid pada layer persil")
+    clean_full = [s.name for s in sel_clean["full"]]
+    assert not sel_clean["is_e2e"], "Topology clean utility ask should not be E2E map creation"
+    assert sel_clean["pinned"] == [], f"Auto mode should not pre-load pinned skills without always=true, got {sel_clean['pinned']}"
+    assert "automated-data-cleaning-and-topology-qa" in clean_full, f"Expected data-cleaning skill, got {clean_full}"
+    assert "cartographic-symbology-and-styling" not in clean_full and "advanced-map-layouting" not in clean_full, clean_full
+    assert "geo-data-engineering" not in clean_full, f"Expected vendor geo-data-engineering demoted to hint, got {clean_full}"
+
+    sel_rtrw = reg.select("buat peta zonasi rtrw pola ruang dan kesesuaian sempadan sungai jakarta")
+    rtrw_full = [s.name for s in sel_rtrw["full"]]
+    assert sel_rtrw["is_e2e"] and len(rtrw_full) <= 4, rtrw_full
+    assert "urban-planning-and-zoning-rtrw" in rtrw_full, f"Expected urban-planning skill, got {rtrw_full}"
+    assert "advanced-map-layouting" in rtrw_full, f"Expected mandatory layout skill in E2E RTRW, got {rtrw_full}"
+    assert sum(s.size for s in sel_rtrw["full"]) <= reg.budget_chars
+
+    sel_haz = reg.select("buat peta kerentanan tanah longsor dan multi hazard inarisk bandung")
+    haz_full = [s.name for s in sel_haz["full"]]
+    assert "multi-hazard-and-environmental-modeling" in haz_full, f"Expected multi-hazard skill, got {haz_full}"
+
+    sel_hyd = reg.select("buat peta daerah aliran sungai das dan analisis slr pesisir semarang")
+    hyd_full = [s.name for s in sel_hyd["full"]]
+    assert "hydrology-watershed-and-coastal-analysis" in hyd_full, f"Expected hydrology skill, got {hyd_full}"
+    assert "terrain-hydrology" not in hyd_full, f"Expected vendor terrain-hydrology demoted to hint, got {hyd_full}"
+finally:
+    reg.mode = orig_mode
+
 print("All smoke test assertions PASSED!")

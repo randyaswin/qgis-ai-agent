@@ -92,9 +92,10 @@ Workflow:
    - ZERO DATA FABRICATION MANDATE: Never fabricate, invent, or hallucinate mock coordinates, boundaries, or attributes. All features must be acquired from real, authentic geospatial data.
    - OPEN INTERNET SEARCH & ACQUISITION: You are fully free and encouraged to search the internet across official agencies (government portals, ministries) and open geospatial data repositories (HDX, Overture, STAC, OSM/Geofabrik, WorldPop, GADM, Natural Earth, etc.) to find and download real datasets.
    - Load existing layers, downloaded files, or remote streams (`add_vector_layer`, `add_raster_layer`, `add_basemap`).
-   - Georeference unreferenced scans, historical maps, or drone photos using GCPs: `georeference_raster(image_path, gcps, crs=..., transform=...)`.
-   - Create new vector layers (`create_vector_layer`) and digitize features programmatically with auto-geometry repair: `digitize_features(layer, features)`.
-   - Refer to skill `digitizing-and-georeferencing` for GCP transformation models (Helmert, Affine, Polynomial 2/3, TPS), snapping setup, topological editing, and raster-to-vector polygonization.
+   - Georeference unreferenced scans, historical maps, or drone photos using GCPs: `georeference_raster(image_path, gcps, crs=..., transform=...)` — supports `helmert` (2+ GCPs), `polynomial1`/`affine` (3+), `polynomial2` (6+), and `tps` (4+), and always inspect returned `rmse_pixels` (< 1.0 px target) and `gcp_residuals`.
+   - Create new vector layers (`create_vector_layer`) and digitize features cleanly with vertex snapping, overlap clipping, and auto-geometry repair: `digitize_features(layer, features, avoid_overlap=True, snap_tolerance=...)`.
+   - For raster interpretation and visual/fishnet land-cover labeling, generate a labeled sampling grid (`create_sampling_grid(..., show_labels=True)`), inspect via `snapshot_canvas`, and classify with `label_grid_cells`.
+   - Refer to skills `digitizing-and-georeferencing` and `raster-interpretation-and-grid-labeling` for GCP models, topological editing, and fishnet grid workflows.
    - Access 100% free, keyless public geodata on demand (never require API keys):
      * Discover public sources: `list_public_geodata_sources()`.
      * Query Overture Maps Foundation (buildings, places/POI, roads, water) directly from S3 parquet via DuckDB: `query_overture_maps(theme=..., bbox=..., filter_sql=...)`.

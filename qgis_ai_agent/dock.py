@@ -29,6 +29,40 @@ ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 SKEY = "qgis_ai_agent/"
 
 
+def _tail_lines(filepath, max_bytes=65536, max_lines=45):
+    """Read only the trailing bytes of a text/JSONL file in O(1) memory."""
+    with open(filepath, "rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        offset = max(0, size - max_bytes)
+        fh.seek(offset)
+        chunk = fh.read().decode("utf-8", errors="replace")
+    lines = chunk.splitlines()
+    if offset > 0 and len(lines) > 1:
+        lines = lines[1:]
+    return lines[-max_lines:]
+
+
+def _extract_thinking_from_jsonl(filepath):
+    """Return the most recent non-empty thinking block from a CLI JSONL transcript tail."""
+    for line in reversed(_tail_lines(filepath)):
+        try:
+            d = json.loads(line)
+        except Exception:
+            continue
+        th = d.get("thinking")
+        if isinstance(th, str) and th.strip():
+            return th.strip()
+        cnt = (d.get("message") or {}).get("content")
+        if isinstance(cnt, list):
+            for block in cnt:
+                if isinstance(block, dict) and block.get("type") == "thinking":
+                    bth = block.get("thinking")
+                    if isinstance(bth, str) and bth.strip():
+                        return bth.strip()
+    return ""
+
+
 def summarize_tool_result(name, result):
     """Generate concise, human-readable summary of tool execution."""
     if not isinstance(result, dict):
@@ -72,6 +106,14 @@ def summarize_tool_result(name, result):
         return f"🦆 DuckDB spatial query '<b>{html.escape(result.get('name', ''))}</b>' executed ({result.get('features', 0)} features)"
     if name == "add_vector_layer":
         return f"Vector layer '<b>{html.escape(result.get('name', ''))}</b>' loaded ({result.get('geometry')}, {result.get('features')} features, CRS: {result.get('crs')})"
+    if name == "georeference_raster":
+        rmse = result.get("rmse_pixels")
+        rmse_str = f", RMSE={rmse}px" if rmse is not None else ""
+        return f"🗺️ Raster georeferenced (<code>{html.escape(str(result.get('transform', '')))}</code>, {result.get('gcp_count', 0)} GCPs{rmse_str})"
+    if name == "create_vector_layer":
+        return f"Vector layer '<b>{html.escape(result.get('name', ''))}</b>' created ({result.get('geometry')}, CRS: {result.get('crs')})"
+    if name == "digitize_features":
+        return f"✍️ Digitized +{result.get('features_added', 0)} features into '<b>{html.escape(result.get('layer', ''))}</b>' (total: {result.get('total_features', 0)})"
     if name == "create_sampling_grid":
         return f"📐 Sampling grid '<b>{html.escape(result.get('layer_name', ''))}</b>' generated ({result.get('cell_count', 0)} cells, size {result.get('cell_size', 0)})"
     if name == "label_grid_cells":
@@ -1489,13 +1531,20 @@ class AgentDock(QDockWidget):
                 p.setFileName(orig_filename)
 
             if res:
-                active_sess.add_checkpoint(
+                evicted = active_sess.add_checkpoint(
                     cycle=cycle_no,
                     filename=chk_filename,
                     prompt=label,
-                    msg_count=len(active_sess.messages)
+                    msg_count=len(active_sess.messages),
                 )
-                self.session_manager.save_project_sessions()
+                for old_fname in evicted or []:
+                    old_path = os.path.join(chk_dir, old_fname)
+                    if os.path.exists(old_path):
+                        try:
+                            os.remove(old_path)
+                        except Exception:
+                            pass
+                self.session_manager.save_project_sessions(autosave_qgz=True)
                 self._update_revert_ui()
         except Exception as e:
             tools.LOGGER.warning(f"Failed to save cycle checkpoint: {e}")
@@ -1759,15 +1808,37 @@ class AgentDock(QDockWidget):
             self.log.ensureCursorVisible()
 
     def _extract_recent_thinking(self):
-        """Attempts to retrieve thinking text from CLI transcripts if available."""
+        """Retrieve recent thinking text from CLI transcripts with tail reads and probe caching."""
         if self._thinking_text and self._thinking_text.strip():
             return self._thinking_text.strip()
         try:
             active_sess = self.session_manager.get_active_session()
+            cache_key = (active_sess.id, active_sess.cli)
+            now_mono = time.monotonic()
+            if (
+                getattr(self, "_thinking_probe_key", None) == cache_key
+                and (now_mono - getattr(self, "_thinking_probe_at", 0.0)) < 2.5
+            ):
+                return getattr(self, "_thinking_probe_val", "")
+
+            now_wall = time.time()
+            cached_info = getattr(self, "_thinking_file_cache", None)
+            if cached_info and cached_info[0] == cache_key:
+                cpath = cached_info[1]
+                if os.path.exists(cpath) and (now_wall - os.path.getmtime(cpath) < 400):
+                    th = _extract_thinking_from_jsonl(cpath)
+                    self._thinking_probe_key = cache_key
+                    self._thinking_probe_at = now_mono
+                    self._thinking_probe_val = th
+                    if th or (now_mono - getattr(self, "_thinking_scan_at", 0.0)) < 15.0:
+                        return th
+
             proj_workspace = self.session_manager.get_workspace_dir(active_sess.id)
             cli_id = getattr(self, "_active_cli_conv_id", None) or active_sess.detect_and_store_cli_session_id(proj_workspace, active_sess.cli)
+            self._thinking_scan_at = now_mono
 
-            # 1. Antigravity CLI transcript (cross-platform discovery)
+            # 1. Antigravity CLI transcript (cross-platform discovery, tail read only)
+            candidate_files = []
             candidate_brain_dirs = []
             if cli_id:
                 for parent_dir in paths.get_candidate_cli_dirs("agy"):
@@ -1775,63 +1846,71 @@ class AgentDock(QDockWidget):
 
             for parent_dir in paths.get_candidate_cli_dirs("agy"):
                 b_parent = os.path.join(parent_dir, "brain")
-                if os.path.exists(b_parent):
-                    subdirs = sorted(
-                        [os.path.join(b_parent, d) for d in os.listdir(b_parent) if os.path.isdir(os.path.join(b_parent, d))],
-                        key=os.path.getmtime,
-                        reverse=True
-                    )
+                if os.path.isdir(b_parent):
+                    try:
+                        subdirs = sorted(
+                            [e.path for e in os.scandir(b_parent) if e.is_dir()],
+                            key=lambda p: os.path.getmtime(p),
+                            reverse=True,
+                        )
+                    except OSError:
+                        subdirs = []
                     for sd in subdirs[:4]:
                         if sd not in candidate_brain_dirs:
                             candidate_brain_dirs.append(sd)
 
             for b_dir in candidate_brain_dirs:
-                for tname in ["transcript.jsonl", "transcript_full.jsonl"]:
-                    p = os.path.join(b_dir, ".system_generated", "logs", tname)
-                    if os.path.exists(p) and (time.time() - os.path.getmtime(p) < 400):
-                        with open(p, "r", encoding="utf-8") as f:
-                            lines = f.readlines()
-                        for line in reversed(lines[-40:]):
-                            try:
-                                d = json.loads(line)
-                                th = d.get("thinking")
-                                if th and isinstance(th, str) and th.strip():
-                                    return th.strip()
-                            except Exception:
-                                pass
+                for tname in ("transcript.jsonl", "transcript_full.jsonl"):
+                    tp = os.path.join(b_dir, ".system_generated", "logs", tname)
+                    if os.path.exists(tp) and (now_wall - os.path.getmtime(tp) < 400):
+                        candidate_files.append(tp)
 
-            # 2. Claude Code projects transcript (cross-platform encoded slugs)
+            # 2. Claude Code projects transcript (bounded scandir instead of recursive glob)
             slugs = paths.get_workspace_project_slugs(proj_workspace)
-            candidate_claude_files = []
+            claude_dirs_to_scan = []
             for cdir in paths.get_candidate_cli_dirs("claude"):
                 proj_base = os.path.join(cdir, "projects")
-                if os.path.exists(proj_base):
-                    for slug in slugs:
-                        sp = os.path.join(proj_base, slug)
-                        if os.path.exists(sp):
-                            import glob
-                            candidate_claude_files.extend(glob.glob(os.path.join(sp, "*.jsonl")))
-                    import glob
-                    candidate_claude_files.extend(glob.glob(os.path.join(proj_base, "**", "*.jsonl"), recursive=True))
+                if not os.path.isdir(proj_base):
+                    continue
+                for slug in slugs:
+                    sp = os.path.join(proj_base, slug)
+                    if os.path.isdir(sp):
+                        claude_dirs_to_scan.append(sp)
+                try:
+                    recent_dirs = sorted(
+                        [e.path for e in os.scandir(proj_base) if e.is_dir()],
+                        key=lambda p: os.path.getmtime(p),
+                        reverse=True,
+                    )
+                    for rd in recent_dirs[:6]:
+                        if rd not in claude_dirs_to_scan:
+                            claude_dirs_to_scan.append(rd)
+                except OSError:
+                    pass
 
-            files = sorted(set(candidate_claude_files), key=os.path.getmtime, reverse=True)
-            for fpath in files[:6]:
-                if time.time() - os.path.getmtime(fpath) < 400:
-                    with open(fpath, "r", encoding="utf-8") as f:
-                        lines = f.readlines()
-                    for line in reversed(lines[-50:]):
-                        try:
-                            d = json.loads(line)
-                            msg = d.get("message", {})
-                            cnt = msg.get("content")
-                            if isinstance(cnt, list):
-                                for b in cnt:
-                                    if isinstance(b, dict) and b.get("type") == "thinking":
-                                        th = b.get("thinking")
-                                        if th and th.strip():
-                                            return th.strip()
-                        except Exception:
-                            pass
+            for sp in claude_dirs_to_scan:
+                try:
+                    for entry in os.scandir(sp):
+                        if entry.is_file() and entry.name.endswith(".jsonl"):
+                            if now_wall - entry.stat().st_mtime < 400:
+                                candidate_files.append(entry.path)
+                except OSError:
+                    pass
+
+            candidate_files = sorted(set(candidate_files), key=os.path.getmtime, reverse=True)
+            result = ""
+            for fpath in candidate_files[:6]:
+                th = _extract_thinking_from_jsonl(fpath)
+                if th:
+                    self._thinking_file_cache = (cache_key, fpath)
+                    result = th
+                    break
+                if not result:
+                    self._thinking_file_cache = (cache_key, fpath)
+            self._thinking_probe_key = cache_key
+            self._thinking_probe_at = now_mono
+            self._thinking_probe_val = result
+            return result
         except Exception:
             pass
         return ""
@@ -2285,7 +2364,7 @@ class AgentDock(QDockWidget):
             success=True,
             html_card=full_node_html
         )
-        self.session_manager.save_project_sessions()
+        self.session_manager.save_project_sessions(autosave_qgz=False)
 
         # Force Qt GUI update
         from qgis.PyQt.QtWidgets import QApplication
@@ -2332,7 +2411,7 @@ class AgentDock(QDockWidget):
             success=False,
             html_card=full_node_html
         )
-        self.session_manager.save_project_sessions()
+        self.session_manager.save_project_sessions(autosave_qgz=False)
 
         # Force Qt GUI update
         from qgis.PyQt.QtWidgets import QApplication

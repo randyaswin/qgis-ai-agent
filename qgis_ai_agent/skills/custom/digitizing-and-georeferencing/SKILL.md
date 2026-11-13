@@ -53,15 +53,15 @@ Terdapat 2 skenario utama dalam penentuan GCP:
 ---
 
 ### 1.3 Transformation Method: Helmert vs Affine vs Polynomial vs TPS
-- **Helmert (Similarity):** 4 DOF ($X, Y$, rotasi, skala seragam). Menjaga bentuk asli dan aspek rasio tetap 1:1. Sangat disarankan saat georeferensi berbasis objek jika tidak ingin citra tertarik gepeng.
+- **Helmert (Similarity):** 4 DOF ($X, Y$, rotasi, skala seragam). Menjaga bentuk asli dan aspek rasio tetap 1:1. Sangat disarankan saat georeferensi berbasis objek jika tidak ingin citra tertarik gepeng (`transform="helmert"`, mendukung mulai dari 2+ GCP).
 - **Affine (Polynomial 1):** 6 DOF. Mengizinkan skala independen X/Y dan kemiringan (*shear*). Sangat baik untuk peta orthogonal atau jika ada sedikit perbedaan skala antar sumbu.
 - **Polynomial 2 / Thin Plate Spline (TPS):** Gunakan TPS hanya jika citra mengalami distorsi lokal nyata (misalnya foto udara miring atau peta kertas kusut), dan pastikan titik pembanding tersebar rapat di seluruh area.
 
-### 1.3 Residual Error & Root Mean Square Error (RMSE)
+### 1.4 Residual Error & Root Mean Square Error (RMSE)
 For each GCP, the residual error represents the distance between its true map position and its transformed position:
 $$\text{Residual}_i = \sqrt{(X_{\text{true}} - X_{\text{calc}})^2 + (Y_{\text{true}} - Y_{\text{calc}})^2}$$
 $$\text{RMSE} = \sqrt{\frac{1}{N} \sum_{i=1}^N \text{Residual}_i^2}$$
-- **Quality Target:** For high-precision mapping, target an $\text{RMSE} < 1.0$ pixel. If RMSE is high, sort GCPs by residual descending and remove or recalibrate blunder points.
+- **Quality Target:** For high-precision mapping, target an $\text{RMSE} < 1.0$ pixel. `georeference_raster` automatically computes and returns `rmse_map_units`, `rmse_pixels`, and `gcp_residuals` for every GCP. If RMSE is high, inspect the highest-error `gcp_residuals` entries and recalibrate or remove blunder points.
 
 ---
 
@@ -82,7 +82,7 @@ georeference_raster(
         [3840, 4180, 138.6515, 35.1845]
     ],
     crs="EPSG:4326",
-    transform="polynomial1",   # 'polynomial1' (Affine) | 'polynomial2' | 'tps'
+    transform="helmert",       # 'helmert' (2+ GCPs) | 'polynomial1' (Affine, 3+) | 'polynomial2' | 'tps'
     resample="bilinear",
     load_to_canvas=True
 )
@@ -188,7 +188,9 @@ digitize_features(
             }
         }
     ],
-    auto_fix_geometry=True
+    auto_fix_geometry=True,
+    avoid_overlap=True,      # Klip otomatis terhadap poligon yang sudah ada (bebas tumpang tindih)
+    snap_tolerance=0.0       # Isi toleransi jarak (satuan CRS) agar vertex menempel presisi
 )
 ```
 
@@ -237,7 +239,9 @@ digitize_features(
             }
         }
     ],
-    auto_fix_geometry=True
+    auto_fix_geometry=True,
+    avoid_overlap=True,      # Klip otomatis terhadap poligon yang sudah ada (bebas tumpang tindih)
+    snap_tolerance=0.0       # Isi toleransi jarak (satuan CRS) agar vertex menempel presisi
 )
 ```
 
@@ -291,7 +295,7 @@ run_processing("native:simplifygeometries", {
 
 ---
 
-## 6. Geometry Validation & Quality Checklist
+## 8. Geometry Validation & Quality Checklist
 
 Before finalizing any digitized dataset:
 1. **Geometry Validity:** Run `native:fixgeometries` to resolve bowtie self-intersections, duplicate consecutive vertices, and unclosed polygon rings.

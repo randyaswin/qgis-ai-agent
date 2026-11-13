@@ -121,12 +121,13 @@ Call the dedicated tool `create_sampling_grid`:
 create_sampling_grid(
     layer_name="LULC_Grid_100m",
     extent_layer="orthomosaic_study_area",
-    cell_size=100.0,       # In layer CRS units (e.g. 100 meters in UTM)
+    cell_size=100.0,       # In layer CRS units (e.g. 100 meters in UTM; auto-converts if geographic)
     grid_type="square",    # 'square' (Rectangle, default) or 'hexagon'
-    crs="EPSG:32748"       # Use projected CRS for metric spacing
+    crs="EPSG:32748",      # Use projected CRS for metric spacing
+    show_labels=True       # Renders centered grid_id labels for visual inspection
 )
 ```
-*Result:* Automatically generates polygon cells with `grid_id`, `class`, `confidence`, and `notes` fields, styled with a clean transparent fill so the imagery beneath remains fully visible.
+*Result:* Automatically generates polygon cells with `grid_id`, `class`, `confidence`, and `notes` fields, labeled by `grid_id` with a clean transparent fill so the imagery beneath remains fully visible.
 
 ### Step 3: Capture Canvas Snapshot for Visual Inspection
 Zoom to the evaluation extent and snapshot the canvas:
@@ -149,7 +150,7 @@ label_grid_cells(
         {"grid_id": 5, "class": "Agriculture", "confidence": 0.91, "notes": "Geometric crop parcel"},
         {"grid_id": 6, "class": "Bare Soil", "confidence": 0.85, "notes": "Cleared ground"}
     ],
-    auto_style=True  # Automatically applies categorized colors
+    auto_style=True  # Automatically applies semi-transparent (0.68) semantic LULC palette
 )
 ```
 
@@ -166,7 +167,7 @@ calculate_field(
 
 ---
 
-## 4. Workflow B: Spectral Zonal Statistics & Thresholding
+## 5. Workflow B: Spectral Zonal Statistics & Thresholding
 
 For multispectral imagery (e.g. Sentinel-2 bands or 4-band drone multispectral):
 
@@ -220,7 +221,7 @@ style_categorized(layer="Grid_with_NDVI", field="class", ramp="Viridis")
 
 ---
 
-## 5. Standard LULC Palette Mapping
+## 6. Standard LULC Palette Mapping
 
 When styling classified grid polygons, adhere to international cartographic standards:
 
@@ -237,7 +238,7 @@ When styling classified grid polygons, adhere to international cartographic stan
 
 ---
 
-## 6. Layout Presentation for Grid Classification
+## 7. Layout Presentation for Grid Classification
 
 Present the final classified grid using the dedicated layout tools:
 

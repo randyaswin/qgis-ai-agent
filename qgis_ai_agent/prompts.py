@@ -2,11 +2,25 @@
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+_AGENT_MD_CACHE = {"path": None, "mtime": None, "text": None}
 
 
 def system_prompt(qgis_version, output_dir, mode):
-    with open(os.path.join(HERE, "AGENT.md"), encoding="utf-8") as f:
-        text = f.read()
+    path = os.path.join(HERE, "AGENT.md")
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = None
+    if (
+        _AGENT_MD_CACHE["text"] is None
+        or _AGENT_MD_CACHE["path"] != path
+        or _AGENT_MD_CACHE["mtime"] != mtime
+    ):
+        with open(path, encoding="utf-8") as f:
+            _AGENT_MD_CACHE["text"] = f.read()
+        _AGENT_MD_CACHE["path"] = path
+        _AGENT_MD_CACHE["mtime"] = mtime
+    text = _AGENT_MD_CACHE["text"]
     return text.replace("{qgis_version}", str(qgis_version)).replace("{output_dir}", output_dir).replace("{skill_mode}", mode)
 
 

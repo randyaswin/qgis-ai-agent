@@ -150,6 +150,7 @@ class SkillsDialog(QDialog):
             REGISTRY.disabled.add(name)
             if name in REGISTRY.pinned:
                 REGISTRY.pinned.remove(name)
+        REGISTRY.save_settings()
         self._refresh_list()
 
     def _delete_user_skill(self):

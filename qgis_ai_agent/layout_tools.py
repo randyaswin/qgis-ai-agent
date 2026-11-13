@@ -15,7 +15,7 @@ from qgis.core import (
     Qgis, QgsProject, QgsPrintLayout, QgsLayoutItemPage, QgsLayoutItemMap, QgsLayoutItemLabel,
     QgsLayoutItemLegend, QgsLayoutItemScaleBar, QgsLayoutItemPicture, QgsLayoutItemShape,
     QgsLayoutPoint, QgsLayoutSize, QgsLayoutMeasurement, QgsLayoutItemMapOverview, QgsLayoutItemMapGrid,
-    QgsTextFormat, QgsTextBufferSettings, QgsTextBackgroundSettings, QgsFillSymbol, QgsMarkerSymbol,
+    QgsTextFormat, QgsTextBufferSettings, QgsTextBackgroundSettings, QgsFillSymbol, QgsLineSymbol, QgsMarkerSymbol,
     QgsSimpleMarkerSymbolLayer, QgsSvgMarkerSymbolLayer, QgsVectorLayer, QgsFeature, QgsGeometry,
     QgsPointXY, QgsField, QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsRectangle,
     QgsSingleSymbolRenderer, QgsPalLayerSettings, QgsVectorLayerSimpleLabeling, QgsLegendStyle,

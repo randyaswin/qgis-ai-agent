@@ -7,16 +7,20 @@ labels, processing, expressions, print layout, export, canvas snapshot.
 """
 import base64
 import contextlib
+import glob
 import html
 import io
+import logging
+import math
 import os
+import random
 import tempfile
 import time
 import traceback
 from . import paths
 
-from qgis.PyQt.QtCore import QSize, QBuffer, QIODevice
-from qgis.PyQt.QtGui import QColor, QFont
+from qgis.PyQt.QtCore import QSize, QBuffer, QIODevice, Qt
+from qgis.PyQt.QtGui import QColor, QFont, QImage
 from qgis.core import (
     Qgis, QgsProject, QgsVectorLayer, QgsRasterLayer, QgsCoordinateReferenceSystem,
     QgsRectangle, QgsCoordinateTransform, QgsMapSettings, QgsMapRendererParallelJob,
@@ -30,7 +34,7 @@ from qgis.core import (
     QgsLayoutItemScaleBar, QgsLayoutItemPicture, QgsLayoutPoint, QgsLayoutSize,
     QgsLayoutMeasurement, QgsUnitTypes, QgsLayoutItemPage, QgsLayoutExporter,
     QgsSingleBandPseudoColorRenderer, QgsColorRampShader, QgsRasterShader, QgsRasterBandStats, QgsWkbTypes,
-    QgsGeometry, QgsPointXY, QgsFeature,
+    QgsGeometry, QgsPointXY, QgsFeature, QgsMessageLog,
 )
 from qgis.PyQt.QtCore import QMetaType
 
@@ -41,6 +45,31 @@ if hasattr(QgsCategorizedSymbolRenderer, "setSourceSymbol") and not hasattr(QgsC
 if hasattr(QgsGraduatedSymbolRenderer, "setSourceSymbol") and not hasattr(QgsGraduatedSymbolRenderer, "setSymbol"):
     QgsGraduatedSymbolRenderer.setSymbol = lambda self, sym: self.setSourceSymbol(sym)
 
+_PY_LOGGER = logging.getLogger("qgis_ai_agent")
+
+
+class _PluginLogger:
+    """Thread-safe logger writing to both Python logging and QGIS Message Log."""
+
+    def _log(self, msg, level_py, level_qgis):
+        text = str(msg)
+        _PY_LOGGER.log(level_py, text)
+        try:
+            QgsMessageLog.logMessage(text, "AI Agent", level_qgis)
+        except Exception:
+            pass
+
+    def info(self, msg):
+        self._log(msg, logging.INFO, Qgis.MessageLevel.Info if hasattr(Qgis, "MessageLevel") else 0)
+
+    def warning(self, msg):
+        self._log(msg, logging.WARNING, Qgis.MessageLevel.Warning if hasattr(Qgis, "MessageLevel") else 1)
+
+    def error(self, msg):
+        self._log(msg, logging.ERROR, Qgis.MessageLevel.Critical if hasattr(Qgis, "MessageLevel") else 2)
+
+
+LOGGER = _PluginLogger()
 TOOLS = {}
 ALLOW_PYTHON = {"value": True}
 CANCEL_REQUESTED = False
@@ -68,14 +97,26 @@ def _iface():
 
 
 def _layer(ref):
+    if not ref or not str(ref).strip():
+        raise ValueError("Layer reference is empty. Call get_project_state for available layers.")
+    key = str(ref).strip()
     p = QgsProject.instance()
-    lyr = p.mapLayer(ref)
+    lyr = p.mapLayer(key)
     if lyr:
         return lyr
-    found = p.mapLayersByName(ref)
-    if not found:
-        raise ValueError(f"Layer not found: {ref!r}. Call get_project_state for names.")
-    return found[0]
+    found = p.mapLayersByName(key)
+    if found:
+        return found[0]
+    key_low = key.lower()
+    all_lyrs = list(p.mapLayers().values())
+    ci_matches = [l for l in all_lyrs if l.name().strip().lower() == key_low]
+    if ci_matches:
+        return ci_matches[0]
+    sub_matches = [l for l in all_lyrs if key_low in l.name().strip().lower()]
+    if len(sub_matches) == 1:
+        return sub_matches[0]
+    avail = [l.name() for l in all_lyrs]
+    raise ValueError(f"Layer not found: {ref!r}. Available layers: {avail}")
 
 
 def _ramp(name):
@@ -351,12 +392,82 @@ def add_raster_layer(path, name=None, provider="gdal"):
 
 
 # ---------------------------------------------------------------- digitizing & georeferencing
-@tool("Georeference an unreferenced raster image (scanned map, drone aerial photo, PNG/JPG/TIF) using Ground Control Points (GCPs). Warps the image to the specified CRS using GDAL and optionally adds it to the QGIS canvas.",
+def _solve_linear_3x3(A, b):
+    """Solve 3x3 linear system Ax = b via Gaussian elimination with partial pivoting."""
+    M = [[float(A[r][c]) for c in range(3)] + [float(b[r])] for r in range(3)]
+    for col in range(3):
+        piv = max(range(col, 3), key=lambda r: abs(M[r][col]))
+        if abs(M[piv][col]) < 1e-15:
+            return None
+        M[col], M[piv] = M[piv], M[col]
+        div = M[col][col]
+        for c in range(col, 4):
+            M[col][c] /= div
+        for r in range(3):
+            if r != col and M[r][col] != 0.0:
+                fac = M[r][col]
+                for c in range(col, 4):
+                    M[r][c] -= fac * M[col][c]
+    return [M[0][3], M[1][3], M[2][3]]
+
+
+def _fit_helmert(pts):
+    """Fit 4-DOF Helmert similarity transform: X = tx + a*x - b*y, Y = ty + b*x + a*y."""
+    n = len(pts)
+    mx = sum(p[0] for p in pts) / n
+    my = sum(p[1] for p in pts) / n
+    mX = sum(p[2] for p in pts) / n
+    mY = sum(p[3] for p in pts) / n
+    denom = sum((p[0] - mx) ** 2 + (p[1] - my) ** 2 for p in pts)
+    if denom < 1e-12:
+        raise ValueError("GCP pixel coordinates are collinear or identical; spread GCPs across the image.")
+    num_a = sum((p[0] - mx) * (p[2] - mX) + (p[1] - my) * (p[3] - mY) for p in pts)
+    num_b = sum((p[0] - mx) * (p[3] - mY) - (p[1] - my) * (p[2] - mX) for p in pts)
+    a = num_a / denom
+    b = num_b / denom
+    tx = mX - a * mx + b * my
+    ty = mY - b * mx - a * my
+    scale = math.hypot(a, b)
+    if scale < 1e-15:
+        raise ValueError("GCP map coordinates collapse to zero scale; verify target coordinates.")
+    return a, b, tx, ty, scale
+
+
+def _fit_affine_residuals(pts):
+    """Fit 6-DOF affine transform in centered coordinates for RMSE diagnostics."""
+    n = len(pts)
+    mx = sum(p[0] for p in pts) / n
+    my = sum(p[1] for p in pts) / n
+    mX = sum(p[2] for p in pts) / n
+    mY = sum(p[3] for p in pts) / n
+    A = [[0.0] * 3 for _ in range(3)]
+    bx = [0.0] * 3
+    by = [0.0] * 3
+    for px, py, X, Y in pts:
+        row = (1.0, px - mx, py - my)
+        for r in range(3):
+            for c in range(3):
+                A[r][c] += row[r] * row[c]
+            bx[r] += row[r] * (X - mX)
+            by[r] += row[r] * (Y - mY)
+    cx = _solve_linear_3x3(A, bx)
+    cy = _solve_linear_3x3(A, by)
+    if not cx or not cy:
+        return None
+    preds = []
+    for px, py, _, _ in pts:
+        u, v = px - mx, py - my
+        preds.append((mX + cx[0] + cx[1] * u + cx[2] * v, mY + cy[0] + cy[1] * u + cy[2] * v))
+    px_scale = max(math.hypot(cx[1], cx[2]), math.hypot(cy[1], cy[2]), 1e-15)
+    return preds, px_scale
+
+
+@tool("Georeference an unreferenced raster image (scanned map, drone aerial photo, PNG/JPG/TIF) using Ground Control Points (GCPs). Supports Helmert similarity (2+ GCPs), Polynomial 1-3, and TPS with per-GCP residual and RMSE diagnostics.",
       {"image_path": S("string", "absolute path to unreferenced raster image"),
        "gcps": S("array", "list of GCPs as [[pixel_x, pixel_y, map_x, map_y], ...] or [{'pixel_x':..., 'pixel_y':..., 'map_x':..., 'map_y':...}]"),
        "output_path": S("string", "output GeoTIFF path (defaults to same folder with _georef.tif)"),
        "crs": S("string", "target CRS, default 'EPSG:4326'"),
-       "transform": S("string", "'polynomial1' (Affine, 3+ GCPs, default) | 'polynomial2' (6+ GCPs) | 'polynomial3' (10+ GCPs) | 'tps' (Thin Plate Spline, 4+ GCPs)"),
+       "transform": S("string", "'helmert' (4-DOF similarity, 2+ GCPs) | 'polynomial1' (Affine, 3+ GCPs, default) | 'polynomial2' (6+ GCPs) | 'polynomial3' (10+ GCPs) | 'tps' (Thin Plate Spline, 4+ GCPs)"),
        "resample": S("string", "'bilinear' (default) | 'nearest' | 'cubic' | 'cubicspline'"),
        "load_to_canvas": S("boolean", "automatically add resulting layer to QGIS project (default true)")})
 def georeference_raster(image_path, gcps, output_path=None, crs="EPSG:4326", transform="polynomial1", resample="bilinear", load_to_canvas=True):
@@ -364,24 +475,93 @@ def georeference_raster(image_path, gcps, output_path=None, crs="EPSG:4326", tra
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Input image not found: {image_path}")
 
-    min_gcps = {"polynomial1": 3, "affine": 3, "polynomial2": 6, "polynomial3": 10, "tps": 4, "helmert": 2}
-    req = min_gcps.get(transform.lower(), 3)
+    t_low = (transform or "polynomial1").lower().strip()
+    min_gcps = {"helmert": 2, "polynomial1": 3, "affine": 3, "projective": 4, "polynomial2": 6, "polynomial3": 10, "tps": 4}
+    req = min_gcps.get(t_low, 3)
     if len(gcps) < req:
         raise ValueError(f"Transformation '{transform}' requires at least {req} GCPs, but {len(gcps)} provided.")
 
-    gdal_gcps = []
-    for item in gcps:
-        if isinstance(item, dict):
-            px, py = float(item["pixel_x"]), float(item["pixel_y"])
-            mx, my = float(item["map_x"]), float(item["map_y"])
+    parsed_gcps = []
+    for idx, item in enumerate(gcps):
+        try:
+            if isinstance(item, dict):
+                px, py = float(item["pixel_x"]), float(item["pixel_y"])
+                mx, my = float(item["map_x"]), float(item["map_y"])
+            else:
+                px, py, mx, my = float(item[0]), float(item[1]), float(item[2]), float(item[3])
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid GCP at index {idx}: {item!r} ({exc})")
+        parsed_gcps.append((px, py, mx, my))
+
+    # Compute Helmert baseline (provides true similarity transform AND pixel scale for RMSE diagnostics)
+    a, b, tx, ty, helmert_scale = _fit_helmert(parsed_gcps)
+    helmert_preds = [(tx + a * px - b * py, ty + b * px + a * py) for px, py, _, _ in parsed_gcps]
+
+    preds = helmert_preds
+    px_scale = helmert_scale
+    transform_note = None
+    if t_low in ("polynomial1", "affine", "projective") and len(parsed_gcps) >= 3:
+        aff = _fit_affine_residuals(parsed_gcps)
+        if aff:
+            preds, px_scale = aff
+    elif t_low in ("polynomial2", "polynomial3", "tps"):
+        transform_note = f"Residuals/RMSE computed against linear baseline for '{transform}'."
+
+    residuals = []
+    sq_map = 0.0
+    sq_px = 0.0
+    for idx, ((px, py, mx, my), (pred_x, pred_y)) in enumerate(zip(parsed_gcps, preds)):
+        dx = pred_x - mx
+        dy = pred_y - my
+        err_map = math.hypot(dx, dy)
+        err_px = err_map / px_scale
+        sq_map += err_map ** 2
+        sq_px += err_px ** 2
+        residuals.append({
+            "gcp_index": idx,
+            "dx_map": round(dx, 6),
+            "dy_map": round(dy, 6),
+            "error_map": round(err_map, 6),
+            "error_pixels": round(err_px, 3),
+        })
+    rmse_map = math.sqrt(sq_map / len(parsed_gcps))
+    rmse_px = math.sqrt(sq_px / len(parsed_gcps))
+
+    # Prepare GDAL GCPs (for true 4-DOF Helmert, synthesize exact corner GCPs so GDAL applies zero shear/skew)
+    if t_low == "helmert":
+        src_ds = gdal.Open(image_path)
+        src_w = src_ds.RasterXSize if src_ds else 1000
+        src_h = src_ds.RasterYSize if src_ds else 1000
+        src_ds = None
+        corners = [(0.0, 0.0), (float(src_w), 0.0), (0.0, float(src_h)), (float(src_w), float(src_h))]
+        gdal_gcps = [
+            gdal.GCP(tx + a * cx - b * cy, ty + b * cx + a * cy, 0.0, cx, cy)
+            for cx, cy in corners
+        ]
+        poly_order = 1
+        use_tps = False
+    else:
+        gdal_gcps = [gdal.GCP(mx, my, 0.0, px, py) for px, py, mx, my in parsed_gcps]
+        poly_order = None
+        use_tps = False
+        if t_low in ("polynomial1", "affine"):
+            poly_order = 1
+        elif t_low == "projective":
+            poly_order = 1
+            transform_note = "GDAL Warp applied degree-1 affine approximation for 'projective'."
+        elif t_low == "polynomial2":
+            poly_order = 2
+        elif t_low == "polynomial3":
+            poly_order = 3
+        elif t_low == "tps":
+            use_tps = True
         else:
-            px, py, mx, my = float(item[0]), float(item[1]), float(item[2]), float(item[3])
-        gdal_gcps.append(gdal.GCP(mx, my, 0, px, py))
+            poly_order = 1
 
     srs = osr.SpatialReference()
     srs.SetFromUserInput(crs)
 
-    vrt_path = f"/vsimem/gcp_warp_{os.getpid()}_{len(gcps)}.vrt"
+    vrt_path = f"/vsimem/gcp_warp_{os.getpid()}_{len(parsed_gcps)}.vrt"
     temp_ds = gdal.Translate(vrt_path, image_path, GCPs=gdal_gcps, outputSRS=srs)
     if not temp_ds:
         raise RuntimeError("Failed to attach GCPs to image.")
@@ -392,19 +572,7 @@ def georeference_raster(image_path, gcps, output_path=None, crs="EPSG:4326", tra
         "cubic": gdal.GRA_Cubic,
         "cubicspline": gdal.GRA_CubicSpline,
     }
-    alg = resample_map.get(resample.lower(), gdal.GRA_Bilinear)
-
-    poly_order = None
-    use_tps = False
-    t_low = transform.lower()
-    if t_low in ("polynomial1", "affine"):
-        poly_order = 1
-    elif t_low == "polynomial2":
-        poly_order = 2
-    elif t_low == "polynomial3":
-        poly_order = 3
-    elif t_low == "tps":
-        use_tps = True
+    alg = resample_map.get((resample or "bilinear").lower(), gdal.GRA_Bilinear)
 
     warp_options = gdal.WarpOptions(
         format="GTiff",
@@ -434,40 +602,66 @@ def georeference_raster(image_path, gcps, output_path=None, crs="EPSG:4326", tra
     if load_to_canvas:
         layer_info = add_raster_layer(output_path, name=os.path.splitext(os.path.basename(output_path))[0])
 
-    return {
+    out = {
         "output_path": output_path,
         "crs": crs,
         "transform": transform,
         "extent": [gt[0], gt[3] + gt[5] * height, gt[0] + gt[1] * width, gt[3]],
         "resolution": [abs(gt[1]), abs(gt[5])],
-        "gcp_count": len(gcps),
+        "gcp_count": len(parsed_gcps),
+        "rmse_map_units": round(rmse_map, 6),
+        "rmse_pixels": round(rmse_px, 3),
+        "gcp_residuals": residuals,
         "layer": layer_info
     }
+    if transform_note:
+        out["transform_note"] = transform_note
+    if rmse_px > 2.0 and t_low != "tps":
+        out["quality_warning"] = f"RMSE ({rmse_px:.2f} px) exceeds 2.0 px. Inspect worst gcp_residuals or switch transform."
+    return out
 
 
 @tool("Create a new empty vector layer (GeoPackage, Shapefile, or memory scratch) with specified geometry type, CRS, and attribute fields.",
       {"layer_name": S("string", "name for the new layer"),
        "geometry_type": S("string", "'Point' | 'LineString' | 'Polygon' | 'MultiPoint' | 'MultiLineString' | 'MultiPolygon' (default 'Polygon')"),
        "crs": S("string", "layer CRS, default 'EPSG:4326'"),
-       "fields": S("array", "field definitions e.g. [{'name': 'id', 'type': 'integer'}, {'name': 'name', 'type': 'string'}, {'name': 'area_m2', 'type': 'double'}]"),
-       "output_path": S("string", "optional path to save as .gpkg or .shp (creates memory scratch layer if omitted)"),
+       "fields": S("array", "field definitions e.g. [{'name': 'id', 'type': 'integer'}, {'name': 'name', 'type': 'string'}, {'name': 'area_m2', 'type': 'double'}, {'name': 'active', 'type': 'boolean'}]"),
+       "output_path": S("string", "optional path to save as .gpkg, .shp, or .geojson (creates memory scratch layer if omitted)"),
        "load_to_canvas": S("boolean", "add layer to active QGIS project (default true)")})
 def create_vector_layer(layer_name, geometry_type="Polygon", crs="EPSG:4326", fields=None, output_path=None, load_to_canvas=True):
-    from qgis.PyQt.QtCore import QVariant
     geom_str = geometry_type.strip()
     c_auth = crs or "EPSG:4326"
 
     if output_path:
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         ext = os.path.splitext(output_path)[1].lower()
-        driver = "GPKG" if ext in (".gpkg", ".geopackage") else "ESRI Shapefile"
+        if ext in (".gpkg", ".geopackage"):
+            driver = "GPKG"
+        elif ext in (".geojson", ".json"):
+            driver = "GeoJSON"
+        else:
+            driver = "ESRI Shapefile"
+
         from osgeo import ogr, osr
         srs = osr.SpatialReference()
         srs.SetFromUserInput(c_auth)
         ogr_drv = ogr.GetDriverByName(driver)
-        if os.path.exists(output_path) and driver == "GPKG":
-            ds = ogr_drv.Open(output_path, 1)
+        if driver == "GPKG" and os.path.exists(output_path):
+            ds = ogr.Open(output_path, 1)
+            if ds is None:
+                ds = ogr_drv.CreateDataSource(output_path)
+            create_opts = ["OVERWRITE=YES"]
         else:
+            if os.path.exists(output_path):
+                try:
+                    ogr_drv.DeleteDataSource(output_path)
+                except Exception:
+                    os.remove(output_path)
             ds = ogr_drv.CreateDataSource(output_path)
+            create_opts = []
+
+        if ds is None:
+            raise RuntimeError(f"Could not open/create OGR datasource at {output_path}")
 
         wkb_map = {
             "point": ogr.wkbPoint,
@@ -478,27 +672,43 @@ def create_vector_layer(layer_name, geometry_type="Polygon", crs="EPSG:4326", fi
             "multipolygon": ogr.wkbMultiPolygon
         }
         wkb = wkb_map.get(geom_str.lower(), ogr.wkbPolygon)
-        ogr_layer = ds.CreateLayer(layer_name, srs, wkb)
+        ogr_layer = ds.CreateLayer(layer_name, srs, wkb, options=create_opts) if create_opts else ds.CreateLayer(layer_name, srs, wkb)
+        if ogr_layer is None:
+            raise RuntimeError(f"Failed to create OGR layer '{layer_name}' in {output_path}")
+
+        ogr_type_map = {
+            "int": ogr.OFTInteger, "integer": ogr.OFTInteger,
+            "int64": ogr.OFTInteger64, "long": ogr.OFTInteger64,
+            "double": ogr.OFTReal, "float": ogr.OFTReal, "real": ogr.OFTReal,
+            "string": ogr.OFTString, "str": ogr.OFTString, "text": ogr.OFTString,
+            "bool": getattr(ogr, "OFTBoolean", ogr.OFTInteger), "boolean": getattr(ogr, "OFTBoolean", ogr.OFTInteger),
+            "date": ogr.OFTDate, "datetime": ogr.OFTDateTime,
+        }
         if fields:
             for f in fields:
                 f_name = f.get("name", "field")
-                f_type = f.get("type", "string").lower()
-                ogr_type = ogr.OFTInteger if f_type in ("int", "integer") else (ogr.OFTReal if f_type in ("double", "float", "real") else ogr.OFTString)
-                ogr_layer.CreateField(ogr.FieldDefn(f_name, ogr_type))
+                f_type = str(f.get("type", "string")).lower()
+                ogr_layer.CreateField(ogr.FieldDefn(f_name, ogr_type_map.get(f_type, ogr.OFTString)))
         ds.FlushCache()
         ds = None
 
-        lyr = QgsVectorLayer(output_path, layer_name, "ogr")
+        uri = f"{output_path}|layername={layer_name}" if driver == "GPKG" else output_path
+        lyr = QgsVectorLayer(uri, layer_name, "ogr")
+        if not lyr.isValid() and driver == "GPKG":
+            lyr = QgsVectorLayer(output_path, layer_name, "ogr")
     else:
         uri = f"{geom_str}?crs={c_auth}"
         lyr = QgsVectorLayer(uri, layer_name, "memory")
         if fields:
             type_map = {
                 "int": QMetaType.Type.Int, "integer": QMetaType.Type.Int,
+                "int64": QMetaType.Type.LongLong, "long": QMetaType.Type.LongLong,
                 "double": QMetaType.Type.Double, "float": QMetaType.Type.Double, "real": QMetaType.Type.Double,
-                "string": QMetaType.Type.QString, "text": QMetaType.Type.QString
+                "string": QMetaType.Type.QString, "str": QMetaType.Type.QString, "text": QMetaType.Type.QString,
+                "bool": QMetaType.Type.Bool, "boolean": QMetaType.Type.Bool,
+                "date": QMetaType.Type.QDate, "datetime": QMetaType.Type.QDateTime,
             }
-            qfields = [QgsField(f.get("name", "f"), type_map.get(f.get("type", "string").lower(), QMetaType.Type.QString)) for f in fields]
+            qfields = [QgsField(f.get("name", "f"), type_map.get(str(f.get("type", "string")).lower(), QMetaType.Type.QString)) for f in fields]
             lyr.dataProvider().addAttributes(qfields)
             lyr.updateFields()
 
@@ -511,22 +721,60 @@ def create_vector_layer(layer_name, geometry_type="Polygon", crs="EPSG:4326", fi
     return _layer_info(lyr)
 
 
-@tool("Add digitized vector features (points, lines, or polygons) to an existing vector layer with automatic geometry validation and attribute assignment.",
+def _snap_geometry_to_candidates(geom, candidates, tol):
+    """Snap each vertex of geom to nearest vertex/segment of candidate geometries within tol."""
+    if not candidates or tol <= 0.0:
+        return geom
+    out = QgsGeometry(geom)
+    idx = 0
+    while True:
+        v = out.vertexAt(idx)
+        if v.isEmpty():
+            break
+        pt = QgsPointXY(v.x(), v.y())
+        pt_geom = QgsGeometry.fromPointXY(pt)
+        best_pt = None
+        best_dist = float(tol)
+        for cand in candidates:
+            if not cand or cand.isEmpty():
+                continue
+            near = cand.nearestPoint(pt_geom)
+            if near and not near.isEmpty():
+                np_pt = near.asPoint()
+                d = pt.distance(np_pt)
+                if d <= best_dist:
+                    best_dist = d
+                    best_pt = np_pt
+        if best_pt is not None and best_dist > 0.0:
+            out.moveVertex(best_pt.x(), best_pt.y(), idx)
+        idx += 1
+    return out
+
+
+@tool("Add digitized vector features (points, lines, or polygons) to an existing vector layer with automatic geometry validation, snapping, topological overlap avoidance, and attribute assignment.",
       {"layer": S("string", "target layer name or id"),
        "features": S("array", "list of feature objects: [{'geometry': coordinates or WKT or GeoJSON geometry, 'attributes': {'field': val, ...}}, ...]"),
-       "auto_fix_geometry": S("boolean", "automatically repair self-intersections or unclosed rings using makeValid (default true)")})
-def digitize_features(layer, features, auto_fix_geometry=True):
+       "auto_fix_geometry": S("boolean", "automatically repair self-intersections or unclosed rings using makeValid (default true)"),
+       "avoid_overlap": S("boolean", "clip new polygons against existing polygons in the layer so adjacent zones share clean borders with zero overlap (default false)"),
+       "snap_tolerance": S("number", "snap incoming vertices to existing layer features within this tolerance in layer CRS units (default 0, disabled)")})
+def digitize_features(layer, features, auto_fix_geometry=True, avoid_overlap=False, snap_tolerance=0.0):
     import json as _json
     lyr = _layer(layer)
     if not isinstance(lyr, QgsVectorLayer):
         raise ValueError(f"Layer '{layer}' is not a vector layer.")
 
-    if not lyr.isEditable():
+    was_editable = lyr.isEditable()
+    if not was_editable:
         lyr.startEditing()
 
     fields = lyr.fields()
     added_count = 0
+    added_feats = []
+    batch_geoms = []
     errors = []
+    snap_tol = float(snap_tolerance or 0.0)
+    need_multi = QgsWkbTypes.isMultiType(lyr.wkbType())
+    layer_geom_type = QgsWkbTypes.geometryType(lyr.wkbType())
 
     for idx, f_item in enumerate(features):
         geom_raw = f_item.get("geometry")
@@ -535,23 +783,23 @@ def digitize_features(layer, features, auto_fix_geometry=True):
 
         if isinstance(geom_raw, str):
             g_str = geom_raw.strip()
-            if g_str.startswith("{"):
-                geom = QgsGeometry.fromGeoJson(g_str)
-            else:
-                geom = QgsGeometry.fromWkt(g_str)
+            geom = QgsGeometry.fromGeoJson(g_str) if g_str.startswith("{") else QgsGeometry.fromWkt(g_str)
         elif isinstance(geom_raw, dict):
             geom = QgsGeometry.fromGeoJson(_json.dumps(geom_raw))
         elif isinstance(geom_raw, list):
-            wkb = lyr.wkbType()
-            base_type = QgsWkbTypes.geometryType(wkb)
-            if base_type == Qgis.GeometryType.Point:
+            if layer_geom_type == Qgis.GeometryType.Point:
                 geom = QgsGeometry.fromPointXY(QgsPointXY(float(geom_raw[0]), float(geom_raw[1])))
-            elif base_type == Qgis.GeometryType.Line:
+            elif layer_geom_type == Qgis.GeometryType.Line:
                 pts = [QgsPointXY(float(pt[0]), float(pt[1])) for pt in geom_raw]
                 geom = QgsGeometry.fromPolylineXY(pts)
-            elif base_type == Qgis.GeometryType.Polygon:
+            elif layer_geom_type == Qgis.GeometryType.Polygon:
                 if len(geom_raw) > 0 and isinstance(geom_raw[0], list) and len(geom_raw[0]) > 0 and isinstance(geom_raw[0][0], list):
-                    rings = [[QgsPointXY(float(p[0]), float(p[1])) for p in ring] for ring in geom_raw]
+                    rings = []
+                    for r_in in geom_raw:
+                        ring = [QgsPointXY(float(p[0]), float(p[1])) for p in r_in]
+                        if ring and (ring[0].x() != ring[-1].x() or ring[0].y() != ring[-1].y()):
+                            ring.append(ring[0])
+                        rings.append(ring)
                     geom = QgsGeometry.fromPolygonXY(rings)
                 else:
                     ring = [QgsPointXY(float(p[0]), float(p[1])) for p in geom_raw]
@@ -568,6 +816,31 @@ def digitize_features(layer, features, auto_fix_geometry=True):
             if fixed and not fixed.isEmpty():
                 geom = fixed
 
+        if snap_tol > 0.0:
+            search_rect = geom.boundingBox()
+            search_rect.grow(snap_tol)
+            cands = [ef.geometry() for ef in lyr.getFeatures(QgsFeatureRequest().setFilterRect(search_rect)) if ef.hasGeometry()]
+            cands.extend(g for g in batch_geoms if g.boundingBox().intersects(search_rect))
+            geom = _snap_geometry_to_candidates(geom, cands, snap_tol)
+
+        if avoid_overlap and layer_geom_type == Qgis.GeometryType.Polygon:
+            search_rect = geom.boundingBox()
+            existing = [ef.geometry() for ef in lyr.getFeatures(QgsFeatureRequest().setFilterRect(search_rect)) if ef.hasGeometry()]
+            existing.extend(g for g in batch_geoms if g.boundingBox().intersects(search_rect))
+            for eg in existing:
+                if geom.intersects(eg):
+                    diff = geom.difference(eg)
+                    if diff is not None:
+                        geom = diff
+                    if geom.isEmpty():
+                        break
+            if geom.isEmpty():
+                errors.append(f"Feature #{idx}: completely covered by existing polygon(s) with avoid_overlap=True")
+                continue
+
+        if need_multi and not QgsWkbTypes.isMultiType(geom.wkbType()):
+            geom.convertToMultiType()
+
         feat = QgsFeature(fields)
         feat.setGeometry(geom)
         for k, v in attrs.items():
@@ -576,10 +849,21 @@ def digitize_features(layer, features, auto_fix_geometry=True):
 
         if lyr.addFeature(feat):
             added_count += 1
+            added_feats.append(feat)
+            batch_geoms.append(geom)
         else:
             errors.append(f"Feature #{idx}: failed to add to layer")
 
-    lyr.commitChanges()
+    committed = lyr.commitChanges()
+    if not committed and added_feats:
+        commit_errs = lyr.commitErrors()
+        lyr.rollBack()
+        ok, _ = lyr.dataProvider().addFeatures(added_feats)
+        if not ok:
+            errors.extend(commit_errs or ["commitChanges and dataProvider fallback failed"])
+            added_count = 0
+        else:
+            lyr.updateExtents()
     _refresh()
 
     return {
@@ -594,12 +878,13 @@ def digitize_features(layer, features, auto_fix_geometry=True):
       {"layer_name": S("string", "name for the new grid layer (default 'Sampling_Grid')"),
        "extent_layer": S("string", "optional layer name or id to derive grid extent from"),
        "bbox": S("array", "optional [xmin, ymin, xmax, ymax] extent; defaults to canvas or extent_layer"),
-       "cell_size": S("number", "spacing/size of grid cells (in layer CRS units, e.g. 100 meters for projected CRS, or 0.001 degrees for geographic)"),
+       "cell_size": S("number", "spacing/size of grid cells (in layer CRS units; meters >1 on EPSG:4326 are auto-converted to degrees)"),
        "grid_type": S("string", "'square' (Rectangle, default) | 'hexagon'"),
        "crs": S("string", "CRS for the grid (defaults to target extent/layer CRS or project CRS)"),
-       "output_path": S("string", "optional .gpkg or .shp path; creates memory layer if omitted")})
+       "output_path": S("string", "optional .gpkg or .shp path; creates memory layer if omitted"),
+       "show_labels": S("boolean", "display centered grid_id labels for visual inspection (default true)")})
 def create_sampling_grid(layer_name="Sampling_Grid", extent_layer=None, bbox=None, cell_size=100.0,
-                         grid_type="square", crs=None, output_path=None):
+                         grid_type="square", crs=None, output_path=None, show_labels=True):
     import processing
     p = QgsProject.instance()
 
@@ -637,8 +922,25 @@ def create_sampling_grid(layer_name="Sampling_Grid", extent_layer=None, bbox=Non
         target_extent = tr.transformBoundingBox(target_extent)
 
     spacing = float(cell_size)
+    unit_note = None
     if spacing <= 0:
         spacing = 100.0 if not final_crs.isGeographic() else 0.001
+    elif final_crs.isGeographic() and spacing > 1.0:
+        # Guard against passing meter-scale cell_size (e.g. 100) into a geographic degree CRS
+        orig_m = spacing
+        spacing = round(orig_m / 111320.0, 6)
+        unit_note = f"Converted {orig_m} m -> {spacing} deg for geographic CRS {final_crs.authid()}."
+
+    width = max(target_extent.width(), 1e-9)
+    height = max(target_extent.height(), 1e-9)
+    est_cells = int(math.ceil(width / spacing) * math.ceil(height / spacing))
+    MAX_CELLS = 50000
+    if est_cells > MAX_CELLS:
+        min_recommended = round(math.sqrt((width * height) / 10000.0), 6)
+        raise ValueError(
+            f"Grid would generate ~{est_cells:,} cells (limit {MAX_CELLS:,}), risking memory exhaustion. "
+            f"Increase cell_size to at least {min_recommended}."
+        )
 
     type_code = 4 if str(grid_type).lower() in ("hexagon", "hex") else 2
 
@@ -664,7 +966,6 @@ def create_sampling_grid(layer_name="Sampling_Grid", extent_layer=None, bbox=Non
     if not grid_lyr or not grid_lyr.isValid():
         raise RuntimeError("Failed to generate sampling grid.")
 
-    from qgis.PyQt.QtCore import QMetaType
     f_defs = [
         QgsField("grid_id", QMetaType.Type.Int),
         QgsField("class", QMetaType.Type.QString),
@@ -695,9 +996,14 @@ def create_sampling_grid(layer_name="Sampling_Grid", extent_layer=None, bbox=Non
     grid_lyr.setRenderer(QgsSingleSymbolRenderer(sym))
 
     p.addMapLayer(grid_lyr)
+    if show_labels:
+        try:
+            set_labels(layer=grid_lyr.id(), field="grid_id", size=9, color="#0f172a", buffer_color="#ffffff", placement="over_centroid")
+        except Exception as exc:
+            LOGGER.warning(f"Failed to enable grid_id labels: {exc}")
     _refresh()
 
-    return {
+    out = {
         "layer_name": grid_lyr.name(),
         "layer_id": grid_lyr.id(),
         "crs": final_crs.authid(),
@@ -706,12 +1012,38 @@ def create_sampling_grid(layer_name="Sampling_Grid", extent_layer=None, bbox=Non
         "extent": [round(target_extent.xMinimum(), 4), round(target_extent.yMinimum(), 4),
                    round(target_extent.xMaximum(), 4), round(target_extent.yMaximum(), 4)]
     }
+    if unit_note:
+        out["unit_note"] = unit_note
+    return out
+
+
+SEMANTIC_GRID_COLORS = {
+    "water": "#0284c7", "water body": "#0284c7", "air": "#0284c7", "perairan": "#0284c7", "sungai": "#0284c7", "flooded": "#0284c7", "banjir": "#0284c7",
+    "dense forest": "#1b5e20", "forest": "#1b5e20", "hutan": "#1b5e20", "hutan lebat": "#1b5e20",
+    "open vegetation": "#4caf50", "vegetation": "#4caf50", "vegetasi": "#4caf50", "semak": "#4caf50", "intact": "#22c55e", "aman": "#22c55e",
+    "agriculture": "#cddc39", "cropland": "#cddc39", "pertanian": "#cddc39", "sawah": "#cddc39", "perkebunan": "#84cc16",
+    "urban": "#dc2626", "built-up": "#dc2626", "built up": "#dc2626", "terbangun": "#dc2626", "destroyed": "#dc2626", "hancur": "#dc2626",
+    "residential": "#f87171", "permukiman": "#f87171", "damaged": "#f97316", "rusak": "#f97316",
+    "commercial": "#9333ea", "industrial": "#9333ea", "industri": "#9333ea", "komersial": "#9333ea",
+    "bare soil": "#d97706", "bare land": "#d97706", "tanah terbuka": "#d97706", "lahan terbuka": "#d97706",
+    "cloud": "#94a3b8", "shadow": "#94a3b8", "awan": "#94a3b8", "bayangan": "#94a3b8", "unclassified": "#cbd5e1",
+}
+
+
+def _semantic_color_for_class(val):
+    s = str(val or "").strip().lower()
+    if s in SEMANTIC_GRID_COLORS:
+        return SEMANTIC_GRID_COLORS[s]
+    for key, hex_col in SEMANTIC_GRID_COLORS.items():
+        if key in s:
+            return hex_col
+    return None
 
 
 @tool("Batch update classification labels, confidence scores, and notes on a sampling grid layer.",
       {"layer": S("string", "grid layer name or id"),
        "labels": S("array", "list of dicts: [{'grid_id': 1, 'class': 'Vegetation', 'confidence': 0.95, 'notes': 'Dense canopy'}, ...] or index-based [{'id': ..., 'class': ...}]"),
-       "auto_style": S("boolean", "automatically apply categorized symbology color-coded by class (default true)")})
+       "auto_style": S("boolean", "automatically apply semi-transparent semantic categorized symbology color-coded by class (default true)")})
 def label_grid_cells(layer, labels, auto_style=True):
     lyr = _layer(layer)
     if not isinstance(lyr, QgsVectorLayer):
@@ -723,7 +1055,6 @@ def label_grid_cells(layer, labels, auto_style=True):
     idx_conf = fields.indexOf("confidence")
     idx_notes = fields.indexOf("notes")
 
-    from qgis.PyQt.QtCore import QMetaType
     to_add = []
     if idx_class < 0:
         to_add.append(QgsField("class", QMetaType.Type.QString))
@@ -757,10 +1088,7 @@ def label_grid_cells(layer, labels, auto_style=True):
             fid = grid_to_fid[item["grid_id"]]
         elif "id" in item:
             candidate_id = item["id"]
-            if candidate_id in grid_to_fid:
-                fid = grid_to_fid[candidate_id]
-            else:
-                fid = candidate_id
+            fid = grid_to_fid[candidate_id] if candidate_id in grid_to_fid else candidate_id
 
         if fid is None or fid not in all_fids:
             continue
@@ -786,9 +1114,15 @@ def label_grid_cells(layer, labels, auto_style=True):
 
     if auto_style and idx_class >= 0:
         try:
-            style_categorized(layer=lyr.id(), field="class", ramp="Spectral")
-        except Exception:
-            pass
+            unique_vals = lyr.uniqueValues(idx_class)
+            color_map = {}
+            for uv in unique_vals:
+                col = _semantic_color_for_class(uv)
+                if col:
+                    color_map[str(uv)] = col
+            style_categorized(layer=lyr.id(), field="class", ramp="Spectral", outline_color="#1e293b", opacity=0.68, width=0.25, color_map=color_map or None)
+        except Exception as exc:
+            LOGGER.warning(f"Failed to auto-style grid layer '{lyr.name()}': {exc}")
 
     return {
         "layer": lyr.name(),
@@ -951,44 +1285,83 @@ def _renderer_detail(lyr):
     return d
 
 
-def _vector_detail(lyr, sample, max_unique):
+def _vector_detail(lyr, sample, max_unique, scan_limit=10000, valid_check_limit=500):
     fields = lyr.fields()
+    n_fields = len(fields)
     total = lyr.featureCount()
-    stats = []
-    nulls = {f.name(): 0 for f in fields}
-    numeric = {f.name(): [] for f in fields if f.isNumeric()}
-    geom_invalid = geom_empty = 0
-    scan_limit = 50000
-    for i, f in enumerate(lyr.getFeatures()):
-        if i >= scan_limit:
-            break
-        for name, v in zip(fields.names(), f.attributes()):
+    scan_limit = max(1, int(scan_limit or 10000))
+    valid_check_limit = max(0, int(valid_check_limit if valid_check_limit is not None else 500))
+
+    nulls = [0] * n_fields
+    is_num = [fd.isNumeric() for fd in fields]
+    num_n = [0] * n_fields
+    num_mean = [0.0] * n_fields
+    num_m2 = [0.0] * n_fields
+    num_min = [None] * n_fields
+    num_max = [None] * n_fields
+    num_sum = [0.0] * n_fields
+    med_cap = 1024
+    num_samples = [[] for _ in range(n_fields)]
+    rng = random.Random(0)
+
+    geom_invalid = geom_empty = scanned = 0
+    req = QgsFeatureRequest().setLimit(scan_limit)
+    for i, f in enumerate(lyr.getFeatures(req)):
+        scanned += 1
+        attrs = f.attributes()
+        for c in range(min(n_fields, len(attrs))):
+            v = attrs[c]
             if v is None or str(v) == "NULL":
-                nulls[name] += 1
-            elif name in numeric:
+                nulls[c] += 1
+            elif is_num[c]:
                 try:
-                    numeric[name].append(float(v))
+                    fv = float(v)
                 except (TypeError, ValueError):
-                    pass
+                    continue
+                if not math.isfinite(fv):
+                    continue
+                cnt = num_n[c] + 1
+                num_n[c] = cnt
+                num_sum[c] += fv
+                if num_min[c] is None or fv < num_min[c]:
+                    num_min[c] = fv
+                if num_max[c] is None or fv > num_max[c]:
+                    num_max[c] = fv
+                delta = fv - num_mean[c]
+                num_mean[c] += delta / cnt
+                num_m2[c] += delta * (fv - num_mean[c])
+                buf = num_samples[c]
+                if cnt <= med_cap:
+                    buf.append(fv)
+                else:
+                    j = rng.randrange(cnt)
+                    if j < med_cap:
+                        buf[j] = fv
         g = f.geometry()
         if g is None or g.isEmpty():
             geom_empty += 1
-        elif i < 5000 and not g.isGeosValid():
+        elif i < valid_check_limit and not g.isGeosValid():
             geom_invalid += 1
+
+    stats = []
     for idx, fd in enumerate(fields):
         s = {"name": fd.name(), "alias": fd.alias() or None, "type": fd.typeName(), "length": fd.length(),
-             "nulls": nulls[fd.name()], "comment": fd.comment() or None,
+             "nulls": nulls[idx], "comment": fd.comment() or None,
              "origin": {0: "unknown", 1: "provider", 2: "join", 3: "edit", 4: "expression"}.get(int(fields.fieldOrigin(idx)))
              if hasattr(fields, "fieldOrigin") else None}
         uniq = lyr.uniqueValues(idx, max_unique + 1)
         s["unique_count"] = len(uniq) if len(uniq) <= max_unique else f">{max_unique}"
-        vals = numeric.get(fd.name())
-        if vals:
-            vals.sort()
-            n = len(vals)
-            mean = sum(vals) / n
-            s.update(min=vals[0], max=vals[-1], mean=mean, median=vals[n // 2],
-                     stdev=(sum((x - mean) ** 2 for x in vals) / n) ** 0.5, sum=sum(vals))
+        cnt = num_n[idx]
+        if cnt:
+            med_buf = sorted(num_samples[idx])
+            s.update(
+                min=num_min[idx],
+                max=num_max[idx],
+                mean=num_mean[idx],
+                median=med_buf[len(med_buf) // 2],
+                stdev=(num_m2[idx] / cnt) ** 0.5,
+                sum=num_sum[idx],
+            )
         elif len(uniq) <= max_unique:
             s["values"] = sorted((_jsonable(u) for u in uniq), key=str)
         else:
@@ -999,8 +1372,10 @@ def _vector_detail(lyr, sample, max_unique):
         "geometry": QgsWkbTypes.displayString(lyr.wkbType()),
         "geometry_type": QgsWkbTypes.geometryDisplayString(lyr.geometryType()),
         "has_z": QgsWkbTypes.hasZ(lyr.wkbType()), "has_m": QgsWkbTypes.hasM(lyr.wkbType()),
-        "feature_count": total, "scanned": min(total, scan_limit),
-        "empty_geometries": geom_empty, "invalid_geometries_in_first_5000": geom_invalid,
+        "feature_count": total, "scanned": scanned,
+        "empty_geometries": geom_empty,
+        "invalid_geometries_sampled": geom_invalid,
+        "invalid_geometries_checked": min(scanned, valid_check_limit),
         "selected_count": lyr.selectedFeatureCount(), "subset_filter": lyr.subsetString() or None,
         "editable": lyr.isEditable(), "storage": lyr.storageType(), "encoding": lyr.dataProvider().encoding(),
         "fields": stats, "sample_rows": rows,
@@ -1084,7 +1459,8 @@ def _vectortile_detail(lyr):
       "Use before analysing or restyling user data.",
       {"layer": S("string", "name or id"), "sample": S("integer", "sample rows / raster sample pixels, default 5"),
        "max_unique": S("integer", "list distinct values if <= this, default 30")})
-def describe_layer(layer=None, sample=5, max_unique=30, layer_name=None, layer_id=None):
+def describe_layer(layer=None, sample=5, max_unique=30, layer_name=None, layer_id=None,
+                   scan_limit=10000, valid_check_limit=500):
     target = layer if layer is not None else (layer_name if layer_name is not None else layer_id)
     if target is None:
         raise ValueError("layer name or id is required for describe_layer")
@@ -1101,7 +1477,7 @@ def describe_layer(layer=None, sample=5, max_unique=30, layer_name=None, layer_i
     LT = Qgis.LayerType
     if t == LT.Vector:
         base["layer_type"] = "vector"
-        base.update(_vector_detail(lyr, sample, max_unique))
+        base.update(_vector_detail(lyr, sample, max_unique, scan_limit=scan_limit, valid_check_limit=valid_check_limit))
     elif t == LT.Raster:
         base["layer_type"] = "raster"
         base.update(_raster_detail(lyr, 0))
@@ -1125,7 +1501,9 @@ def describe_all_layers(max_unique=15):
     out = []
     for node in QgsProject.instance().layerTreeRoot().findLayers():
         try:
-            out.append(describe_layer(node.layerId(), sample=0, max_unique=max_unique))
+            out.append(describe_layer(
+                node.layerId(), sample=0, max_unique=max_unique, scan_limit=2500, valid_check_limit=200
+            ))
         except Exception as e:
             out.append({"id": node.layerId(), "error": str(e)})
     groups = [g.name() for g in QgsProject.instance().layerTreeRoot().findGroups(True)]
@@ -1236,18 +1614,40 @@ def calculate_field(layer, field, expression, field_type="double"):
         lyr.dataProvider().addAttributes([QgsField(field, types.get(field_type, QMetaType.Type.Double))])
         lyr.updateFields()
     idx = lyr.fields().indexOf(field)
+    if idx < 0:
+        raise ValueError(f"Failed to create or locate field '{field}' on layer '{lyr.name()}'")
     exp = QgsExpression(expression)
     if exp.hasParserError():
         raise ValueError(exp.parserErrorString())
     ctx = QgsExpressionContext(QgsExpressionContextUtils.globalProjectLayerScopes(lyr))
     exp.prepare(ctx)
-    changes = {}
-    for f in lyr.getFeatures():
+
+    req = QgsFeatureRequest()
+    if not exp.needsGeometry():
+        req.setFlags(QgsFeatureRequest.Flag.NoGeometry)
+    all_attrs_token = getattr(QgsFeatureRequest, "ALL_ATTRIBUTES", "#!allattributes!#")
+    ref_cols = exp.referencedColumns()
+    if all_attrs_token not in ref_cols:
+        valid_cols = [c for c in ref_cols if lyr.fields().indexOf(c) >= 0]
+        if len(valid_cols) == len(ref_cols):
+            req.setSubsetOfAttributes(valid_cols, lyr.fields())
+
+    dp = lyr.dataProvider()
+    chunk = {}
+    updated = 0
+    chunk_size = 5000
+    for f in lyr.getFeatures(req):
         ctx.setFeature(f)
-        changes[f.id()] = {idx: exp.evaluate(ctx)}
-    lyr.dataProvider().changeAttributeValues(changes)
+        chunk[f.id()] = {idx: exp.evaluate(ctx)}
+        updated += 1
+        if len(chunk) >= chunk_size:
+            dp.changeAttributeValues(chunk)
+            chunk.clear()
+    if chunk:
+        dp.changeAttributeValues(chunk)
+        chunk.clear()
     lyr.triggerRepaint()
-    return {"updated": len(changes), "eval_error": exp.evalErrorString() or None}
+    return {"updated": updated, "eval_error": exp.evalErrorString() or None}
 
 
 @tool("Set a provider subset filter (SQL WHERE) on a layer; empty string clears it.",
@@ -1401,20 +1801,24 @@ def style_single(layer, color="#3388ff", outline_color=None, width=None, size=No
 
 @tool("Categorized (unique values) style.",
       {"layer": S("string", ""), "field": S("string", "field or expression"), "ramp": S("string", "e.g. Spectral, Set1, Viridis"),
-       "outline_color": S("string", "")})
-def style_categorized(layer, field, ramp="Spectral", outline_color=None):
+       "outline_color": S("string", ""), "opacity": S("number", "0..1 fill opacity, default 1.0"),
+       "width": S("number", "outline/line width mm"),
+       "color_map": S("object", "optional explicit {value: '#rrggbb'} overrides")})
+def style_categorized(layer, field, ramp="Spectral", outline_color=None, opacity=1.0, width=None, color_map=None):
     lyr = _layer(layer)
     idx = lyr.fields().indexOf(field)
     raw_values = sorted(lyr.uniqueValues(idx), key=str) if idx >= 0 else []
     MAX_CATS = 250
     values = raw_values[:MAX_CATS]
     r = _ramp(ramp)
+    cmap = {str(k).strip().lower(): v for k, v in color_map.items()} if isinstance(color_map, dict) else {}
     cats = []
     n = max(len(values) - 1, 1)
     for i, v in enumerate(values):
-        sym = _symbol(lyr, outline_color=outline_color)
-        sym.setColor(r.color(i / n))
-        cats.append(QgsRendererCategory(v, sym, str(v)))
+        s_val = str(v)
+        col = cmap.get(s_val.strip().lower()) or r.color(i / n).name()
+        sym = _symbol(lyr, color=col, outline_color=outline_color, width=width, opacity=opacity)
+        cats.append(QgsRendererCategory(v, sym, s_val))
     lyr.setRenderer(QgsCategorizedSymbolRenderer(field, cats))
     lyr.triggerRepaint()
     _iface().layerTreeView().refreshLayerSymbology(lyr.id())
@@ -1526,6 +1930,72 @@ def set_labels(layer, field=None, expression=None, size=9, color="#000000", font
     return {"labels": True}
 
 
+_LAST_TEMP_CLEANUP = 0.0
+
+
+def _cleanup_old_temp_files(
+    patterns=("qgis_ai_layout_*.png", "overture_*.gpkg", "duckdb_result_*.gpkg"),
+    max_age_hours=24,
+):
+    """Best-effort sweep of stale temporary exports, throttled to run at most every 30 min."""
+    global _LAST_TEMP_CLEANUP
+    now = time.time()
+    if now - _LAST_TEMP_CLEANUP < 1800:
+        return
+    _LAST_TEMP_CLEANUP = now
+    tmp_dir = tempfile.gettempdir()
+    cutoff = now - max(1, float(max_age_hours)) * 3600.0
+    try:
+        active_sources = {
+            os.path.abspath(lyr.publicSource().split("|")[0])
+            for lyr in QgsProject.instance().mapLayers().values()
+            if lyr.publicSource()
+        }
+    except Exception:
+        active_sources = set()
+    for pat in patterns:
+        for fpath in glob.glob(os.path.join(tmp_dir, pat)):
+            try:
+                if os.path.abspath(fpath) in active_sources:
+                    continue
+                if os.path.getmtime(fpath) < cutoff:
+                    os.remove(fpath)
+            except Exception:
+                pass
+
+
+def _export_layout_preview_b64(lay, dpi=120, max_dim=1600):
+    """Export layout preview image, downscale large outputs, encode as PNG base64, and unlink temp file."""
+    _cleanup_old_temp_files()
+    st = QgsLayoutExporter.ImageExportSettings()
+    st.dpi = max(50, min(int(dpi or 120), 150))
+    tmp = os.path.join(tempfile.gettempdir(), f"qgis_ai_layout_{os.getpid()}_{int(time.time() * 1000)}.png")
+    try:
+        res = QgsLayoutExporter(lay).exportToImage(tmp, st)
+        if res != QgsLayoutExporter.ExportResult.Success or not os.path.exists(tmp):
+            raise RuntimeError(f"Failed to render layout preview (exporter code {res})")
+        img = QImage(tmp)
+        if not img.isNull() and (img.width() > max_dim or img.height() > max_dim):
+            img = img.scaled(
+                max_dim,
+                max_dim,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            buf = QBuffer()
+            buf.open(QIODevice.OpenModeFlag.WriteOnly)
+            img.save(buf, "PNG")
+            return base64.b64encode(bytes(buf.data())).decode()
+        with open(tmp, "rb") as fh:
+            return base64.b64encode(fh.read()).decode()
+    finally:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+
+
 # ---------------------------------------------------------------- canvas snapshot (verification loop)
 def _render(extent, width, height, layers=None):
     ms = QgsMapSettings()
@@ -1552,6 +2022,8 @@ def _render(extent, width, height, layers=None):
 @tool("Render the current map canvas to PNG and return it as an image so you can visually verify the map.",
       {"width": S("integer", "default 1000"), "height": S("integer", "default 700")})
 def snapshot_canvas(width=1000, height=700):
+    width = max(64, min(int(width or 1000), 1600))
+    height = max(64, min(int(height or 700), 1200))
     c = _canvas()
     ext = c.extent() if c else None
     if not _is_valid_extent(ext):
@@ -1595,20 +2067,7 @@ def snapshot_layout(name=None, dpi=120, layout=None, layout_name=None, **kwargs)
     if not lay:
         raise ValueError(f"No print layout found. Available layouts: {[l.name() for l in mgr.printLayouts()]}")
 
-    ex = QgsLayoutExporter(lay)
-    st = QgsLayoutExporter.ImageExportSettings()
-    st.dpi = int(dpi or 120)
-    tmp = os.path.join(tempfile.gettempdir(), f"qgis_ai_layout_{lay.name()}.png")
-    if os.path.exists(tmp):
-        try:
-            os.remove(tmp)
-        except Exception:
-            pass
-    res = ex.exportToImage(tmp, st)
-    if res != QgsLayoutExporter.ExportResult.Success or not os.path.exists(tmp):
-        raise RuntimeError(f"Failed to render layout preview (exporter code {res})")
-    with open(tmp, "rb") as fh:
-        raw_b64 = base64.b64encode(fh.read()).decode()
+    raw_b64 = _export_layout_preview_b64(lay, dpi=dpi)
     return {
         "__image__": raw_b64,
         "mime": "image/png",
@@ -3671,16 +4130,8 @@ def export_layout(name=None, path=None, dpi=300, preview=False, **kwargs):
         r = ex.exportToImage(path, st)
     out = {"path": path, "success": r == QgsLayoutExporter.ExportResult.Success, "code": int(r)}
     if preview:
-        tmp = os.path.join(tempfile.gettempdir(), "qgis_ai_layout_preview.png")
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except Exception:
-                pass
-        st = QgsLayoutExporter.ImageExportSettings(); st.dpi = 80
-        ex.exportToImage(tmp, st)
-        with open(tmp, "rb") as fh:
-            out = {"__image__": base64.b64encode(fh.read()).decode(), "mime": "image/png", "meta": out}
+        raw_b64 = _export_layout_preview_b64(lay, dpi=80)
+        out = {"__image__": raw_b64, "mime": "image/png", "meta": out}
     return out
 
 
@@ -3883,6 +4334,8 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
     if filter_sql:
         where_clauses.append(f"({filter_sql})")
 
+    _cleanup_old_temp_files()
+    safe_limit = max(1, min(int(limit or 500), 25000))
     out_file = os.path.join(tempfile.gettempdir(), f"overture_{t_name}_{int(_time.time())}.gpkg")
     if os.path.exists(out_file):
         try:
@@ -3896,7 +4349,7 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
         con.execute("INSTALL spatial; LOAD spatial; INSTALL httpfs; LOAD httpfs;")
         con.execute("SET s3_region='us-west-2';")
         con.execute("SET geometry_always_xy=true;")
-        con.execute("SET memory_limit='1GB';")
+        con.execute("SET memory_limit='512MB';")
         con.execute("SET threads=2;")
         con.execute("SET preserve_insertion_order=false;")
 
@@ -3905,7 +4358,7 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
             SELECT {select_clause}
             FROM read_parquet('{s3_path}', hive_partitioning=1)
             WHERE {' AND '.join(where_clauses)}
-            LIMIT {int(limit)}
+            LIMIT {safe_limit}
         ) TO '{out_file}' WITH (FORMAT GDAL, DRIVER 'GPKG');
         """
         con.execute(copy_query)
@@ -3948,6 +4401,7 @@ def query_duckdb_spatial(query, layer_name="DuckDB_Layer"):
         import duckdb
     except ImportError:
         raise RuntimeError("duckdb is required for DuckDB spatial queries. Install it in your Python environment with: pip install duckdb")
+    _cleanup_old_temp_files()
     out_file = os.path.join(tempfile.gettempdir(), f"duckdb_result_{int(time.time())}.gpkg")
     if os.path.exists(out_file):
         try:
@@ -3959,7 +4413,7 @@ def query_duckdb_spatial(query, layer_name="DuckDB_Layer"):
         con.execute("INSTALL spatial; LOAD spatial; INSTALL httpfs; LOAD httpfs;")
         con.execute("SET s3_region='us-west-2';")
         con.execute("SET geometry_always_xy=true;")
-        con.execute("SET memory_limit='1GB';")
+        con.execute("SET memory_limit='512MB';")
         con.execute("SET threads=2;")
         con.execute("SET preserve_insertion_order=false;")
 
