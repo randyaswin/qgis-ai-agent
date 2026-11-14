@@ -4,7 +4,7 @@ qgisMinimumVersion=3.34
 qgisMaximumVersion=4.99
 description=Autonomous AI cartography and spatial analysis copilot driven via Model Context Protocol (MCP) and AI CLIs.
 about=Connects QGIS to autonomous AI agents (Google Antigravity agy, Claude Code, Gemini CLI, OpenAI Codex) via the Model Context Protocol (MCP). Features 70 deep QGIS tools (STAC, COG streaming, Overture Maps DuckDB spatial SQL, 440+ Processing algorithms, cartographic styling, sampling grid classification, GCP Helmert georeferencing, and 5 distinct layout archetypes: Official Planning, Disaster Infographic, NatGeo, Statistical Thematic, and Relief Topographic) paired with 61 GIS domain skills.
-version=1.1.0
+version=1.1.1
 author=M. Randy Aswin
 email=mrandyaswin@gmail.com
 homepage=https://github.com/randyaswin/qgis-ai-agent
@@ -16,7 +16,10 @@ experimental=False
 deprecated=False
 has_processing_provider=False
 icon=icon.svg
-changelog=1.1.0:
+changelog=1.1.1:
+    - Dynamic CLI model auto-detection across all supported CLIs: live `agy models` discovery (including Gemini 4 Argon/Hydrogen, Claude 5.5, GPT-OSS) with 15s timeout, Claude Code `cache/model-catalog/*.json` & `settings.json` reader, Gemini CLI JS bundle `VALID_GEMINI_MODELS` extractor, Codex CLI native binary preset extractor, and OpenCode `~/.opencode/bin` priority.
+    - Non-blocking UI model loading & persistent disk cache (`models_cache.json`) with one-click `↻` model refresh button, editable `QComboBox` custom/default ID resolution fix, and `xhigh` / `--effort` support for `agy` and `Codex CLI`.
+1.1.0:
     - Thread & memory safety hardening: eliminated QApplication.processEvents() re-entrancy crashes, secured QThread/QProcess lifecycles, added canvas freeze guards on project reload/revert, C++/SIP & GDAL/OGR handle guards, and bounded chat log & stream buffers.
     - Full cross-platform portability (Linux, Windows, macOS): QGIS-bundled Python resolution (skipping Windows Store aliases), Windows .cmd/.bat & CREATE_NO_WINDOW support, dynamic CLI discovery across nvm/fnm/volta/pnpm/bun/Homebrew, Windows read-only .git cleanup, and DuckDB path normalization.
     - Expanded to 70 MCP tools & 61 GIS domain skills, including create_sampling_grid, label_grid_cells, Helmert 4-DOF georeferencing with per-GCP RMSE diagnostics, topological avoid_overlap/snap_tolerance digitizing, and 5 new custom skills (raster interpretation, RTRW zoning, multi-hazard modeling, hydrology/SLR, and topology QA).

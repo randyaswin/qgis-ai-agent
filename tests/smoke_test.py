@@ -354,6 +354,20 @@ try:
 except (ValueError, RuntimeError) as exc:
     assert "bounding box" in str(exc).lower() or "duckdb" in str(exc).lower(), f"Unexpected Overture error: {exc}"
 
+# 6. Dynamic CLI model auto-detection & disk cache + effort flag forwarding
+agy_models = runner.get_cli_models("agy (Antigravity CLI)", force_refresh=True)
+agy_ids = [m_id for _, m_id in agy_models]
+assert agy_models and agy_models[0][1] == "", f"Expected Default entry first, got {agy_models[:2]}"
+assert any(m.startswith("gemini-4-") for m in agy_ids), f"Expected gemini-4-* in agy models: {agy_ids}"
+if runner.is_bin_available("agy"):
+    assert os.path.exists(paths.get_models_cache_file()), "Expected persisted models cache file"
+runner._CLI_MODELS_CACHE.pop("agy (Antigravity CLI)", None)
+cached_agy = runner.get_cli_models("agy (Antigravity CLI)", force_refresh=False, allow_subprocess=False)
+cached_ids = [m_id for _, m_id in cached_agy]
+assert any(m.startswith("gemini-4-") for m in cached_ids), f"Expected cached gemini-4-* without subprocess: {cached_ids}"
+agy_argv = runner.ADAPTERS["agy (Antigravity CLI)"]["run"]("test prompt", False, True, model="gemini-4-argon-high", effort="xhigh")
+assert "--model" in agy_argv and "gemini-4-argon-high" in agy_argv and "--effort" in agy_argv and "xhigh" in agy_argv, agy_argv
+
 print("tools count check:", len(tools.TOOLS))
 assert len(tools.TOOLS) == 70, f"Expected 70 tools, got {len(tools.TOOLS)}"
 

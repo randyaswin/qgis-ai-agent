@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 
@@ -46,40 +47,62 @@ def find_cli_bin(bin_name):
 
 # In-memory cache for CLI models: cli_key -> [(label, id), ...]
 _CLI_MODELS_CACHE = {}
+_MODELS_CACHE_LOCK = threading.Lock()
 
-# Curated fallback catalog aligned with Multica backends
+# Curated offline fallback catalog (only used when no live CLI catalog or disk cache is available)
 DEFAULT_ADAPTER_MODELS = {
     "agy (Antigravity CLI)": [
+        ("Gemini 4 Argon (High)", "gemini-4-argon-high"),
+        ("Gemini 4 Argon (Medium)", "gemini-4-argon-medium"),
+        ("Gemini 4 Argon (Low)", "gemini-4-argon-low"),
+        ("Gemini 4 Hydrogen (XHigh)", "gemini-4-hydrogen-xhigh"),
+        ("Gemini 4 Hydrogen (High)", "gemini-4-hydrogen-high"),
+        ("Gemini 4 Hydrogen (Medium)", "gemini-4-hydrogen-medium"),
+        ("Gemini 4 Hydrogen (Low)", "gemini-4-hydrogen-low"),
+        ("Orchestrator (Argon)", "gemini-pro-orchestrator-g1-pro"),
         ("Gemini 3.8 Flash (High)", "gemini-3.8-flash-high"),
         ("Gemini 3.8 Flash (Medium)", "gemini-3.8-flash-medium"),
         ("Gemini 3.8 Flash (Low)", "gemini-3.8-flash-low"),
-        ("Claude Sonnet 4.6 (Thinking)", "claude-sonnet-4-6"),
-        ("Claude Opus 4.6 (Thinking)", "claude-opus-4-6-thinking"),
+        ("Claude Opus 5.5 (High)", "claude-opus-5-5-high"),
+        ("Claude Opus 5.5 (Medium)", "claude-opus-5-5-medium"),
+        ("Claude Opus 5.5 (Low)", "claude-opus-5-5-low"),
+        ("Claude Sonnet 5.5 (High)", "claude-sonnet-5-5-high"),
+        ("Claude Sonnet 5.5 (Medium)", "claude-sonnet-5-5-medium"),
+        ("Claude Sonnet 5.5 (Low)", "claude-sonnet-5-5-low"),
         ("GPT-OSS 120B (Medium)", "gpt-oss-120b-medium"),
     ],
     "Claude Code": [
-        ("Claude Sonnet 4.6 (Thinking)", "claude-sonnet-4-6"),
-        ("Claude Opus 4.6 (Thinking)", "claude-opus-4-6"),
-        ("Claude Sonnet (Latest)", "sonnet"),
-        ("Claude Opus (Latest)", "opus"),
-        ("Claude Haiku (Latest)", "haiku"),
-        ("Claude Haiku 4.5", "claude-haiku-4-5"),
-        ("Claude Opus 5.5", "claude-opus-5-5"),
-        ("Claude Fable 5.1", "claude-fable-5-1"),
+        ("Claude Opus 5.5 (claude-opus-5-5)", "claude-opus-5-5"),
+        ("Claude Fable 5.2 (claude-fable-5-2)", "claude-fable-5-2"),
+        ("Claude Sonnet 5.5 (claude-sonnet-5-5)", "claude-sonnet-5-5"),
+        ("Claude Haiku 5.5 (claude-haiku-5-5)", "claude-haiku-5-5"),
+        ("Claude Fable 5.1 (claude-fable-5-1)", "claude-fable-5-1"),
+        ("Claude Sonnet 4.6 (claude-sonnet-4-6)", "claude-sonnet-4-6"),
+        ("Claude Opus 4.6 (claude-opus-4-6)", "claude-opus-4-6"),
+        ("Claude Haiku 4.5 (claude-haiku-4-5)", "claude-haiku-4-5"),
+        ("Claude Opus (Alias: opus)", "opus"),
+        ("Claude Sonnet (Alias: sonnet)", "sonnet"),
+        ("Claude Haiku (Alias: haiku)", "haiku"),
     ],
     "Gemini CLI": [
+        ("Gemini 3.8 Flash", "gemini-3.8-flash"),
+        ("Gemini 3.5 Flash", "gemini-3.5-flash"),
+        ("Gemini 3.1 Pro Preview", "gemini-3.1-pro-preview"),
+        ("Gemini 3 Pro Preview", "gemini-3-pro-preview"),
+        ("Gemini 3 Flash Preview", "gemini-3-flash-preview"),
         ("Gemini 2.5 Pro", "gemini-2.5-pro"),
         ("Gemini 2.5 Flash", "gemini-2.5-flash"),
-        ("Gemini 2.0 Flash", "gemini-2.0-flash"),
-        ("Gemini 1.5 Pro", "gemini-1.5-pro"),
+        ("Gemma 4 31B IT", "gemma-4-31b-it"),
     ],
     "Codex CLI": [
+        ("gpt-5.3-codex", "gpt-5.3-codex"),
+        ("gpt-5.2-codex", "gpt-5.2-codex"),
+        ("gpt-5.2", "gpt-5.2"),
+        ("gpt-5.1-codex-max", "gpt-5.1-codex-max"),
+        ("gpt-5.1-codex-mini", "gpt-5.1-codex-mini"),
         ("GPT-5.4", "gpt-5.4"),
         ("GPT-5.4 Mini", "gpt-5.4-mini"),
-        ("GPT-5.6 Terra", "gpt-5.6-terra"),
         ("o3-mini", "o3-mini"),
-        ("o1", "o1"),
-        ("GPT-4o", "gpt-4o"),
     ],
     "GitHub Copilot CLI": [
         ("Claude 3.7 Sonnet", "claude-3.7-sonnet"),
@@ -129,153 +152,548 @@ DEFAULT_ADAPTER_MODELS = {
 }
 
 
-def get_cli_models(cli_key, force_refresh=False):
+def _load_disk_models_cache():
+    """Load persisted CLI model discovery cache from disk."""
+    cache_path = paths.get_models_cache_file()
+    if not os.path.exists(cache_path):
+        return {}
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_disk_models_cache(cli_key, models, default_model=""):
+    """Persist discovered models for a CLI to disk atomically."""
+    if not cli_key or not models:
+        return
+    cache_path = paths.get_models_cache_file()
+    cache_dir = os.path.dirname(cache_path)
+    with _MODELS_CACHE_LOCK:
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+            data = _load_disk_models_cache()
+            data[cli_key] = {
+                "default_model": default_model or "",
+                "models": [[str(lbl), str(val)] for lbl, val in models if val],
+                "updated_at": time.time(),
+            }
+            fd, tmp_path = tempfile.mkstemp(prefix=".models_cache_", suffix=".tmp", dir=cache_dir)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except Exception:
+                        pass
+                os.replace(tmp_path, cache_path)
+            except Exception:
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
+def _strip_ansi_line(raw_line):
+    clean = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", raw_line)
+    if "\r" in clean:
+        clean = clean.rsplit("\r", 1)[-1]
+    return clean.strip()
+
+
+def _discover_agy_models(bin_path, allow_subprocess=True):
+    """Discover configured default and live model catalog from Antigravity CLI (`agy models`)."""
+    configured_default = ""
+    agy_dirs = [d for d in paths.get_candidate_cli_dirs("agy") if "antigravity" in d.lower()]
+    for adir in agy_dirs:
+        cfg_path = os.path.join(adir, "settings.json")
+        if os.path.isfile(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    sdata = json.load(f)
+                m = sdata.get("model")
+                if isinstance(m, str) and m.strip():
+                    configured_default = m.strip()
+                    break
+            except Exception:
+                pass
+
+    discovered = []
+    catalog_discovered = False
+    if allow_subprocess and bin_path:
+        try:
+            env = paths.get_augmented_path_env()
+            env["NO_COLOR"] = "1"
+            res = subprocess.run(
+                [bin_path, "models"],
+                capture_output=True,
+                text=True,
+                timeout=15.0,
+                env=env,
+                **paths.get_subprocess_kwargs(),
+            )
+            if res.returncode == 0 and res.stdout:
+                for raw_line in res.stdout.replace("\r\n", "\n").splitlines():
+                    line = _strip_ansi_line(raw_line)
+                    if not line or "Fetching" in line or "..." in line or line.startswith(("Usage:", "Flags:", "Available")):
+                        continue
+                    parts = line.split(None, 1)
+                    if not parts:
+                        continue
+                    m_id = parts[0].strip()
+                    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$", m_id):
+                        continue
+                    m_label = parts[1].strip() if len(parts) > 1 else m_id
+                    if not any(m_id == x[1] for x in discovered):
+                        discovered.append((m_label, m_id))
+                if discovered:
+                    catalog_discovered = True
+        except Exception:
+            pass
+
+    return discovered, configured_default, catalog_discovered
+
+
+def _discover_opencode_models(bin_path, allow_subprocess=True):
+    """Discover configured default and live models from OpenCode (`opencode models`)."""
+    configured_default = ""
+    for odir in paths.get_candidate_cli_dirs("opencode"):
+        cfg_path = os.path.join(odir, "opencode.json")
+        if os.path.isfile(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    odata = json.load(f)
+                m = odata.get("model")
+                if isinstance(m, str) and m.strip():
+                    configured_default = m.strip()
+                    break
+            except Exception:
+                pass
+
+    discovered = []
+    catalog_discovered = False
+    if allow_subprocess:
+        home = paths.get_home_dir()
+        oc_exe = "opencode.exe" if sys.platform == "win32" else "opencode"
+        cand_bins = []
+        for cand in (bin_path, os.path.join(home, ".opencode", "bin", oc_exe), os.path.join(home, ".opencode", "bin", "opencode")):
+            if cand and cand not in cand_bins and (os.path.isfile(cand) or cand == bin_path):
+                cand_bins.append(cand)
+
+        env = paths.get_augmented_path_env()
+        env["NO_COLOR"] = "1"
+        for cand in cand_bins:
+            try:
+                res = subprocess.run(
+                    [cand, "models"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10.0,
+                    env=env,
+                    **paths.get_subprocess_kwargs(),
+                )
+                if res.returncode == 0 and res.stdout:
+                    parsed = []
+                    for raw_line in res.stdout.splitlines():
+                        line = _strip_ansi_line(raw_line)
+                        if not line or line.startswith("#") or " " in line or line.startswith(("Error", "Usage:")):
+                            continue
+                        parts = line.split("/")
+                        short_lbl = parts[-1] if len(parts) > 1 else line
+                        if not any(line == x[1] for x in parsed):
+                            parsed.append((f"{short_lbl} ({line})", line))
+                    if parsed:
+                        discovered = parsed
+                        catalog_discovered = True
+                        break
+            except Exception:
+                pass
+
+    return discovered, configured_default, catalog_discovered
+
+
+def _discover_claude_models():
+    """Discover Claude Code catalog and user-configured models from local cache & settings."""
+    configured_default = ""
+    discovered = []
+    catalog_discovered = False
+    claude_dirs = paths.get_candidate_cli_dirs("claude")
+
+    # 1. Inspect settings.json and cache/model-catalog/*.json
+    extra_setting_ids = []
+    catalog_files = []
+    for cdir in claude_dirs:
+        settings_path = os.path.join(cdir, "settings.json")
+        if os.path.isfile(settings_path):
+            try:
+                with open(settings_path, "r", encoding="utf-8") as f:
+                    sdata = json.load(f)
+                if not configured_default and isinstance(sdata.get("model"), str) and sdata["model"].strip():
+                    configured_default = sdata["model"].strip()
+                msettings = sdata.get("modelSettings")
+                if isinstance(msettings, dict):
+                    for k in msettings.keys():
+                        if isinstance(k, str) and k.strip():
+                            extra_setting_ids.append(k.strip())
+            except Exception:
+                pass
+        catalog_files.extend(glob.glob(os.path.join(cdir, "cache", "model-catalog", "*.json")))
+
+    # Newest model-catalog first
+    catalog_files = sorted(set(catalog_files), key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0, reverse=True)
+    for cat_path in catalog_files:
+        try:
+            with open(cat_path, "r", encoding="utf-8") as f:
+                cdata = json.load(f)
+            models_list = cdata.get("catalog", {}).get("config", {}).get("models", [])
+            if not isinstance(models_list, list):
+                continue
+            main_entries = []
+            other_entries = []
+            for m in models_list:
+                if not isinstance(m, dict):
+                    continue
+                m_id = str(m.get("id") or "").strip()
+                if not m_id:
+                    continue
+                name = str(m.get("name") or m.get("short_name") or m_id).strip()
+                lbl = name if name.lower().startswith("claude") else f"Claude {name}"
+                entry = (f"{lbl} ({m_id})", m_id)
+                if m.get("section") == "main":
+                    main_entries.append(entry)
+                else:
+                    other_entries.append(entry)
+            for entry in main_entries + other_entries:
+                if not any(entry[1] == x[1] for x in discovered):
+                    discovered.append(entry)
+            if discovered:
+                catalog_discovered = True
+                break
+        except Exception:
+            pass
+
+    # 2. Check claude.json / ~/.claude.json for org defaults & additionalModelOptionsCache
+    candidate_configs = [os.path.join(d, "claude.json") for d in claude_dirs] + [os.path.join(paths.get_home_dir(), ".claude.json")]
+    for cfg_path in candidate_configs:
+        if os.path.isfile(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cdata = json.load(f)
+                cfg_m = cdata.get("model") or cdata.get("orgModelDefaultCache")
+                if not configured_default and isinstance(cfg_m, str) and cfg_m.strip():
+                    configured_default = cfg_m.strip()
+                add_models = cdata.get("additionalModelOptionsCache") or []
+                for am in add_models:
+                    if isinstance(am, dict) and am.get("value"):
+                        val = str(am["value"]).strip()
+                        lbl = str(am.get("label") or val).strip()
+                        if val and not any(val == m[1] for m in discovered):
+                            discovered.append((f"{lbl} ({val})", val))
+            except Exception:
+                pass
+
+    for m_id in extra_setting_ids:
+        if not any(m_id == m[1] for m in discovered):
+            pretty = m_id.replace("-", " ").title()
+            discovered.append((f"{pretty} ({m_id})", m_id))
+
+    if catalog_discovered or discovered:
+        for lbl, alias_id in (
+            ("Claude Opus (Alias: opus)", "opus"),
+            ("Claude Sonnet (Alias: sonnet)", "sonnet"),
+            ("Claude Haiku (Alias: haiku)", "haiku"),
+        ):
+            if not any(alias_id == m[1] for m in discovered):
+                discovered.append((lbl, alias_id))
+
+    return discovered, configured_default, catalog_discovered
+
+
+def _format_gemini_label(model_id):
+    tokens = model_id.split("-")
+    out = []
+    for tok in tokens:
+        low = tok.lower()
+        if low in ("it", "b"):
+            out.append(low.upper())
+        elif re.match(r"^\d+[bB]$", tok):
+            out.append(tok.upper())
+        elif re.match(r"^[a-z]\d+[a-z]$", low):
+            out.append(tok.upper())
+        else:
+            out.append(tok.capitalize())
+    return " ".join(out)
+
+
+def _gemini_sort_key(model_id):
+    low = model_id.lower()
+    fam_rank = 2 if low.startswith("gemini") else 1
+    ver_match = re.search(r"^(?:gemini|gemma)-(\d+(?:\.\d+)*)", low)
+    ver_tuple = tuple(int(x) for x in ver_match.group(1).split(".")) if ver_match else (0,)
+    if "pro" in low:
+        tier_rank = 3
+    elif "flash-lite" in low:
+        tier_rank = 1
+    elif "flash" in low:
+        tier_rank = 2
+    else:
+        tier_rank = 0
+    stable_rank = 0 if ("preview" in low or "customtools" in low) else 1
+    return (fam_rank, ver_tuple, tier_rank, stable_rank, model_id)
+
+
+def _discover_gemini_models(bin_path, allow_heavy_scan=True):
+    """Discover Gemini CLI configured model and valid models from its installed JS bundle."""
+    configured_default = ""
+    gemini_dirs = [d for d in paths.get_candidate_cli_dirs("gemini") if "antigravity" not in d.lower()]
+    for gdir in gemini_dirs:
+        cfg_path = os.path.join(gdir, "settings.json")
+        if os.path.isfile(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    sdata = json.load(f)
+                custom_m = sdata.get("model")
+                if isinstance(custom_m, dict):
+                    custom_m = custom_m.get("name") or custom_m.get("default")
+                if isinstance(custom_m, str) and custom_m.strip():
+                    configured_default = custom_m.strip()
+                    break
+            except Exception:
+                pass
+
+    discovered = []
+    catalog_discovered = False
+    if allow_heavy_scan and bin_path:
+        bundle_dirs = []
+        roots_to_check = []
+        for p in (bin_path, os.path.realpath(bin_path) if os.path.exists(bin_path) else None):
+            if p and p not in roots_to_check:
+                roots_to_check.append(p)
+        for p in roots_to_check:
+            pdir = os.path.dirname(p)
+            for cand in (
+                pdir if p.endswith((".js", ".mjs", ".cjs")) else None,
+                os.path.join(pdir, "node_modules", "@google", "gemini-cli", "bundle"),
+                os.path.join(os.path.dirname(pdir), "lib", "node_modules", "@google", "gemini-cli", "bundle"),
+            ):
+                if cand and os.path.isdir(cand) and cand not in bundle_dirs:
+                    bundle_dirs.append(cand)
+
+        model_ids = []
+        for bdir in bundle_dirs:
+            files = sorted(glob.glob(os.path.join(bdir, "chunk-*.js"))) + [os.path.join(bdir, "gemini.js")]
+            for fn in files:
+                if not os.path.isfile(fn):
+                    continue
+                try:
+                    with open(fn, "r", encoding="utf-8", errors="ignore") as f:
+                        txt = f.read()
+                    idx = txt.find("VALID_GEMINI_MODELS")
+                    if idx < 0:
+                        continue
+                    snippet = txt[max(0, idx - 2500):idx + 1500]
+                    for m in re.finditer(r'var\s+[A-Z0-9_]+_MODEL\s*=\s*["\']([^"\']+)["\']', snippet):
+                        m_id = m.group(1).strip()
+                        if m_id and m_id != "none" and m_id not in model_ids:
+                            model_ids.append(m_id)
+                    set_match = re.search(r"VALID_GEMINI_MODELS\s*=\s*(?:/\*[^*]*\*/\s*)?new Set\(\[([^\]]+)\]\)", snippet)
+                    if set_match:
+                        for qm in re.finditer(r'["\']((?:gemini|gemma)-[a-z0-9._-]+)["\']', set_match.group(1)):
+                            m_id = qm.group(1).strip()
+                            if m_id and m_id not in model_ids:
+                                model_ids.append(m_id)
+                    if model_ids:
+                        break
+                except Exception:
+                    pass
+            if model_ids:
+                break
+
+        if model_ids:
+            model_ids.sort(key=_gemini_sort_key, reverse=True)
+            for m_id in model_ids:
+                discovered.append((f"{_format_gemini_label(m_id)} ({m_id})", m_id))
+            catalog_discovered = True
+
+    return discovered, configured_default, catalog_discovered
+
+
+def _discover_codex_models(bin_path, allow_heavy_scan=True):
+    """Discover Codex CLI configured model and embedded preset catalog from installed binary."""
+    configured_default = ""
+    for cdir in paths.get_candidate_cli_dirs("codex"):
+        cfg_path = os.path.join(cdir, "config.toml")
+        if os.path.isfile(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                match = re.search(r'^\s*model\s*=\s*["\']([^"\']+)["\']', content, re.MULTILINE)
+                if match:
+                    configured_default = match.group(1).strip()
+                    break
+            except Exception:
+                pass
+
+    discovered = []
+    catalog_discovered = False
+    if allow_heavy_scan and bin_path:
+        cand_bins = []
+        roots_to_check = []
+        for p in (bin_path, os.path.realpath(bin_path) if os.path.exists(bin_path) else None):
+            if p and p not in roots_to_check:
+                roots_to_check.append(p)
+        for p in roots_to_check:
+            if os.path.isfile(p) and not p.endswith((".js", ".mjs", ".cjs", ".cmd", ".bat", ".ps1")) and p not in cand_bins:
+                cand_bins.append(p)
+            pdir = os.path.dirname(p)
+            pkg_root = os.path.dirname(pdir)
+            for pat in (
+                os.path.join(pkg_root, "node_modules", "@openai", "codex-*", "vendor", "*", "codex", "codex*"),
+                os.path.join(pdir, "node_modules", "@openai", "codex", "node_modules", "@openai", "codex-*", "vendor", "*", "codex", "codex*"),
+                os.path.join(pkg_root, "lib", "node_modules", "@openai", "codex", "node_modules", "@openai", "codex-*", "vendor", "*", "codex", "codex*"),
+            ):
+                for b in glob.glob(pat):
+                    if b not in cand_bins:
+                        cand_bins.append(b)
+
+        for b in cand_bins:
+            if not os.path.isfile(b) or b.endswith((".js", ".cmd", ".bat", ".ps1", ".pdb")):
+                continue
+            try:
+                if os.path.getsize(b) <= 100000:
+                    continue
+                with open(b, "rb") as f:
+                    data = f.read()
+                list_models = []
+                other_models = []
+                seen_slugs = set()
+                for m in re.finditer(
+                    rb'"slug":\s*"([^"]+)",\s*"display_name":\s*"([^"]+)",\s*"description":\s*"([^"]*)"[\s\S]{0,1200}?"visibility":\s*"([^"]+)"',
+                    data,
+                ):
+                    slug = m.group(1).decode("utf-8", errors="ignore").strip()
+                    disp = m.group(2).decode("utf-8", errors="ignore").strip() or slug
+                    vis = m.group(4).decode("utf-8", errors="ignore").strip()
+                    if not slug or slug in seen_slugs:
+                        continue
+                    seen_slugs.add(slug)
+                    entry = (disp, slug)
+                    if vis == "list":
+                        list_models.append(entry)
+                    else:
+                        other_models.append(entry)
+                if list_models or other_models:
+                    discovered = list_models + other_models
+                    catalog_discovered = True
+                    break
+            except Exception:
+                pass
+
+    return discovered, configured_default, catalog_discovered
+
+
+def get_cli_models(cli_key, force_refresh=False, allow_subprocess=True):
     """Dynamically discover models available for a given AI CLI.
     Returns list of (display_label, model_id) tuples.
-    Default option is ALWAYS ('Default (CLI / Account Default)', '') so no model is forced.
+    Default option is ALWAYS first with empty model_id ('') so no model is forced.
     """
-    default_entry = ("Default (CLI / Account Default)", "")
-
-    if not force_refresh and cli_key in _CLI_MODELS_CACHE:
-        return _CLI_MODELS_CACHE[cli_key]
+    if not force_refresh:
+        with _MODELS_CACHE_LOCK:
+            if cli_key in _CLI_MODELS_CACHE:
+                return _CLI_MODELS_CACHE[cli_key]
 
     adapter = ADAPTERS.get(cli_key, {})
     bin_name = adapter.get("bin", "")
     bin_path = find_cli_bin(bin_name)
 
     discovered = []
+    configured_default = ""
+    catalog_discovered = False
+    live_discovered = False
 
-    # 1. Antigravity CLI: dynamic live models via `agy models`
+    # 1. Antigravity CLI: live `agy models` + settings.json
     if "agy" in bin_name.lower():
-        try:
-            res = subprocess.run(
-                [bin_path, "models"],
-                capture_output=True,
-                text=True,
-                timeout=2.5,
-                env=paths.get_augmented_path_env(),
-                **paths.get_subprocess_kwargs(),
-            )
-            if res.returncode == 0 and res.stdout:
-                clean = re.sub(r'\x1b\[[0-9;?]*[A-Za-z]|\r', '', res.stdout)
-                for line in clean.splitlines():
-                    line = line.strip()
-                    if not line or "Fetching" in line or "..." in line:
-                        continue
-                    parts = line.split(None, 1)
-                    if parts:
-                        m_id = parts[0].strip()
-                        m_label = parts[1].strip() if len(parts) > 1 else m_id
-                        discovered.append((m_label, m_id))
-        except Exception:
-            pass
+        discovered, configured_default, live_discovered = _discover_agy_models(bin_path, allow_subprocess=allow_subprocess)
+        catalog_discovered = live_discovered
 
-    # 2. OpenCode CLI: dynamic live models via `opencode models`
+    # 2. OpenCode CLI: live `opencode models` + opencode.json
     elif "opencode" in bin_name.lower():
-        try:
-            res = subprocess.run(
-                [bin_path, "models"],
-                capture_output=True,
-                text=True,
-                timeout=2.5,
-                env=paths.get_augmented_path_env(),
-                **paths.get_subprocess_kwargs(),
-            )
-            if res.returncode == 0 and res.stdout:
-                for line in res.stdout.splitlines():
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        # Format clean display label
-                        parts = line.split("/")
-                        short_lbl = parts[-1] if len(parts) > 1 else line
-                        discovered.append((f"{short_lbl} ({line})", line))
-        except Exception:
-            pass
+        discovered, configured_default, live_discovered = _discover_opencode_models(bin_path, allow_subprocess=allow_subprocess)
+        catalog_discovered = live_discovered
 
-    # 3. Claude Code: inspect ~/.claude.json / %APPDATA%\Claude for accessible models
+    # 3. Claude Code: model-catalog cache + settings.json + .claude.json
     elif "claude" in bin_name.lower():
-        claude_dirs = paths.get_candidate_cli_dirs("claude")
-        candidate_configs = [os.path.join(d, "claude.json") for d in claude_dirs] + [os.path.join(paths.get_home_dir(), ".claude.json")]
-        for cfg_path in candidate_configs:
-            if os.path.exists(cfg_path):
-                try:
-                    with open(cfg_path, "r", encoding="utf-8") as f:
-                        cdata = json.load(f)
-                    cfg_m = cdata.get("model") or cdata.get("orgModelDefaultCache")
-                    if cfg_m and isinstance(cfg_m, str):
-                        discovered.append((f"Account Default ({cfg_m})", cfg_m))
-                    add_models = cdata.get("additionalModelOptionsCache") or []
-                    for am in add_models:
-                        if isinstance(am, dict) and "value" in am:
-                            val = am["value"]
-                            lbl = am.get("label") or am.get("description") or val
-                            if not any(val == m[1] for m in discovered):
-                                discovered.append((f"{lbl} ({val})", val))
-                    if discovered:
-                        break
-                except Exception:
-                    pass
+        discovered, configured_default, live_discovered = _discover_claude_models()
+        catalog_discovered = live_discovered
 
     # 4. DeepSeek / Hermes CLI: inspect ~/.hermes/config.yaml
     elif "deepseek" in bin_name.lower() or "hermes" in bin_name.lower():
         hermes_cfg = os.path.join(paths.get_home_dir(), ".hermes", "config.yaml")
-        if os.path.exists(hermes_cfg):
+        if os.path.isfile(hermes_cfg):
             try:
                 with open(hermes_cfg, "r", encoding="utf-8") as f:
                     content = f.read()
-                m_match = re.search(r'^\s*default\s*:\s*([^\s#]+)', content, re.MULTILINE)
+                m_match = re.search(r"^\s*default\s*:\s*([^\s#]+)", content, re.MULTILINE)
                 if m_match:
-                    h_m = m_match.group(1).strip()
-                    discovered.append((f"Hermes Configured ({h_m})", h_m))
+                    configured_default = m_match.group(1).strip()
             except Exception:
                 pass
 
-    # 5. Gemini CLI: inspect settings.json across candidate paths
+    # 5. Gemini CLI: non-antigravity settings.json + bundle JS models.ts catalog
     elif "gemini" in bin_name.lower():
-        gemini_dirs = paths.get_candidate_cli_dirs("gemini")
-        for gdir in gemini_dirs:
-            cfg_path = os.path.join(gdir, "settings.json")
-            if os.path.exists(cfg_path):
-                try:
-                    with open(cfg_path, "r", encoding="utf-8") as f:
-                        sdata = json.load(f)
-                    custom_m = sdata.get("model")
-                    if custom_m:
-                        discovered.append((f"Configured ({custom_m})", custom_m))
-                        break
-                except Exception:
-                    pass
+        discovered, configured_default, live_discovered = _discover_gemini_models(bin_path, allow_heavy_scan=allow_subprocess)
+        catalog_discovered = live_discovered
 
-    # 6. Codex CLI: inspect config.toml
+    # 6. Codex CLI: config.toml + embedded binary preset catalog
     elif "codex" in bin_name.lower():
-        codex_dirs = paths.get_candidate_cli_dirs("codex")
-        for cdir in codex_dirs:
-            cfg_path = os.path.join(cdir, "config.toml")
-            if os.path.exists(cfg_path):
-                try:
-                    with open(cfg_path, "r", encoding="utf-8") as f:
-                        content = f.read()
-                    match = re.search(r'^\s*model\s*=\s*["\']([^"\']+)["\']', content, re.MULTILINE)
-                    if match:
-                        cm = match.group(1).strip()
-                        discovered.append((f"Configured ({cm})", cm))
-                        break
-                except Exception:
-                    pass
+        discovered, configured_default, live_discovered = _discover_codex_models(bin_path, allow_heavy_scan=allow_subprocess)
+        catalog_discovered = live_discovered
 
-    # Build final list: Always place CLI Account Default at the top!
+    # Fallback to persisted disk cache when live discovery was skipped or offline
+    if not catalog_discovered:
+        disk_entry = _load_disk_models_cache().get(cli_key)
+        if isinstance(disk_entry, dict):
+            cached_models = [
+                (str(item[0]), str(item[1]))
+                for item in (disk_entry.get("models") or [])
+                if isinstance(item, (list, tuple)) and len(item) >= 2 and item[1]
+            ]
+            if cached_models:
+                for lbl, val in cached_models:
+                    if not any(val == d[1] for d in discovered):
+                        discovered.append((lbl, val))
+                if not configured_default and disk_entry.get("default_model"):
+                    configured_default = str(disk_entry["default_model"]).strip()
+                catalog_discovered = True
+
+    default_entry = (
+        (f"Default (CLI: {configured_default})", "")
+        if configured_default
+        else ("Default (CLI / Account Default)", "")
+    )
     result = [default_entry]
-    # 1. Add live discovered models first
     for lbl, val in discovered:
         if val and not any(val == r[1] for r in result):
             result.append((lbl, val))
 
-    # 2. Add curated adapter models (if not already present)
-    for lbl, val in DEFAULT_ADAPTER_MODELS.get(cli_key, []):
-        if val and not any(val == r[1] for r in result):
-            result.append((lbl, val))
+    if not catalog_discovered:
+        for lbl, val in DEFAULT_ADAPTER_MODELS.get(cli_key, []):
+            if val and not any(val == r[1] for r in result):
+                result.append((lbl, val))
 
-    _CLI_MODELS_CACHE[cli_key] = result
+    if live_discovered and discovered:
+        _save_disk_models_cache(cli_key, discovered, configured_default)
+
+    if allow_subprocess or catalog_discovered:
+        with _MODELS_CACHE_LOCK:
+            _CLI_MODELS_CACHE[cli_key] = result
+
     return result
 
 
@@ -302,12 +720,13 @@ class ModelDiscoveryThread(QThread):
 ADAPTERS = {
     "agy (Antigravity CLI)": {
         "bin": "agy",
-        "supports_effort": False,
+        "supports_effort": True,
         "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
             ["agy"]
             + ([f"--conversation={session_id}"] if (cont and session_id) else (["-c"] if cont else []))
             + (["--dangerously-skip-permissions"] if auto else [])
             + (["--model", model] if (model and model.strip()) else [])
+            + (["--effort", effort.lower()] if effort and effort.lower() != "default" else [])
             + ["--output-format", "stream-json"]
             + ["-p", p]
         ),
@@ -342,7 +761,7 @@ ADAPTERS = {
     },
     "Codex CLI": {
         "bin": "codex",
-        "supports_effort": lambda m: bool(m and (m.startswith("o1") or m.startswith("o3") or "reasoning" in m.lower())),
+        "supports_effort": True,
         "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
             (["codex", "exec", "resume", session_id] if (cont and session_id) else (["codex", "exec", "resume", "--last"] if cont else ["codex", "exec"]))
             + (["--full-auto", "--skip-git-repo-check"] if auto else ["--skip-git-repo-check"])

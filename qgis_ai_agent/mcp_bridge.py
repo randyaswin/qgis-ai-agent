@@ -97,7 +97,7 @@ def main():
             if method == "initialize":
                 res = {"protocolVersion": msg.get("params", {}).get("protocolVersion", "2025-06-18"),
                        "capabilities": {"tools": {}},
-                       "serverInfo": {"name": "qgis-ai-agent", "version": "1.1.0"}}
+                       "serverInfo": {"name": "qgis-ai-agent", "version": "1.1.1"}}
             elif method == "ping":
                 res = {}
             elif method == "tools/list":

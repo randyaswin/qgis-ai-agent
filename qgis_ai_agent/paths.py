@@ -108,6 +108,11 @@ def get_endpoint_file():
     return os.path.join(get_app_data_dir(), "endpoint.json")
 
 
+def get_models_cache_file():
+    """Returns persistent cache file path for dynamically discovered CLI models."""
+    return os.path.join(get_app_data_dir(), "models_cache.json")
+
+
 def get_workspace_project_slugs(workspace_dir):
     """Generates cross-platform project directory slugs as encoded by Claude Code / CLIs.
     Example:
@@ -309,8 +314,8 @@ def get_extra_bin_paths():
 
     extra_paths = [
         os.path.join(home, ".local", "bin"),
-        os.path.join(home, ".npm-global", "bin"),
         os.path.join(home, ".opencode", "bin"),
+        os.path.join(home, ".npm-global", "bin"),
         os.path.join(home, ".cursor", "bin"),
         os.path.join(home, ".cargo", "bin"),
         os.path.join(home, ".volta", "bin"),

@@ -822,11 +822,17 @@ class AgentDock(QDockWidget):
         self.model_combo.setEditable(True)
         self.model_combo.setToolTip("Select model or enter custom model ID")
 
+        self.btn_refresh_models = QPushButton("↻")
+        self.btn_refresh_models.setFixedWidth(26)
+        self.btn_refresh_models.setToolTip("Refresh available models from CLI")
+        self.btn_refresh_models.clicked.connect(self._refresh_models_clicked)
+
         self.effort_combo = QComboBox()
         self.effort_combo.addItem("Effort: Default", "default")
         self.effort_combo.addItem("Effort: Low", "low")
         self.effort_combo.addItem("Effort: Medium", "medium")
         self.effort_combo.addItem("Effort: High", "high")
+        self.effort_combo.addItem("Effort: Extra High", "xhigh")
         self.effort_combo.addItem("Effort: Max", "max")
         saved_effort = s.value(SKEY + "effort", "default")
         self.effort_combo.setCurrentIndex(max(0, self.effort_combo.findData(saved_effort)))
@@ -836,6 +842,7 @@ class AgentDock(QDockWidget):
 
         row1.addWidget(lbl_model)
         row1.addWidget(self.model_combo, 1)
+        row1.addWidget(self.btn_refresh_models)
         row1.addWidget(self.effort_combo)
         lay.addLayout(row1)
 
@@ -1164,6 +1171,25 @@ class AgentDock(QDockWidget):
                     color: {t['btn_hover_text']};
                 }}
             """)
+        if hasattr(self, "btn_refresh_models"):
+            self.btn_refresh_models.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {t['btn_bg']};
+                    color: {t['btn_text']};
+                    border: 1px solid {t['btn_border']};
+                    border-radius: 4px;
+                    font-weight: bold;
+                    font-size: 12px;
+                    padding: 3px 0;
+                }}
+                QPushButton:hover {{
+                    background-color: {t['btn_hover_bg']};
+                    color: {t['btn_hover_text']};
+                }}
+                QPushButton:disabled {{
+                    color: {t['lbl_subtle']};
+                }}
+            """)
         self.attach_btn.setStyleSheet(btn_style)
 
         # Indicator frame
@@ -1192,28 +1218,53 @@ class AgentDock(QDockWidget):
             return True
         return super().eventFilter(obj, ev)
 
-    def _populate_models_for_cli(self, cli_name):
-        self.model_combo.blockSignals(True)
-        self.model_combo.clear()
-        models = get_cli_models(cli_name)
-        for label, val in models:
-            self.model_combo.addItem(label, val)
+    def _get_selected_model_id(self):
+        idx = self.model_combo.currentIndex()
+        txt = self.model_combo.currentText().strip()
+        if idx >= 0 and txt == self.model_combo.itemText(idx).strip():
+            return str(self.model_combo.itemData(idx) or "").strip()
+        if not txt or txt.lower().startswith("default"):
+            return ""
+        if self.model_combo.findData(txt) >= 0:
+            return txt
+        return txt
 
+    def _refresh_models_clicked(self):
+        cli_name = self.cli.currentData()
+        if cli_name:
+            self._populate_models_for_cli(cli_name, force_refresh=True)
+
+    def _populate_models_for_cli(self, cli_name, force_refresh=False):
         s = QSettings()
-        saved_m = s.value(f"{SKEY}model_{cli_name}", "")
-        if saved_m:
-            idx = self.model_combo.findData(saved_m)
-            if idx >= 0:
-                self.model_combo.setCurrentIndex(idx)
-            else:
-                self.model_combo.setEditText(saved_m)
-        elif self.model_combo.count() > 0:
-            self.model_combo.setCurrentIndex(0)
+        saved_m = str(s.value(f"{SKEY}model_{cli_name}", "") or "").strip()
+        if saved_m.lower().startswith("default"):
+            saved_m = ""
+            s.setValue(f"{SKEY}model_{cli_name}", "")
 
-        self.model_combo.blockSignals(False)
-        self._update_effort_visibility()
+        if not force_refresh or self.model_combo.count() == 0:
+            self.model_combo.blockSignals(True)
+            self.model_combo.clear()
+            models = get_cli_models(cli_name, force_refresh=False, allow_subprocess=False)
+            for label, val in models:
+                self.model_combo.addItem(label, val)
 
-        # Always trigger background discovery so newly authenticated models / remote models update asynchronously
+            if saved_m:
+                idx = self.model_combo.findData(saved_m)
+                if idx >= 0:
+                    self.model_combo.setCurrentIndex(idx)
+                else:
+                    self.model_combo.setEditText(saved_m)
+            elif self.model_combo.count() > 0:
+                self.model_combo.setCurrentIndex(0)
+
+            self.model_combo.blockSignals(False)
+            self._update_effort_visibility()
+
+        if hasattr(self, "btn_refresh_models"):
+            self.btn_refresh_models.setEnabled(False)
+            self.btn_refresh_models.setToolTip("Detecting available models from CLI...")
+
+        # Always trigger background discovery so live CLI models / catalogs update asynchronously
         if self._model_thread is not None:
             try:
                 self._model_thread.cancel()
@@ -1227,14 +1278,32 @@ class AgentDock(QDockWidget):
         self._model_thread = t
         self._active_model_threads.add(t)
         t.models_ready.connect(self._on_models_discovered)
-        t.finished.connect(lambda th=t: (self._active_model_threads.discard(th), th.deleteLater()))
+        t.finished.connect(lambda th=t: self._on_model_thread_finished(th))
         t.start()
 
+    def _on_model_thread_finished(self, th):
+        self._active_model_threads.discard(th)
+        try:
+            from qgis.PyQt import sip
+            if not sip.isdeleted(self) and th is self._model_thread and hasattr(self, "btn_refresh_models") and not sip.isdeleted(self.btn_refresh_models):
+                self.btn_refresh_models.setEnabled(True)
+        except Exception:
+            pass
+        try:
+            th.deleteLater()
+        except Exception:
+            pass
+
     def _on_models_discovered(self, cli_name, models):
+        try:
+            from qgis.PyQt import sip
+            if sip.isdeleted(self) or sip.isdeleted(self.model_combo):
+                return
+        except Exception:
+            pass
         if self.cli.currentData() != cli_name:
             return
-        curr_text = self.model_combo.currentText()
-        curr_val = self.model_combo.currentData()
+        curr_val = self._get_selected_model_id()
 
         self.model_combo.blockSignals(True)
         self.model_combo.clear()
@@ -1246,20 +1315,21 @@ class AgentDock(QDockWidget):
             if idx >= 0:
                 self.model_combo.setCurrentIndex(idx)
             else:
-                self.model_combo.setEditText(curr_text)
-        elif curr_text and not curr_text.lower().startswith("default"):
-            self.model_combo.setEditText(curr_text)
+                self.model_combo.setEditText(curr_val)
         elif self.model_combo.count() > 0:
             self.model_combo.setCurrentIndex(0)
 
         self.model_combo.blockSignals(False)
+        if hasattr(self, "btn_refresh_models"):
+            self.btn_refresh_models.setEnabled(True)
+            self.btn_refresh_models.setToolTip(f"Refresh available models from CLI ({max(0, len(models) - 1)} models)")
         self._update_effort_visibility()
 
     def _update_effort_visibility(self):
         cli_name = self.cli.currentData()
         adapter = ADAPTERS.get(cli_name, {})
         sup = adapter.get("supports_effort", False)
-        model_id = self.model_combo.currentData() or self.model_combo.currentText().strip()
+        model_id = self._get_selected_model_id()
         is_supported = sup(model_id) if callable(sup) else bool(sup)
         self.effort_combo.setVisible(is_supported)
         if is_supported:
@@ -1277,7 +1347,7 @@ class AgentDock(QDockWidget):
 
     def _save_model_settings(self):
         cli_name = self.cli.currentData()
-        m_val = self.model_combo.currentData() or self.model_combo.currentText().strip()
+        m_val = self._get_selected_model_id()
         e_val = self.effort_combo.currentData() if self.effort_combo.isVisible() else ""
         s = QSettings()
         s.setValue(f"{SKEY}model_{cli_name}", m_val)
@@ -1326,7 +1396,7 @@ class AgentDock(QDockWidget):
     def _create_new_session(self):
         name, ok = QInputDialog.getText(self, "New Session", "Enter session name:")
         if ok and name.strip():
-            selected_model = self.model_combo.currentData() or self.model_combo.currentText().strip() or ""
+            selected_model = self._get_selected_model_id()
             selected_effort = (self.effort_combo.currentData() or "default") if self.effort_combo.isVisible() else ""
             self.session_manager.create_session(
                 name=name.strip(),
@@ -2016,13 +2086,7 @@ class AgentDock(QDockWidget):
         self._current_assistant_text += text
         if not self.is_agent_streaming:
             cli_label = self.cli.currentData()
-            model_info = self.model_combo.currentData()
-            if not model_info:
-                txt = self.model_combo.currentText().strip()
-                if txt and not txt.lower().startswith("default"):
-                    model_info = txt
-                else:
-                    model_info = ""
+            model_info = self._get_selected_model_id()
             effort_info = self.effort_combo.currentData() if self.effort_combo.isVisible() else ""
             meta = [cli_label]
             if model_info:
@@ -2761,17 +2825,7 @@ class AgentDock(QDockWidget):
             skills_txt = prompts.skills_block(sel, catalog) if loaded_skills else ""
 
         # Model and Effort selection
-        selected_model = self.model_combo.currentData()
-        if selected_model is not None and str(selected_model).strip() == "":
-            selected_model = None
-        elif not selected_model:
-            txt = self.model_combo.currentText().strip()
-            if txt and not txt.lower().startswith("default"):
-                selected_model = txt
-            else:
-                selected_model = None
-        if selected_model and "default" in selected_model.lower():
-            selected_model = None
+        selected_model = self._get_selected_model_id() or None
         selected_effort = self.effort_combo.currentData() if self.effort_combo.isVisible() else None
 
         # Update active session metadata

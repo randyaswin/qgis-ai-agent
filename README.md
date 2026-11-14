@@ -2,7 +2,7 @@
 
 [![QGIS Version](https://img.shields.io/badge/QGIS-3.34+-589632.svg?logo=qgis&logoColor=white)](https://qgis.org/)
 [![License: GPL v3+](https://img.shields.io/badge/License-GPL_v3+-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.html)
-[![Version](https://img.shields.io/badge/version-1.1.0-orange.svg)](https://github.com/randyaswin/qgis-ai-agent/releases)
+[![Version](https://img.shields.io/badge/version-1.1.1-orange.svg)](https://github.com/randyaswin/qgis-ai-agent/releases)
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Protocol: MCP](https://img.shields.io/badge/Protocol-MCP-8A2BE2.svg)](https://modelcontextprotocol.io/)
 
@@ -87,7 +87,7 @@ Layouts adapt to your domain theme. The agent never forces generic templates on 
 ## 🚀 Installation
 
 ### Option A: Install via QGIS Plugin Manager (Recommended)
-1. Download the latest `qgis_ai_agent-1.1.0.zip` from [Releases](https://github.com/randyaswin/qgis-ai-agent/releases).
+1. Download the latest `qgis_ai_agent-1.1.1.zip` from [Releases](https://github.com/randyaswin/qgis-ai-agent/releases).
 2. In QGIS, navigate to **Plugins** ➔ **Manage and Install Plugins...**
 3. Select **Install from ZIP**, choose the downloaded zip file, and click **Install Plugin**.
 4. Activate the plugin: check **QGIS Copilot** in the plugin list.
