@@ -2,7 +2,7 @@
 
 [![QGIS Version](https://img.shields.io/badge/QGIS-3.34+-589632.svg?logo=qgis&logoColor=white)](https://qgis.org/)
 [![License: GPL v3+](https://img.shields.io/badge/License-GPL_v3+-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.html)
-[![Version](https://img.shields.io/badge/version-1.0.0-orange.svg)](https://github.com/randyaswin/qgis-ai-agent/releases)
+[![Version](https://img.shields.io/badge/version-1.1.0-orange.svg)](https://github.com/randyaswin/qgis-ai-agent/releases)
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Protocol: MCP](https://img.shields.io/badge/Protocol-MCP-8A2BE2.svg)](https://modelcontextprotocol.io/)
 
@@ -33,7 +33,7 @@ From a single prompt, the agent searches authentic open data, performs spatial a
 │              ▼                                     │                   │
 │  ┌───────────────────────┐         ┌───────────────┴────────────────┐  │
 │  │ QProcess CLI Runner   │         │ ToolServer (Local Socket)      │  │
-│  │ (agy / claude / etc.) │         │ • 51+ Deep PyQGIS Tools        │  │
+│  │ (agy / claude / etc.) │         │ • 70 Deep PyQGIS Tools         │  │
 │  └───────────┬───────────┘         └───────────────▲────────────────┘  │
 └──────────────┼─────────────────────────────────────┼───────────────────┘
                │ stdio                               │ TCP (Auth Token)
@@ -73,8 +73,8 @@ Layouts adapt to your domain theme. The agent never forces generic templates on 
 * **Public COGs & STAC Integration:** Stream Cloud-Optimized GeoTIFFs (Copernicus DEM 30m, ESA WorldCover, Sentinel-2, Landsat) on-the-fly via `/vsicurl/`.
 * **Keyless XYZ Basemaps:** Preconfigured with Esri Light Canvas, OpenStreetMap, Esri Satellite, CartoDB Positron, and Esri Topo.
 
-### 3. 🧠 56 GIS Domain Skills with Multilingual Smart Selection
-* **22 Custom Specialized Skills:** Cartographic symbology, label hierarchy (PAL engine), color theory & colorblind safety, thematic mapping (bivariate, dasymetric, cartograms), multiscale LOD generalization, disaster dashboards, network accessibility, and landcover statistics.
+### 3. 🧠 61 GIS Domain Skills with Multilingual Smart Selection
+* **27 Custom Specialized Skills:** Cartographic symbology, label hierarchy (PAL engine), color theory & colorblind safety, thematic mapping (bivariate, dasymetric, cartograms), multiscale LOD generalization, disaster dashboards, network accessibility, landcover statistics, raster grid interpretation, RTRW urban zoning, multi-hazard modeling, watershed/SLR hydrology, and automated topology QA.
 * **34 Vendored Open-Source Skills:** GeoAI spatial statistics, LiDAR point cloud processing, MCDA suitability analysis, remote sensing indices, and PostGIS spatial SQL.
 * **Smart Auto-Selection:** Powered by multi-word phrase matching, custom skill boost, and meta-orchestrator downranking across **English**, **Japanese (日本語)**, and **Indonesian (Bahasa Indonesia)**.
 
@@ -87,7 +87,7 @@ Layouts adapt to your domain theme. The agent never forces generic templates on 
 ## 🚀 Installation
 
 ### Option A: Install via QGIS Plugin Manager (Recommended)
-1. Download the latest `qgis_ai_agent-1.0.0.zip` from [Releases](https://github.com/randyaswin/qgis-ai-agent/releases).
+1. Download the latest `qgis_ai_agent-1.1.0.zip` from [Releases](https://github.com/randyaswin/qgis-ai-agent/releases).
 2. In QGIS, navigate to **Plugins** ➔ **Manage and Install Plugins...**
 3. Select **Install from ZIP**, choose the downloaded zip file, and click **Install Plugin**.
 4. Activate the plugin: check **QGIS Copilot** in the plugin list.
@@ -131,7 +131,7 @@ Restart QGIS and enable **QGIS Copilot** in the Plugins menu.
 
 ---
 
-## 🛠️ Complete MCP Tool Catalog (51+ Tools)
+## 🛠️ Complete MCP Tool Catalog (70 Tools)
 
 | Category | Tools | Description |
 | :--- | :--- | :--- |
@@ -141,8 +141,8 @@ Restart QGIS and enable **QGIS Copilot** in the Plugins menu.
 | **Symbology & Styling** | `style_single`, `style_categorized`, `style_graduated`, `style_raster`, `load_style`, `list_color_ramps`, `set_labels` | Complete cartographic rendering, cased roads, color ramps, and PAL typography. |
 | **Print Layouts** | `create_styled_layout`, `create_layout`, `add_layout_map`, `add_layout_shape`, `add_layout_text`, `add_layout_legend`, `add_layout_scalebar`, `add_layout_north_arrow`, `add_layout_inset_map`, `add_layout_infographic_chart`, `export_layout` | Composable print design across 5 archetypes, inset locators, and export (PDF/PNG/SVG). |
 | **Processing & GIS** | `list_processing_providers`, `list_algorithms`, `describe_algorithm`, `run_processing`, `open_processing_toolbox`, `open_model_designer` | Full access to 440+ native C++, GDAL, and GRASS processing algorithms. |
-| **Digitizing & GCP** | `georeference_raster`, `create_vector_layer`, `digitize_features`, `check_validity` | Georeference aerial scans via GCPs, scaffold GeoPackages, and digitize geometries. |
-| **Skills Registry** | `list_skills`, `load_skill` | Search and inject 56 specialized domain cartography and GIS analytical skills. |
+| **Digitizing, Grid & GCP** | `georeference_raster`, `create_vector_layer`, `digitize_features`, `create_sampling_grid`, `label_grid_cells`, `check_validity` | Helmert/polynomial/TPS GCP georeferencing, GeoPackage scaffolding, topological digitizing, and sampling grid classification. |
+| **Skills Registry** | `list_skills`, `load_skill` | Search and inject 61 specialized domain cartography and GIS analytical skills. |
 
 ---
 

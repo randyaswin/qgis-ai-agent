@@ -33,7 +33,7 @@ _counter = [0]
 
 def qgis_rpc(method, params=None):
     try:
-        with open(ENDPOINT_FILE) as f:
+        with open(ENDPOINT_FILE, encoding="utf-8") as f:
             ep = json.load(f)
     except FileNotFoundError:
         raise RuntimeError("QGIS Copilot plugin is not running. Open QGIS and enable the plugin.")
@@ -76,6 +76,12 @@ def send(msg):
 
 
 def main():
+    for stream in (sys.stdin, sys.stdout):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -91,7 +97,7 @@ def main():
             if method == "initialize":
                 res = {"protocolVersion": msg.get("params", {}).get("protocolVersion", "2025-06-18"),
                        "capabilities": {"tools": {}},
-                       "serverInfo": {"name": "qgis-ai-agent", "version": "0.1.0"}}
+                       "serverInfo": {"name": "qgis-ai-agent", "version": "1.1.0"}}
             elif method == "ping":
                 res = {}
             elif method == "tools/list":

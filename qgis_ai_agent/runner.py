@@ -17,23 +17,30 @@ from . import paths
 
 GUARD = os.path.join(os.path.dirname(__file__), "guard.py")
 BRIDGE = os.path.join(os.path.dirname(__file__), "mcp_bridge.py")
-PY = shutil.which("python3") or shutil.which("python") or sys.executable
+PY = paths.get_python_executable()
 
 
 def find_cli_bin(bin_name):
     """Finds CLI binary across standard and user npm/local/cargo paths cross-platform."""
-    p = shutil.which(bin_name)
+    if not bin_name:
+        return bin_name
+    aug_path = paths.get_augmented_path_env().get("PATH", "")
+    p = shutil.which(bin_name, path=aug_path) or shutil.which(bin_name)
     if p:
+        if sys.platform == "win32" and not os.path.splitext(p)[1]:
+            for ext in (".exe", ".cmd", ".bat"):
+                if os.path.isfile(p + ext):
+                    return p + ext
         return p
     for ep in paths.get_extra_bin_paths():
-        candidate = os.path.join(ep, bin_name)
-        if os.path.isfile(candidate) and (os.access(candidate, os.X_OK) or sys.platform == "win32"):
-            return candidate
         if sys.platform == "win32":
-            for ext in [".cmd", ".bat", ".exe"]:
+            for ext in (".exe", ".cmd", ".bat"):
                 candidate_cmd = os.path.join(ep, bin_name + ext)
                 if os.path.isfile(candidate_cmd):
                     return candidate_cmd
+        candidate = os.path.join(ep, bin_name)
+        if os.path.isfile(candidate) and (os.access(candidate, os.X_OK) or sys.platform == "win32"):
+            return candidate
     return bin_name
 
 
@@ -141,7 +148,14 @@ def get_cli_models(cli_key, force_refresh=False):
     # 1. Antigravity CLI: dynamic live models via `agy models`
     if "agy" in bin_name.lower():
         try:
-            res = subprocess.run([bin_path, "models"], capture_output=True, text=True, timeout=4)
+            res = subprocess.run(
+                [bin_path, "models"],
+                capture_output=True,
+                text=True,
+                timeout=2.5,
+                env=paths.get_augmented_path_env(),
+                **paths.get_subprocess_kwargs(),
+            )
             if res.returncode == 0 and res.stdout:
                 clean = re.sub(r'\x1b\[[0-9;?]*[A-Za-z]|\r', '', res.stdout)
                 for line in clean.splitlines():
@@ -159,7 +173,14 @@ def get_cli_models(cli_key, force_refresh=False):
     # 2. OpenCode CLI: dynamic live models via `opencode models`
     elif "opencode" in bin_name.lower():
         try:
-            res = subprocess.run([bin_path, "models"], capture_output=True, text=True, timeout=4)
+            res = subprocess.run(
+                [bin_path, "models"],
+                capture_output=True,
+                text=True,
+                timeout=2.5,
+                env=paths.get_augmented_path_env(),
+                **paths.get_subprocess_kwargs(),
+            )
             if res.returncode == 0 and res.stdout:
                 for line in res.stdout.splitlines():
                     line = line.strip()
@@ -264,10 +285,17 @@ class ModelDiscoveryThread(QThread):
     def __init__(self, cli_name, parent=None):
         super().__init__(parent)
         self.cli_name = cli_name
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
 
     def run(self):
+        if self._cancelled:
+            return
         models = get_cli_models(self.cli_name, force_refresh=True)
-        self.models_ready.emit(self.cli_name, models)
+        if not self._cancelled:
+            self.models_ready.emit(self.cli_name, models)
 
 
 # name -> run(prompt, continue, auto_approve, model, effort) -> argv, plus MCP registration command.
@@ -329,7 +357,7 @@ ADAPTERS = {
         "bin": "copilot",
         "supports_effort": False,
         "run": lambda p, cont, auto, model=None, effort=None, session_id=None: (
-            (["copilot"] if shutil.which("copilot") else ["gh", "copilot"])
+            ([find_cli_bin("copilot")] if is_bin_available("copilot") else [find_cli_bin("gh"), "copilot"])
             + (["--resume", session_id] if (cont and session_id) else (["--continue"] if cont else []))
             + (["--yolo"] if auto else [])
             + (["--model", model] if (model and model.strip()) else [])
@@ -423,10 +451,8 @@ ADAPTERS = {
 
 
 def is_bin_available(bin_name):
-    if shutil.which(bin_name):
-        return True
     found = find_cli_bin(bin_name)
-    return bool(found and (os.path.isabs(found) and os.path.exists(found)))
+    return bool(found and os.path.isabs(found) and os.path.exists(found))
 
 
 def available():
@@ -434,7 +460,7 @@ def available():
     for k, v in ADAPTERS.items():
         bin_name = v.get("bin", "")
         if bin_name == "copilot":
-            is_avail = is_bin_available("copilot") or bool(shutil.which("gh"))
+            is_avail = is_bin_available("copilot") or is_bin_available("gh")
         elif bin_name == "deepseek":
             is_avail = is_bin_available("deepseek") or is_bin_available("hermes") or is_bin_available("dsh")
         elif bin_name == "cursor-agent":
@@ -469,7 +495,12 @@ def get_process_descendants(root_pid, protected_pids=None):
             except Exception:
                 pass
         try:
-            out = subprocess.check_output(["pgrep", "-P", str(curr)], stderr=subprocess.DEVNULL, text=True)
+            out = subprocess.check_output(
+                ["pgrep", "-P", str(curr)],
+                stderr=subprocess.DEVNULL,
+                text=True,
+                **paths.get_subprocess_kwargs(),
+            )
             for c in out.split():
                 if c.isdigit():
                     found.add(int(c))
@@ -511,7 +542,8 @@ def kill_entire_tree(root_pids, protected_pids=None):
                     subprocess.call(
                         ["taskkill", "/F", "/T", "/PID", str(rpid)],
                         stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL
+                        stderr=subprocess.DEVNULL,
+                        **paths.get_subprocess_kwargs(),
                     )
                 except Exception:
                     pass
@@ -570,6 +602,7 @@ class CliRunner(QObject):
         super().__init__(parent)
         self.proc = None
         self._current_pid_file = None
+        self._stopping = False
 
     def running(self):
         return self.proc is not None and self.proc.state() != QProcess.ProcessState.NotRunning
@@ -582,13 +615,32 @@ class CliRunner(QObject):
                 pass
         self._current_pid_file = None
 
+    def _dispose_proc(self):
+        proc = self.proc
+        self.proc = None
+        if not proc:
+            return
+        for sig_name in ("readyReadStandardOutput", "finished", "errorOccurred"):
+            try:
+                getattr(proc, sig_name).disconnect()
+            except Exception:
+                pass
+        try:
+            proc.deleteLater()
+        except Exception:
+            pass
+
     def _on_finished(self, code, _status=None):
         self._cleanup_pid_file()
+        if self._stopping:
+            return
         self.finished.emit(code)
 
     def start(self, argv, cwd):
         if self.running():
             raise RuntimeError("An agent is already running")
+        self._dispose_proc()
+        self._stopping = False
         self.proc = QProcess(self)
         env = QProcessEnvironment.systemEnvironment()
         env.insert("NO_COLOR", "1")
@@ -606,17 +658,27 @@ class CliRunner(QObject):
         self.proc.setWorkingDirectory(cwd)
         self.proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.proc.readyReadStandardOutput.connect(
-            lambda: self.output.emit(bytes(self.proc.readAllStandardOutput()).decode(errors="replace")))
+            lambda: self.proc and self.output.emit(bytes(self.proc.readAllStandardOutput()).decode(errors="replace")))
         self.proc.finished.connect(self._on_finished)
         self.proc.errorOccurred.connect(lambda e: self.output.emit(f"\n[process error: {e}]\n"))
 
-        bin_exec = shutil.which(argv[0]) or argv[0]
+        bin_exec = find_cli_bin(argv[0])
         # Wrap CLI invocation with guard.py to guarantee termination if QGIS closes or crashes
         qgis_pid = str(os.getpid())
         guard_argv = [PY, GUARD, qgis_pid, cwd, bin_exec] + argv[1:]
+        # Keep stdin pipe open so guard.py's stdin_eof_monitor detects stop() or unexpected QGIS exit
         self.proc.start(guard_argv[0], guard_argv[1:])
 
     def stop(self):
+        self._stopping = True
+
+        # Signal guard.py via stdin EOF first before escalating to tree kill
+        if self.proc:
+            try:
+                self.proc.closeWriteChannel()
+            except Exception:
+                pass
+
         # 1. Read child CLI PID directly from the tracking file if available
         child_pid = None
         if self._current_pid_file and os.path.exists(self._current_pid_file):
@@ -650,4 +712,5 @@ class CliRunner(QObject):
                 self.proc.kill()
                 self.proc.waitForFinished(200)
 
+        self._dispose_proc()
         self._cleanup_pid_file()

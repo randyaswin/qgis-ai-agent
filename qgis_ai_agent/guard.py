@@ -11,11 +11,14 @@ It monitors the parent QGIS process via:
 import ctypes
 import glob
 import os
+import shutil
 import signal
 import subprocess
 import sys
 import threading
 import time
+
+_SUBPROC_KWARGS = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)} if sys.platform == "win32" else {}
 
 
 def _get_process_tree(root_pid, protected_pids):
@@ -36,7 +39,7 @@ def _get_process_tree(root_pid, protected_pids):
                 pass
         # 2. pgrep -P fallback (cross-unix / macOS)
         try:
-            out = subprocess.check_output(["pgrep", "-P", str(curr)], stderr=subprocess.DEVNULL, text=True)
+            out = subprocess.check_output(["pgrep", "-P", str(curr)], stderr=subprocess.DEVNULL, text=True, **_SUBPROC_KWARGS)
             for c in out.split():
                 if c.isdigit():
                     found.add(int(c))
@@ -152,7 +155,8 @@ def main():
                 subprocess.call(
                     ["taskkill", "/F", "/T", "/PID", str(c_pid)],
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
+                    stderr=subprocess.DEVNULL,
+                    **_SUBPROC_KWARGS,
                 )
             except Exception:
                 pass
@@ -287,14 +291,23 @@ def main():
                 pass
 
     creationflags = 0
-    if sys.platform == "win32" and hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
-        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+    if sys.platform == "win32":
+        creationflags = (
+            getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        )
+        resolved_bin = shutil.which(child_cmd[0]) or child_cmd[0]
+        if resolved_bin.lower().endswith((".cmd", ".bat")):
+            child_cmd = [os.environ.get("COMSPEC", "cmd.exe"), "/d", "/s", "/c", resolved_bin] + child_cmd[1:]
+        else:
+            child_cmd = [resolved_bin] + child_cmd[1:]
 
     try:
         proc = subprocess.Popen(
             child_cmd,
             cwd=cwd,
-            preexec_fn=_child_preexec,
+            stdin=subprocess.DEVNULL,
+            preexec_fn=_child_preexec if sys.platform != "win32" else None,
             creationflags=creationflags
         )
 

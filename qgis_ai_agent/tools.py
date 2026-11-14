@@ -7,6 +7,7 @@ labels, processing, expressions, print layout, export, canvas snapshot.
 """
 import base64
 import contextlib
+import gc
 import glob
 import html
 import io
@@ -19,6 +20,7 @@ import time
 import traceback
 from . import paths
 
+from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QSize, QBuffer, QIODevice, Qt
 from qgis.PyQt.QtGui import QColor, QFont, QImage
 from qgis.core import (
@@ -34,7 +36,7 @@ from qgis.core import (
     QgsLayoutItemScaleBar, QgsLayoutItemPicture, QgsLayoutPoint, QgsLayoutSize,
     QgsLayoutMeasurement, QgsUnitTypes, QgsLayoutItemPage, QgsLayoutExporter,
     QgsSingleBandPseudoColorRenderer, QgsColorRampShader, QgsRasterShader, QgsRasterBandStats, QgsWkbTypes,
-    QgsGeometry, QgsPointXY, QgsFeature, QgsMessageLog,
+    QgsGeometry, QgsPointXY, QgsFeature, QgsMessageLog, QgsProcessingFeedback,
 )
 from qgis.PyQt.QtCore import QMetaType
 
@@ -285,14 +287,46 @@ def get_project_state():
     return state
 
 
+def _is_deleted(obj):
+    if obj is None:
+        return True
+    try:
+        return bool(sip.isdeleted(obj))
+    except Exception:
+        return False
+
+
+@contextlib.contextmanager
+def _canvas_freeze_guard():
+    """Stop active parallel rendering and freeze the canvas across destructive project reloads."""
+    c = _canvas()
+    if c and not _is_deleted(c):
+        try:
+            c.stopRendering()
+            c.freeze(True)
+        except Exception:
+            pass
+    try:
+        yield
+    finally:
+        if c and not _is_deleted(c):
+            try:
+                c.freeze(False)
+                c.refreshAllLayers()
+            except Exception:
+                pass
+        gc.collect()
+
+
 @tool("Clear the project and start fresh.", {"crs": S("string", "e.g. EPSG:4326 or EPSG:32748")})
 def new_project(crs="EPSG:4326"):
     p = QgsProject.instance()
-    p.clear()
-    c = QgsCoordinateReferenceSystem(crs)
-    if c.isValid():
-        p.setCrs(c)
-    _sanitize_canvas_extent(target_crs=c)
+    with _canvas_freeze_guard():
+        p.clear()
+        c = QgsCoordinateReferenceSystem(crs)
+        if c.isValid():
+            p.setCrs(c)
+        _sanitize_canvas_extent(target_crs=c)
     return get_project_state()
 
 
@@ -334,7 +368,8 @@ def save_project(path=None):
 def open_project(path):
     if not os.path.exists(path):
         raise FileNotFoundError(f"Project file not found: {path}")
-    QgsProject.instance().read(path)
+    with _canvas_freeze_guard():
+        QgsProject.instance().read(path)
     return get_project_state()
 
 
@@ -530,9 +565,11 @@ def georeference_raster(image_path, gcps, output_path=None, crs="EPSG:4326", tra
     # Prepare GDAL GCPs (for true 4-DOF Helmert, synthesize exact corner GCPs so GDAL applies zero shear/skew)
     if t_low == "helmert":
         src_ds = gdal.Open(image_path)
-        src_w = src_ds.RasterXSize if src_ds else 1000
-        src_h = src_ds.RasterYSize if src_ds else 1000
-        src_ds = None
+        try:
+            src_w = src_ds.RasterXSize if src_ds else 1000
+            src_h = src_ds.RasterYSize if src_ds else 1000
+        finally:
+            src_ds = None
         corners = [(0.0, 0.0), (float(src_w), 0.0), (0.0, float(src_h)), (float(src_w), float(src_h))]
         gdal_gcps = [
             gdal.GCP(tx + a * cx - b * cy, ty + b * cx + a * cy, 0.0, cx, cy)
@@ -561,11 +598,6 @@ def georeference_raster(image_path, gcps, output_path=None, crs="EPSG:4326", tra
     srs = osr.SpatialReference()
     srs.SetFromUserInput(crs)
 
-    vrt_path = f"/vsimem/gcp_warp_{os.getpid()}_{len(parsed_gcps)}.vrt"
-    temp_ds = gdal.Translate(vrt_path, image_path, GCPs=gdal_gcps, outputSRS=srs)
-    if not temp_ds:
-        raise RuntimeError("Failed to attach GCPs to image.")
-
     resample_map = {
         "nearest": gdal.GRA_NearestNeighbour,
         "bilinear": gdal.GRA_Bilinear,
@@ -586,17 +618,30 @@ def georeference_raster(image_path, gcps, output_path=None, crs="EPSG:4326", tra
         base, _ = os.path.splitext(image_path)
         output_path = f"{base}_georef.tif"
 
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    out_ds = gdal.Warp(output_path, temp_ds, options=warp_options)
+    vrt_path = f"/vsimem/gcp_warp_{os.getpid()}_{len(parsed_gcps)}.vrt"
     temp_ds = None
-    gdal.Unlink(vrt_path)
-
-    if not out_ds:
-        raise RuntimeError(f"GDAL warping failed for {output_path}")
-
-    gt = out_ds.GetGeoTransform()
-    width, height = out_ds.RasterXSize, out_ds.RasterYSize
     out_ds = None
+    try:
+        temp_ds = gdal.Translate(vrt_path, image_path, GCPs=gdal_gcps, outputSRS=srs)
+        if not temp_ds:
+            raise RuntimeError("Failed to attach GCPs to image.")
+
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+        out_ds = gdal.Warp(output_path, temp_ds, options=warp_options)
+        temp_ds = None
+
+        if not out_ds:
+            raise RuntimeError(f"GDAL warping failed for {output_path}")
+
+        gt = out_ds.GetGeoTransform()
+        width, height = out_ds.RasterXSize, out_ds.RasterYSize
+    finally:
+        temp_ds = None
+        out_ds = None
+        try:
+            gdal.Unlink(vrt_path)
+        except Exception:
+            pass
 
     layer_info = None
     if load_to_canvas:
@@ -663,34 +708,36 @@ def create_vector_layer(layer_name, geometry_type="Polygon", crs="EPSG:4326", fi
         if ds is None:
             raise RuntimeError(f"Could not open/create OGR datasource at {output_path}")
 
-        wkb_map = {
-            "point": ogr.wkbPoint,
-            "linestring": ogr.wkbLineString,
-            "polygon": ogr.wkbPolygon,
-            "multipoint": ogr.wkbMultiPoint,
-            "multilinestring": ogr.wkbMultiLineString,
-            "multipolygon": ogr.wkbMultiPolygon
-        }
-        wkb = wkb_map.get(geom_str.lower(), ogr.wkbPolygon)
-        ogr_layer = ds.CreateLayer(layer_name, srs, wkb, options=create_opts) if create_opts else ds.CreateLayer(layer_name, srs, wkb)
-        if ogr_layer is None:
-            raise RuntimeError(f"Failed to create OGR layer '{layer_name}' in {output_path}")
+        try:
+            wkb_map = {
+                "point": ogr.wkbPoint,
+                "linestring": ogr.wkbLineString,
+                "polygon": ogr.wkbPolygon,
+                "multipoint": ogr.wkbMultiPoint,
+                "multilinestring": ogr.wkbMultiLineString,
+                "multipolygon": ogr.wkbMultiPolygon
+            }
+            wkb = wkb_map.get(geom_str.lower(), ogr.wkbPolygon)
+            ogr_layer = ds.CreateLayer(layer_name, srs, wkb, options=create_opts) if create_opts else ds.CreateLayer(layer_name, srs, wkb)
+            if ogr_layer is None:
+                raise RuntimeError(f"Failed to create OGR layer '{layer_name}' in {output_path}")
 
-        ogr_type_map = {
-            "int": ogr.OFTInteger, "integer": ogr.OFTInteger,
-            "int64": ogr.OFTInteger64, "long": ogr.OFTInteger64,
-            "double": ogr.OFTReal, "float": ogr.OFTReal, "real": ogr.OFTReal,
-            "string": ogr.OFTString, "str": ogr.OFTString, "text": ogr.OFTString,
-            "bool": getattr(ogr, "OFTBoolean", ogr.OFTInteger), "boolean": getattr(ogr, "OFTBoolean", ogr.OFTInteger),
-            "date": ogr.OFTDate, "datetime": ogr.OFTDateTime,
-        }
-        if fields:
-            for f in fields:
-                f_name = f.get("name", "field")
-                f_type = str(f.get("type", "string")).lower()
-                ogr_layer.CreateField(ogr.FieldDefn(f_name, ogr_type_map.get(f_type, ogr.OFTString)))
-        ds.FlushCache()
-        ds = None
+            ogr_type_map = {
+                "int": ogr.OFTInteger, "integer": ogr.OFTInteger,
+                "int64": ogr.OFTInteger64, "long": ogr.OFTInteger64,
+                "double": ogr.OFTReal, "float": ogr.OFTReal, "real": ogr.OFTReal,
+                "string": ogr.OFTString, "str": ogr.OFTString, "text": ogr.OFTString,
+                "bool": getattr(ogr, "OFTBoolean", ogr.OFTInteger), "boolean": getattr(ogr, "OFTBoolean", ogr.OFTInteger),
+                "date": ogr.OFTDate, "datetime": ogr.OFTDateTime,
+            }
+            if fields:
+                for f in fields:
+                    f_name = f.get("name", "field")
+                    f_type = str(f.get("type", "string")).lower()
+                    ogr_layer.CreateField(ogr.FieldDefn(f_name, ogr_type_map.get(f_type, ogr.OFTString)))
+            ds.FlushCache()
+        finally:
+            ds = None
 
         uri = f"{output_path}|layername={layer_name}" if driver == "GPKG" else output_path
         lyr = QgsVectorLayer(uri, layer_name, "ogr")
@@ -1742,6 +1789,15 @@ def describe_algorithm(algorithm):
         "outputs": [o.name() for o in a.outputDefinitions()]}
 
 
+class _CancelableFeedback(QgsProcessingFeedback):
+    """Processing feedback that honours user stop requests promptly."""
+
+    def setProgress(self, progress):
+        if CANCEL_REQUESTED:
+            self.cancel()
+        super().setProgress(progress)
+
+
 @tool("Run a Processing algorithm. Layer params accept layer names/ids. OUTPUT defaults to TEMPORARY_OUTPUT. Results are added to the map when load=true.",
       {"algorithm": S("string", ""), "params": S("object", "parameter dict"),
        "load": S("boolean", "default true"), "output_name": S("string", "rename the loaded result")})
@@ -1756,8 +1812,9 @@ def run_processing(algorithm, params, load=True, output_name=None):
     a = QgsApplication.processingRegistry().algorithmById(algorithm)
     if a and "OUTPUT" in [o.name() for o in a.outputDefinitions()]:
         params.setdefault("OUTPUT", "TEMPORARY_OUTPUT")
+    feedback = _CancelableFeedback()
     before = set(QgsProject.instance().mapLayers())
-    res = processing.runAndLoadResults(algorithm, params) if load else processing.run(algorithm, params)
+    res = processing.runAndLoadResults(algorithm, params, feedback=feedback) if load else processing.run(algorithm, params, feedback=feedback)
     _sanitize_canvas_extent()
     new = [QgsProject.instance().mapLayer(i) for i in set(QgsProject.instance().mapLayers()) - before]
     if output_name and new:
@@ -2003,20 +2060,27 @@ def _render(extent, width, height, layers=None):
     c = _canvas()
     if layers is not None:
         target_layers = layers
-    elif c and hasattr(c, "layers") and c.layers():
+    elif c and not _is_deleted(c) and hasattr(c, "layers") and c.layers():
         target_layers = c.layers()
     else:
         root = p.layerTreeRoot()
         target_layers = [l for l in p.mapLayers().values() if (not root.findLayer(l.id())) or root.findLayer(l.id()).isVisible()]
+    target_layers = [l for l in target_layers if not _is_deleted(l) and l.isValid()]
     ms.setLayers(target_layers)
     ms.setDestinationCrs(p.crs())
     ms.setExtent(extent)
     ms.setOutputSize(QSize(int(width), int(height)))
     ms.setBackgroundColor(QColor("white"))
     job = QgsMapRendererParallelJob(ms)
-    job.start()
-    job.waitForFinished()
-    return job.renderedImage()
+    try:
+        job.start()
+        job.waitForFinished()
+        return QImage(job.renderedImage())
+    finally:
+        try:
+            job.deleteLater()
+        except Exception:
+            pass
 
 
 @tool("Render the current map canvas to PNG and return it as an image so you can visually verify the map.",
@@ -2234,7 +2298,6 @@ def _open_layout_window(lay):
         return None
     try:
         from qgis.PyQt.QtWidgets import QApplication
-        from qgis.PyQt.QtCore import QEventLoop
         designer = iface.openLayoutDesigner(lay)
         if designer and hasattr(designer, "window"):
             win = designer.window()
@@ -2253,9 +2316,6 @@ def _open_layout_window(lay):
                     win.setGeometry(x, y, w, h)
                 win.show()
                 win.raise_()
-        from qgis.PyQt.QtCore import QEventLoop
-        from qgis.PyQt.QtWidgets import QApplication
-        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
         return designer
     except Exception:
         pass
@@ -4299,15 +4359,27 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
     t_type = (type or default_types.get(t_name, t_name)).lower()
 
     if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
-        c = _canvas()
-        cur_ext = c.extent() if c else None
-        p_crs = QgsProject.instance().crs()
-        wgs_ext = _safe_transform_extent(cur_ext, p_crs, QgsCoordinateReferenceSystem("EPSG:4326"), QgsProject.instance())
+        p = QgsProject.instance()
+        wgs_ext = None
+        if p.mapLayers():
+            c = _canvas()
+            p_crs = p.crs()
+            wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+            cur_ext = c.extent() if c and not _is_deleted(c) else None
+            wgs_ext = _safe_transform_extent(cur_ext, p_crs, wgs84, p)
+            if not (wgs_ext and _is_valid_extent(wgs_ext)):
+                comb = None
+                for lyr in p.mapLayers().values():
+                    if lyr.isValid() and lyr.providerType() != "wms" and _is_valid_extent(lyr.extent()):
+                        tr = _safe_transform_extent(lyr.extent(), lyr.crs(), wgs84, p)
+                        if tr:
+                            comb = QgsRectangle(tr) if comb is None else (comb.combineExtentWith(tr) or comb)
+                wgs_ext = comb
         if wgs_ext and _is_valid_extent(wgs_ext):
             bbox = [round(wgs_ext.xMinimum(), 5), round(wgs_ext.yMinimum(), 5),
                     round(wgs_ext.xMaximum(), 5), round(wgs_ext.yMaximum(), 5)]
         else:
-            bbox = [137.35, 34.73, 137.45, 34.80]
+            raise ValueError("Cannot determine bounding box from empty project/canvas; please pass explicit 'bbox': [xmin, ymin, xmax, ymax] in WGS84.")
 
     raw_xmin, raw_ymin, raw_xmax, raw_ymax = bbox
     xmin = max(-180.0, min(180.0, min(raw_xmin, raw_xmax)))
@@ -4344,8 +4416,11 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
             pass
     s3_path = f"s3://overturemaps-us-west-2/release/2026-10-21.0/theme={t_name}/type={t_type}/*"
 
+    home_dir_sql = paths.get_home_dir().replace("\\", "/").replace("'", "''")
+    out_file_sql = out_file.replace("\\", "/").replace("'", "''")
     con = duckdb.connect()
     try:
+        con.execute(f"SET home_directory='{home_dir_sql}';")
         con.execute("INSTALL spatial; LOAD spatial; INSTALL httpfs; LOAD httpfs;")
         con.execute("SET s3_region='us-west-2';")
         con.execute("SET geometry_always_xy=true;")
@@ -4359,7 +4434,7 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
             FROM read_parquet('{s3_path}', hive_partitioning=1)
             WHERE {' AND '.join(where_clauses)}
             LIMIT {safe_limit}
-        ) TO '{out_file}' WITH (FORMAT GDAL, DRIVER 'GPKG');
+        ) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
         """
         con.execute(copy_query)
     except Exception as e:
@@ -4408,8 +4483,11 @@ def query_duckdb_spatial(query, layer_name="DuckDB_Layer"):
             os.remove(out_file)
         except Exception:
             pass
+    home_dir_sql = paths.get_home_dir().replace("\\", "/").replace("'", "''")
+    out_file_sql = out_file.replace("\\", "/").replace("'", "''")
     con = duckdb.connect()
     try:
+        con.execute(f"SET home_directory='{home_dir_sql}';")
         con.execute("INSTALL spatial; LOAD spatial; INSTALL httpfs; LOAD httpfs;")
         con.execute("SET s3_region='us-west-2';")
         con.execute("SET geometry_always_xy=true;")
@@ -4417,7 +4495,7 @@ def query_duckdb_spatial(query, layer_name="DuckDB_Layer"):
         con.execute("SET threads=2;")
         con.execute("SET preserve_insertion_order=false;")
 
-        copy_query = f"COPY ({query}) TO '{out_file}' WITH (FORMAT GDAL, DRIVER 'GPKG');"
+        copy_query = f"COPY ({query}) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');"
         con.execute(copy_query)
     except Exception as e:
         raise RuntimeError(f"DuckDB spatial query failed. Query: {query}. Error: {e}") from e
@@ -4455,15 +4533,17 @@ def exec_pyqgis(code):
     if not ALLOW_PYTHON["value"]:
         raise PermissionError("exec_pyqgis is disabled by the user. Use the dedicated tools.")
     import processing
-    from qgis.PyQt.QtCore import QEventLoop
-    from qgis.PyQt.QtWidgets import QApplication
-    QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
     ns = {"iface": _iface(), "QgsProject": QgsProject, "processing": processing, "result": None}
     exec("from qgis.core import *\nfrom qgis.gui import *", ns)
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
         exec(code, ns)
-    QApplication.processEvents()
+    c = _canvas()
+    if c and not _is_deleted(c):
+        try:
+            c.refresh()
+        except Exception:
+            pass
     return {"stdout": out.getvalue()[-8000:], "result": repr(ns.get("result"))[:8000]}
 
 

@@ -5,7 +5,10 @@ Provides unified discovery of:
 2. App data directory (.qgis_ai_agent or OS-specific AppData)
 3. AI CLI transcript, project, and session caches across all operating systems.
 """
+import glob
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -225,22 +228,146 @@ def get_candidate_cli_dirs(cli_key=""):
     return dirs
 
 
+def get_subprocess_kwargs():
+    """Returns extra kwargs for subprocess calls to prevent console window flashes on Windows."""
+    if sys.platform == "win32":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    return {}
+
+
+def _is_windows_store_stub(path):
+    """Returns True if path points to the broken WindowsApps Python store alias."""
+    if sys.platform != "win32" or not path:
+        return False
+    return "windowsapps" in os.path.normcase(os.path.abspath(path))
+
+
+def get_python_executable():
+    """Resolves a real Python interpreter across Windows, macOS, and Linux.
+    Avoids returning qgis-bin.exe, macOS QGIS binary, or WindowsApps store stubs.
+    """
+    exe = sys.executable or ""
+    base = os.path.basename(exe).lower()
+    if base.startswith("python") and not _is_windows_store_stub(exe) and os.path.isfile(exe):
+        return exe
+
+    candidates = []
+    search_roots = []
+    for root in (
+        os.environ.get("OSGEO4W_ROOT"),
+        sys.prefix,
+        sys.exec_prefix,
+        os.path.dirname(exe) if exe else None,
+    ):
+        if root and root not in search_roots:
+            search_roots.append(root)
+
+    if sys.platform == "win32":
+        for root in search_roots:
+            candidates.extend([
+                os.path.join(root, "bin", "python3.exe"),
+                os.path.join(root, "bin", "python.exe"),
+                os.path.join(root, "python3.exe"),
+                os.path.join(root, "python.exe"),
+            ])
+            candidates.extend(sorted(glob.glob(os.path.join(root, "apps", "Python*", "python3.exe")), reverse=True))
+            candidates.extend(sorted(glob.glob(os.path.join(root, "apps", "Python*", "python.exe")), reverse=True))
+    elif sys.platform == "darwin":
+        for root in search_roots:
+            candidates.extend([
+                os.path.join(root, "bin", "python3"),
+                os.path.join(root, "bin", "python"),
+                os.path.normpath(os.path.join(root, "..", "Resources", "python", "bin", "python3")),
+                os.path.normpath(os.path.join(root, "..", "Resources", "python", "bin", "python")),
+            ])
+    else:
+        for root in search_roots:
+            candidates.extend([
+                os.path.join(root, "bin", "python3"),
+                os.path.join(root, "bin", "python"),
+            ])
+
+    for cand in candidates:
+        if cand and os.path.isfile(cand) and not _is_windows_store_stub(cand):
+            return cand
+
+    for name in ("python3", "python"):
+        found = shutil.which(name)
+        if found and not _is_windows_store_stub(found):
+            return found
+
+    return exe or "python3"
+
+
 def get_extra_bin_paths():
     """Returns extra binary directories for AI CLIs across Linux, macOS, and Windows."""
     home = get_home_dir()
+    appdata = os.environ.get("APPDATA", "")
+    local_appdata = os.environ.get("LOCALAPPDATA", "")
+    program_files = os.environ.get("ProgramFiles", "")
+    program_files_x86 = os.environ.get("ProgramFiles(x86)", "")
+
     extra_paths = [
         os.path.join(home, ".local", "bin"),
         os.path.join(home, ".npm-global", "bin"),
         os.path.join(home, ".opencode", "bin"),
         os.path.join(home, ".cursor", "bin"),
         os.path.join(home, ".cargo", "bin"),
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        os.path.join(os.environ.get("APPDATA", ""), "npm"),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "npm"),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs"),
+        os.path.join(home, ".volta", "bin"),
+        os.path.join(home, ".bun", "bin"),
+        os.path.join(home, ".asdf", "shims"),
+        os.path.join(home, ".local", "share", "mise", "shims"),
+        os.path.join(home, ".local", "share", "pnpm"),
+        os.path.join(home, "Library", "pnpm"),
     ]
-    return [p for p in extra_paths if p and os.path.isdir(p)]
+
+    # Dynamic Node version managers (newest versions prioritized)
+    for pattern in (
+        os.path.join(home, ".nvm", "versions", "node", "*", "bin"),
+        os.path.join(home, ".local", "share", "fnm", "node-versions", "*", "installation", "bin"),
+        os.path.join(home, "Library", "Application Support", "fnm", "node-versions", "*", "installation", "bin"),
+    ):
+        extra_paths.extend(sorted(glob.glob(pattern), reverse=True))
+
+    if sys.platform != "win32":
+        extra_paths.extend([
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "/opt/local/bin",
+            "/snap/bin",
+        ])
+
+    if sys.platform == "win32" or appdata or local_appdata:
+        if appdata:
+            extra_paths.append(os.path.join(appdata, "npm"))
+            extra_paths.extend(sorted(glob.glob(os.path.join(appdata, "nvm", "*")), reverse=True))
+        if local_appdata:
+            extra_paths.extend([
+                os.path.join(local_appdata, "npm"),
+                os.path.join(local_appdata, "pnpm"),
+                os.path.join(local_appdata, "Volta", "bin"),
+                os.path.join(local_appdata, "Programs"),
+                os.path.join(local_appdata, "Programs", "cursor", "resources", "app", "bin"),
+                os.path.join(local_appdata, "Programs", "Antigravity", "bin"),
+                os.path.join(local_appdata, "AnthropicClaude", "bin"),
+            ])
+            extra_paths.extend(sorted(glob.glob(os.path.join(local_appdata, "fnm_multishells", "*")), reverse=True))
+        if program_files:
+            extra_paths.append(os.path.join(program_files, "nodejs"))
+        if program_files_x86:
+            extra_paths.append(os.path.join(program_files_x86, "nodejs"))
+
+    seen = set()
+    valid = []
+    for p in extra_paths:
+        if not p:
+            continue
+        norm = os.path.normpath(p)
+        if norm not in seen and os.path.isdir(norm):
+            seen.add(norm)
+            valid.append(norm)
+    return valid
 
 
 def get_augmented_path_env(base_env=None):
@@ -249,5 +376,12 @@ def get_augmented_path_env(base_env=None):
     valid = get_extra_bin_paths()
     cur_path = env.get("PATH", "")
     if valid:
-        env["PATH"] = os.pathsep.join(valid + ([cur_path] if cur_path else []))
+        existing_parts = [p for p in cur_path.split(os.pathsep) if p] if cur_path else []
+        merged = []
+        seen = set()
+        for p in valid + existing_parts:
+            if p not in seen:
+                seen.add(p)
+                merged.append(p)
+        env["PATH"] = os.pathsep.join(merged)
     return env

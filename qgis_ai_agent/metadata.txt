@@ -3,8 +3,8 @@ name=QGIS Copilot
 qgisMinimumVersion=3.34
 qgisMaximumVersion=4.99
 description=Autonomous AI cartography and spatial analysis copilot driven via Model Context Protocol (MCP) and AI CLIs.
-about=Connects QGIS to autonomous AI agents (Google Antigravity agy, Claude Code, Gemini CLI, OpenAI Codex) via the Model Context Protocol (MCP). Features 51+ deep QGIS tools (STAC, COG streaming, Overture Maps DuckDB spatial SQL, 440+ Processing algorithms, cartographic styling, and 5 distinct layout archetypes: Official Planning, Disaster Infographic, NatGeo, Statistical Thematic, and Relief Topographic) paired with 56 GIS domain skills.
-version=1.0.0
+about=Connects QGIS to autonomous AI agents (Google Antigravity agy, Claude Code, Gemini CLI, OpenAI Codex) via the Model Context Protocol (MCP). Features 70 deep QGIS tools (STAC, COG streaming, Overture Maps DuckDB spatial SQL, 440+ Processing algorithms, cartographic styling, sampling grid classification, GCP Helmert georeferencing, and 5 distinct layout archetypes: Official Planning, Disaster Infographic, NatGeo, Statistical Thematic, and Relief Topographic) paired with 61 GIS domain skills.
+version=1.1.0
 author=M. Randy Aswin
 email=mrandyaswin@gmail.com
 homepage=https://github.com/randyaswin/qgis-ai-agent
@@ -16,7 +16,12 @@ experimental=False
 deprecated=False
 has_processing_provider=False
 icon=icon.svg
-changelog=1.0.0:
+changelog=1.1.0:
+    - Thread & memory safety hardening: eliminated QApplication.processEvents() re-entrancy crashes, secured QThread/QProcess lifecycles, added canvas freeze guards on project reload/revert, C++/SIP & GDAL/OGR handle guards, and bounded chat log & stream buffers.
+    - Full cross-platform portability (Linux, Windows, macOS): QGIS-bundled Python resolution (skipping Windows Store aliases), Windows .cmd/.bat & CREATE_NO_WINDOW support, dynamic CLI discovery across nvm/fnm/volta/pnpm/bun/Homebrew, Windows read-only .git cleanup, and DuckDB path normalization.
+    - Expanded to 70 MCP tools & 61 GIS domain skills, including create_sampling_grid, label_grid_cells, Helmert 4-DOF georeferencing with per-GCP RMSE diagnostics, topological avoid_overlap/snap_tolerance digitizing, and 5 new custom skills (raster interpretation, RTRW zoning, multi-hazard modeling, hydrology/SLR, and topology QA).
+    - Performance & memory optimizations: single-pass Welford vector stats, chunked attribute updates, O(1) JSONL transcript tail reading, compact session manifests, and refined auto skill selection.
+1.0.0:
     - Initial official production release.
     - Autonomous AI map-making copilot via Model Context Protocol (MCP).
     - 5 distinct Cartographic Layout Archetypes (planning_official, infographic_disaster, natgeo, statistical_thematic, relief_topographic).

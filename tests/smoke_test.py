@@ -1,5 +1,5 @@
 """Headless smoke test: tools + TCP server + stdio MCP bridge round trip."""
-import json, os, subprocess, sys, threading
+import glob, json, os, stat, subprocess, sys, tempfile, threading
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from qgis.core import QgsApplication, QgsProject
@@ -7,7 +7,28 @@ from qgis.gui import QgsMapCanvas, QgsLayerTreeView
 from qgis.PyQt.QtCore import QEventLoop, QTimer
 
 app = QgsApplication([], True); app.initQgis()
-sys.path.append("/usr/share/qgis/python/plugins")
+
+def _find_qgis_plugins_path():
+    cands = []
+    pkg_data = QgsApplication.pkgDataPath()
+    if pkg_data:
+        cands.append(os.path.join(pkg_data, "python", "plugins"))
+    osgeo_root = os.environ.get("OSGEO4W_ROOT")
+    if osgeo_root:
+        cands.extend(glob.glob(os.path.join(osgeo_root, "apps", "qgis*", "python", "plugins")))
+    cands.extend([
+        "/usr/share/qgis/python/plugins",
+        "/usr/local/share/qgis/python/plugins",
+        "/Applications/QGIS.app/Contents/Resources/python/plugins",
+    ])
+    for c in cands:
+        if c and os.path.isdir(os.path.join(c, "processing")) and c not in sys.path:
+            return c
+    return None
+
+_proc_plug = _find_qgis_plugins_path()
+if _proc_plug:
+    sys.path.append(_proc_plug)
 import processing
 from processing.core.Processing import Processing; Processing.initialize()
 
@@ -24,7 +45,8 @@ import qgis.utils; qgis.utils.iface = Iface()
 
 from qgis_ai_agent import tools
 from qgis_ai_agent.server import ToolServer
-out = "/tmp/qgis_ai_test"; os.makedirs(out, exist_ok=True)
+out = os.path.join(tempfile.gettempdir(), f"qgis_ai_test_{os.getpid()}")
+os.makedirs(out, exist_ok=True)
 gj = os.path.join(out, "pts.geojson")
 with open(gj, "w") as f:
     json.dump({"type": "FeatureCollection", "features": [
@@ -282,5 +304,61 @@ try:
     assert "terrain-hydrology" not in hyd_full, f"Expected vendor terrain-hydrology demoted to hint, got {hyd_full}"
 finally:
     reg.mode = orig_mode
+
+# --- Phase 3: thread/memory safety & cross-platform portability ---
+from qgis_ai_agent import paths, runner, server
+
+# 1. Cross-platform Python & CLI path discovery
+py_exec = paths.get_python_executable()
+assert py_exec and os.path.isfile(py_exec) and "windowsapps" not in os.path.normcase(py_exec), f"Bad PY: {py_exec}"
+assert runner.PY == py_exec, f"Expected runner.PY == {py_exec}, got {runner.PY}"
+assert isinstance(paths.get_extra_bin_paths(), list)
+assert isinstance(paths.get_subprocess_kwargs(), dict)
+found_py = runner.find_cli_bin("python3") or runner.find_cli_bin("python")
+assert found_py, "find_cli_bin failed to locate python"
+
+# 2. Windows-safe read-only tree removal
+ro_dir = os.path.join(out, "ro_tree")
+os.makedirs(ro_dir, exist_ok=True)
+ro_file = os.path.join(ro_dir, "locked.pack")
+with open(ro_file, "w") as rf:
+    rf.write("readonly")
+os.chmod(ro_file, stat.S_IREAD)
+skills._rmtree_safe(ro_dir)
+assert not os.path.exists(ro_dir), "_rmtree_safe failed to delete read-only directory"
+
+# 3. Safe ModelDiscoveryThread cancellation & cleanup
+mt = runner.ModelDiscoveryThread("Codex CLI")
+mt.cancel()
+mt.start()
+assert mt.wait(3000), "Cancelled ModelDiscoveryThread did not finish cleanly"
+
+# 4. Atomic ToolServer endpoint & re-entrancy guard
+srv2 = ToolServer()
+srv2.start()
+assert os.path.exists(server.ENDPOINT_FILE), "Missing atomic ENDPOINT_FILE"
+srv2._reading_sockets.add("dummy_sock")
+srv2.buffers["dummy_sock"] = b""
+srv2._on_read("dummy_sock")  # Must immediately return without error or recursion
+srv2._reading_sockets.discard("dummy_sock")
+srv2.buffers.pop("dummy_sock", None)
+srv2.stop()
+assert not os.path.exists(server.ENDPOINT_FILE), "ToolServer.stop() did not remove ENDPOINT_FILE"
+
+# 5. New empty project with canvas freeze guard & no hardcoded bbox in Overture
+T("new_project", {"crs": "EPSG:4326"})
+assert len(QgsProject.instance().mapLayers()) == 0
+try:
+    tools.query_overture_maps(theme="places")
+    raise AssertionError("Expected ValueError when Overture called on empty project without bbox")
+except (ValueError, RuntimeError) as exc:
+    assert "bounding box" in str(exc).lower() or "duckdb" in str(exc).lower(), f"Unexpected Overture error: {exc}"
+
+print("tools count check:", len(tools.TOOLS))
+assert len(tools.TOOLS) == 70, f"Expected 70 tools, got {len(tools.TOOLS)}"
+
+# Clean up test temp dir cleanly
+QgsProject.instance().clear()
+skills._rmtree_safe(out, ignore_errors=True)
 
 print("All smoke test assertions PASSED!")

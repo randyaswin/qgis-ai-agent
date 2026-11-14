@@ -36,7 +36,7 @@ class AIAgentPlugin:
         self.iface.messageBar().pushInfo("QGIS Copilot", f"MCP endpoint listening on 127.0.0.1:{port}")
 
         # Guard timer to auto-dismiss and repair repetitive modal projection errors
-        self.guard_timer = QTimer()
+        self.guard_timer = QTimer(self.iface.mainWindow())
         self.guard_timer.setInterval(400)
         self.guard_timer.timeout.connect(self._check_modal_exceptions)
         self.guard_timer.start()
@@ -64,8 +64,15 @@ class AIAgentPlugin:
             pass
 
     def unload(self):
+        try:
+            app = QCoreApplication.instance()
+            if app:
+                app.aboutToQuit.disconnect(self.unload)
+        except Exception:
+            pass
         if self.guard_timer:
             self.guard_timer.stop()
+            self.guard_timer.deleteLater()
             self.guard_timer = None
         if self.dock:
             self.dock.shutdown()

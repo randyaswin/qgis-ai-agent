@@ -1,3 +1,4 @@
+import gc
 import html
 import json
 import os
@@ -16,7 +17,9 @@ from qgis.PyQt.QtWidgets import (
 from qgis.core import Qgis, QgsProject
 
 from . import tools
-from .runner import ADAPTERS, CliRunner, available, get_cli_models, ModelDiscoveryThread, _CLI_MODELS_CACHE
+from .runner import (
+    ADAPTERS, CliRunner, available, get_cli_models, ModelDiscoveryThread, _CLI_MODELS_CACHE, find_cli_bin
+)
 from .skills import REGISTRY
 from .skills_dialog import SkillsDialog
 from .sessions import SessionManager
@@ -634,6 +637,7 @@ class AgentDock(QDockWidget):
         self.iface, self.server = iface, server
         self.runner = CliRunner(self)
         self._model_thread = None
+        self._active_model_threads = set()
         self.first_turn = True
         self.start_time = 0
         self._is_turn_active = False
@@ -884,6 +888,7 @@ class AgentDock(QDockWidget):
         # Chat log display (Claude Dark IDE Theme)
         self.log = QTextBrowser()
         self.log.setReadOnly(True)
+        self.log.document().setMaximumBlockCount(3000)
         wrap_mode = getattr(QTextEdit.LineWrapMode, "WidgetWidth", None) if hasattr(QTextEdit, "LineWrapMode") else getattr(QTextEdit, "WidgetWidth", 1)
         self.log.setLineWrapMode(wrap_mode)
         self.log.setOpenLinks(False)
@@ -1209,11 +1214,21 @@ class AgentDock(QDockWidget):
         self._update_effort_visibility()
 
         # Always trigger background discovery so newly authenticated models / remote models update asynchronously
-        if self._model_thread and self._model_thread.isRunning():
-            self._model_thread.wait(300)
-        self._model_thread = ModelDiscoveryThread(cli_name, self)
-        self._model_thread.models_ready.connect(self._on_models_discovered)
-        self._model_thread.start()
+        if self._model_thread is not None:
+            try:
+                self._model_thread.cancel()
+            except Exception:
+                pass
+            try:
+                self._model_thread.models_ready.disconnect(self._on_models_discovered)
+            except Exception:
+                pass
+        t = ModelDiscoveryThread(cli_name, self)
+        self._model_thread = t
+        self._active_model_threads.add(t)
+        t.models_ready.connect(self._on_models_discovered)
+        t.finished.connect(lambda th=t: (self._active_model_threads.discard(th), th.deleteLater()))
+        t.start()
 
     def _on_models_discovered(self, cli_name, models):
         if self.cli.currentData() != cli_name:
@@ -1610,10 +1625,26 @@ class AgentDock(QDockWidget):
             QMessageBox.critical(self, "File Missing", f"Checkpoint file not found on disk:\n{chk_path}")
             return
 
-        orig_filename = QgsProject.instance().fileName()
-        res = QgsProject.instance().read(chk_path)
-        if orig_filename:
-            QgsProject.instance().setFileName(orig_filename)
+        canvas = self.iface.mapCanvas() if self.iface else None
+        if canvas:
+            try:
+                canvas.stopRendering()
+                canvas.freeze(True)
+            except Exception:
+                pass
+        try:
+            orig_filename = QgsProject.instance().fileName()
+            QgsProject.instance().read(chk_path)
+            if orig_filename:
+                QgsProject.instance().setFileName(orig_filename)
+        finally:
+            if canvas:
+                try:
+                    canvas.freeze(False)
+                    canvas.refreshAllLayers()
+                except Exception:
+                    pass
+            gc.collect()
 
         active_sess.rollback_to_cycle(cycle_no)
         self.session_manager.save_project_sessions()
@@ -1751,6 +1782,18 @@ class AgentDock(QDockWidget):
         self.log.setTextCursor(c)
         self.log.ensureCursorVisible()
         return pos
+
+    def _repaint_log(self):
+        try:
+            from qgis.PyQt import sip
+            if sip.isdeleted(self) or not hasattr(self, "log") or sip.isdeleted(self.log):
+                return
+            self.log.ensureCursorVisible()
+            vp = self.log.viewport()
+            if vp and not sip.isdeleted(vp):
+                vp.update()
+        except Exception:
+            pass
 
     def _clean_ansi(self, text):
         return ANSI.sub("", text).replace("\r\n", "\n").replace("\r", "\n")
@@ -2036,9 +2079,7 @@ class AgentDock(QDockWidget):
             "pos": (start_pos, end_pos)
         }
 
-        from qgis.PyQt.QtCore import QEventLoop
-        from qgis.PyQt.QtWidgets import QApplication
-        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        self._repaint_log()
 
     def _on_internal_tool_done(self, tool_id, name, output, duration=None, success=True):
         info = self._active_internal_tools.pop(tool_id, None)
@@ -2246,6 +2287,10 @@ class AgentDock(QDockWidget):
             return
 
         self._cli_line_buffer += clean
+        if len(self._cli_line_buffer) > 2 * 1024 * 1024:
+            self._handle_raw_text_chunk(self._cli_line_buffer[:65536] + "\n... [output truncated to prevent memory exhaustion]\n")
+            self._cli_line_buffer = ""
+            return
         lines = self._cli_line_buffer.split("\n")
         self._cli_line_buffer = lines.pop()
 
@@ -2309,10 +2354,7 @@ class AgentDock(QDockWidget):
 
         self._active_tool_pos = (start_pos, end_pos)
 
-        # Force Qt GUI repaint so user sees IN arguments and running state immediately!
-        from qgis.PyQt.QtCore import QEventLoop
-        from qgis.PyQt.QtWidgets import QApplication
-        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        self._repaint_log()
 
     def _on_tool_completed(self, name, result):
         clean_summary = format_out_result(name, result)
@@ -2366,9 +2408,7 @@ class AgentDock(QDockWidget):
         )
         self.session_manager.save_project_sessions(autosave_qgz=False)
 
-        # Force Qt GUI update
-        from qgis.PyQt.QtWidgets import QApplication
-        QApplication.processEvents()
+        self._repaint_log()
 
     def _on_tool_failed(self, name, err_msg):
         cat = self._last_tool_call.get("category", "QGIS")
@@ -2413,15 +2453,20 @@ class AgentDock(QDockWidget):
         )
         self.session_manager.save_project_sessions(autosave_qgz=False)
 
-        # Force Qt GUI update
-        from qgis.PyQt.QtWidgets import QApplication
-        QApplication.processEvents()
+        self._repaint_log()
 
     def _register(self):
-        argv = self._adapter()["register"]
+        argv = list(self._adapter()["register"])
+        argv[0] = find_cli_bin(argv[0])
         try:
-            r = subprocess.run(argv, capture_output=True, text=True, timeout=60,
-                               env=paths.get_augmented_path_env())
+            r = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=paths.get_augmented_path_env(),
+                **paths.get_subprocess_kwargs(),
+            )
             msg = (r.stdout + r.stderr).strip() or "OK"
             t = theme.get_theme()
             self._append_html(
@@ -2573,7 +2618,10 @@ class AgentDock(QDockWidget):
             f"<div style='margin: 4px 0; padding: 4px 8px; background-color: {t['tool_out_err_bg']}; border-left: 3px solid #dc2626; border-radius: 3px; font-size: 11px; color: {t['tool_out_err_text']};'>"
             f"⚡ <b>Interrupted</b> by user with immediate priority.</div>"
         )
+        tools.CANCEL_REQUESTED = True
         self.runner.stop()
+        if not self.runner.running():
+            self._done(-9)
 
     def _run(self):
         user = self.prompt.toPlainText().strip()
@@ -2956,7 +3004,27 @@ class AgentDock(QDockWidget):
             QTimer.singleShot(500, self._run)
 
     def shutdown(self):
-        self.runner.stop()
+        try:
+            if hasattr(self, "indicator_timer") and self.indicator_timer:
+                self.indicator_timer.stop()
+        except Exception:
+            pass
+        if hasattr(self, "message_queue"):
+            self.message_queue.clear()
+        for th in list(getattr(self, "_active_model_threads", ())):
+            try:
+                th.cancel()
+                if th.isRunning():
+                    th.wait(3000)
+            except Exception:
+                pass
+        if hasattr(self, "_active_model_threads"):
+            self._active_model_threads.clear()
+        self._model_thread = None
+        if hasattr(self, "runner") and self.runner:
+            tools.CANCEL_REQUESTED = True
+            self.runner.stop()
+        self._is_turn_active = False
         if hasattr(self, "session_manager") and self.session_manager:
             self.session_manager.disconnect_signals()
 

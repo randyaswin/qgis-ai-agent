@@ -14,10 +14,33 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
+import sys
 import tempfile
 
 from . import paths
+
+
+def _rmtree_safe(path, ignore_errors=False):
+    """Cross-platform shutil.rmtree handling Windows read-only .git objects."""
+    if not path or not os.path.exists(path):
+        return
+
+    def _on_err(func, fpath, _exc_info):
+        try:
+            os.chmod(fpath, stat.S_IWRITE | stat.S_IREAD)
+            func(fpath)
+        except Exception:
+            if not ignore_errors:
+                raise
+
+    if sys.version_info >= (3, 12):
+        def _on_exc(func, fpath, _exc):
+            _on_err(func, fpath, None)
+        shutil.rmtree(path, ignore_errors=ignore_errors, onexc=_on_exc)
+    else:
+        shutil.rmtree(path, ignore_errors=ignore_errors, onerror=_on_err)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SKILLS_DIR = os.path.join(HERE, "skills")
@@ -694,13 +717,14 @@ class Registry:
         os.makedirs(USER_DIR, exist_ok=True)
         src = os.path.abspath(os.path.expanduser(src))
         if os.path.isfile(src):
-            meta, _ = parse_frontmatter(open(src, encoding="utf-8").read())
+            with open(src, encoding="utf-8") as sf:
+                text = sf.read()
+            meta, _ = parse_frontmatter(text)
             name = re.sub(r"[^\w.-]+", "-", meta.get("name") or os.path.splitext(os.path.basename(src))[0]).strip("-")
             dest = os.path.join(USER_DIR, name)
             os.makedirs(dest, exist_ok=True)
             shutil.copyfile(src, os.path.join(dest, "SKILL.md"))
             if not meta.get("name"):  # plain markdown without frontmatter
-                text = open(src, encoding="utf-8").read()
                 desc = next((l.strip("# ").strip() for l in text.splitlines() if l.strip()), name)
                 with open(os.path.join(dest, "SKILL.md"), "w", encoding="utf-8") as f:
                     f.write(f"---\nname: {name}\ndescription: {desc}\n---\n\n{text}")
@@ -712,11 +736,12 @@ class Registry:
                     dirnames.remove(".git")
                 if "SKILL.md" in filenames:
                     dirnames[:] = []
-                    meta, _ = parse_frontmatter(open(os.path.join(dirpath, "SKILL.md"), encoding="utf-8").read())
+                    with open(os.path.join(dirpath, "SKILL.md"), encoding="utf-8") as sf:
+                        meta, _ = parse_frontmatter(sf.read())
                     name = re.sub(r"[^\w.-]+", "-", meta.get("name") or os.path.basename(dirpath)).strip("-")
                     dest = os.path.join(USER_DIR, name)
                     if os.path.exists(dest):
-                        shutil.rmtree(dest)
+                        _rmtree_safe(dest)
                     shutil.copytree(dirpath, dest, ignore=shutil.ignore_patterns(".git"))
                     installed.append(name)
         if not installed:
@@ -728,20 +753,28 @@ class Registry:
         if not re.match(r"^(https://|git@)[\w./:@~-]+$", url):
             raise ValueError("Only https:// or git@ URLs are accepted")
         tmp = tempfile.mkdtemp(prefix="qgis_ai_skill_")
+        repo_dir = os.path.join(tmp, "repo")
         try:
-            r = subprocess.run(["git", "clone", "--depth", "1", "-q", "--", url, tmp + "/repo"],
-                               capture_output=True, text=True, timeout=180)
+            env = {**paths.get_augmented_path_env(), "GIT_TERMINAL_PROMPT": "0"}
+            r = subprocess.run(
+                ["git", "clone", "--depth", "1", "-q", "--", url, repo_dir],
+                capture_output=True,
+                text=True,
+                timeout=180,
+                env=env,
+                **paths.get_subprocess_kwargs(),
+            )
             if r.returncode:
                 raise RuntimeError(r.stderr.strip() or "git clone failed")
-            return self.install_path(tmp + "/repo")
+            return self.install_path(repo_dir)
         finally:
-            shutil.rmtree(tmp, ignore_errors=True)
+            _rmtree_safe(tmp, ignore_errors=True)
 
     def remove_user_skill(self, name):
         s = self.skills.get(name)
         if not s or s.source != "user":
             raise ValueError("Only user-installed skills can be removed")
-        shutil.rmtree(s.path)
+        _rmtree_safe(s.path)
         self.reload()
 
 
