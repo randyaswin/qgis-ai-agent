@@ -15,8 +15,8 @@ This skill guides instant, efficient, and **100% keyless** access to global open
 
 1. **Overture Maps Foundation (Meta, Microsoft, Amazon, TomTom):**
    - Comprehensive global vector features (billions of buildings, POIs, roads, administrative divisions).
-   - Queried directly from open AWS S3 buckets (`s3://overturemaps-us-west-2/release/...`) in spatially-partitioned GeoParquet format.
-   - Executed via embedded **DuckDB** (`spatial` + `httpfs`), reading only the byte ranges matching the active canvas bounding box without downloading the full dataset.
+   - `query_overture_maps` uses **Overture PMTiles v3 (`tiles.overturemaps.org`)** byte-range tile fetching first (sub-second to ~3s for city neighborhoods), with automatic **STAC-indexed single-pass GeoParquet** fallback (`stac.overturemaps.org` + DuckDB `httpfs`/`spatial`) for wide regional extents or advanced nested SQL filters.
+   - `query_duckdb_spatial` also automatically rewrites raw Overture S3 globs with `bbox` filters into STAC-pruned HTTPS partition URLs so ad-hoc DuckDB queries skip full-bucket scans.
 2. **SpatioTemporal Asset Catalogs (STAC APIs):**
    - Access public endpoints like **Earth Search by Element84** (`https://earth-search.aws.element84.com/v1`) or Planetary Computer.
    - Search optical satellite imagery (Sentinel-2 L2A), radar (Sentinel-1), and global elevation (Copernicus DEM 30m).
@@ -45,49 +45,58 @@ Use `query_overture_maps`:
 - `type`: Subtype (auto-selected if omitted, e.g. `"place"`, `"building"`, `"segment"`, `"water"`).
 - `bbox`: `[xmin, ymin, xmax, ymax]` in WGS84 EPSG:4326. Defaults to current QGIS canvas extent if omitted.
 - `filter_sql`: Optional DuckDB SQL condition to filter attributes.
-- `limit`: Maximum features to fetch (default 500, can be increased as needed; exports to high-performance `.gpkg`).
+- `limit`: Per-batch/page size when `fetch_all=True` (default `true` iterates across all tiles/pages until 100% of features in `bbox` are collected), or hard cap when `fetch_all=False`. Never truncate map layers to partial samples unless explicitly exploring a preview.
+- `fetch_all`: `True` (default) — iterates across all covering PMTiles tile batches or STAC GeoParquet offset pages until 100% complete.
 - `output_name`: Resulting layer name in QGIS.
+- `source`: Backend selector (`"auto"` [default: PMTiles -> STAC Parquet], `"pmtiles"`, or `"parquet"`).
 
-> [!NOTE] Hardware Safety & Chunking:
-> Vector queries export to indexed GeoPackage (`.gpkg`) to prevent memory exhaustion and UI freezes.
-> For large study areas, progressive chunking / multiple requests are encouraged.
-> If the user's requested scope is too broad (e.g. all buildings across an entire region), clarify first with the user to narrow the bounding box or filter by category before querying.
+> [!NOTE] Iterative Tiled & Paginated Completeness Across All Data Sources:
+> Small per-request batch sizes protect host memory and prevent timeouts, while `fetch_all=True` / `paginate=True` guarantees **complete** spatial coverage by iterating across all tiles/pages into an indexed GeoPackage (`.gpkg`):
+> - `query_overture_maps(..., fetch_all=True)`: Processes covering PMTiles in tile batches (or paginates STAC GeoParquet via `LIMIT`/`OFFSET`) until the entire `bbox` is extracted.
+> - `query_duckdb_spatial(..., page_size=2000, fetch_all=True)`: Paginates arbitrary remote Parquet/S3 queries batch-by-batch into `.gpkg` until all matching rows are returned.
+> - `add_vector_layer(path, bbox=..., paginate=True, page_size=1000)`: Automatically iterates `resultOffset`/`resultRecordCount` (ArcGIS REST FeatureServer/MapServer), `STARTINDEX`/`COUNT` (OGC WFS), and spatial bbox tiles (templated GeoJSON APIs) until complete.
+> - `search_stac_items(..., limit=20, fetch_all=True)`: Iterates across STAC catalog pages so all overlapping granules/scenes are discovered.
+> If the user's requested geographic scope spans an entire country or province, clarify first with the user to narrow the bounding box or filter by attribute class before querying.
 
 ### B. Example Use Cases:
-1. **Health Facilities / Hotels / POIs in Canvas Extent:**
+1. **Complete Health Facilities / Hotels / POIs in Study Area (`bbox`):**
    ```python
    query_overture_maps(
        theme="places",
        filter_sql="taxonomy.primary IN ('hospital', 'clinic', 'pharmacy')",
-       limit=300,
        output_name="Overture_Hospitals"
    )
    ```
-2. **Building Footprints & Heights:**
+2. **All Building Footprints (with Heights & Floor Attributes):**
    ```python
    query_overture_maps(
        theme="buildings",
-       filter_sql="height IS NOT NULL OR num_floors > 2",
-       limit=1000,
        output_name="Overture_Buildings"
    )
    ```
-3. **Road Networks & Primary Highways:**
+3. **Complete Connected Road Networks:**
    ```python
    query_overture_maps(
        theme="transportation",
-       filter_sql="class IN ('primary', 'secondary', 'tertiary')",
-       limit=800,
        output_name="Overture_Roads"
    )
    ```
-4. **Water Bodies & Shorelines:**
+4. **All Water Bodies & Shorelines:**
    ```python
    query_overture_maps(
        theme="base",
        type="water",
-       limit=500,
        output_name="Overture_Water"
+   )
+   ```
+5. **Paginated ArcGIS REST / OGC WFS Public Services:**
+   ```python
+   add_vector_layer(
+       path="https://services.example.org/arcgis/rest/services/Admin/FeatureServer/0/query",
+       name="Public_Admin_Boundaries",
+       bbox=[110.35, -7.81, 110.38, -7.78],
+       paginate=True,
+       page_size=1000
    )
    ```
 
@@ -96,12 +105,12 @@ Use `query_overture_maps`:
 ## 4. STAC Search & COG Streaming
 
 ### A. Searching Satellite Imagery or DEM
-Use `search_stac_items`:
+Use `search_stac_items` (paginates across pages up to `limit`, default `20`):
 ```python
 items = search_stac_items(
     collections=["cop-dem-glo-30"],     # Global 30m elevation DEM
     # or collections=["sentinel-2-l2a"] # Cloudless optical imagery
-    limit=2
+    limit=20
 )
 ```
 Returns STAC items with direct COG asset URLs (`data` for DEM, `visual` for true-color RGB composite, `red`, `nir`, etc.).
@@ -118,23 +127,24 @@ QGIS automatically applies `/vsicurl/` and streams raster data on the fly.
 
 ---
 
-## 5. Arbitrary Spatial Queries with DuckDB
+## 5. Paginated Arbitrary Spatial Queries with DuckDB
 
-For advanced queries joining remote Parquet files on S3 or the web:
+For advanced queries joining remote Parquet files on S3 or the web (`fetch_all=True` iterates `page_size=2000` batches until all rows in the `bbox` are exported):
 ```python
 query_duckdb_spatial(
     query="""
-        SELECT id, names.primary AS name, categories.primary AS category, geometry 
+        SELECT id, names.primary AS name, taxonomy.primary AS category, geometry
         FROM read_parquet('s3://overturemaps-us-west-2/release/2026-10-21.0/theme=places/type=place/*', hive_partitioning=1)
         WHERE bbox.xmin >= 138.60 AND bbox.xmax <= 138.63
           AND bbox.ymin >= 35.21 AND bbox.ymax <= 35.24
-          AND categories.primary IN ('hotel', 'restaurant', 'museum')
-        LIMIT 200
+          AND taxonomy.primary IN ('hotel', 'restaurant', 'museum')
     """,
-    layer_name="DuckDB_Local_POIs"
+    layer_name="DuckDB_Local_POIs",
+    page_size=2000,
+    fetch_all=True
 )
 ```
-The query result is automatically converted into a temporary GeoJSON and loaded into QGIS as a native vector layer.
+The query iterates across all matching pages into an indexed GeoPackage (`.gpkg`) and loads into QGIS as a complete native vector layer.
 
 ---
 

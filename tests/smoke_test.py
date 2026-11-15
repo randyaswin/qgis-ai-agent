@@ -413,6 +413,7 @@ try:
             "theme": "water",
             "bbox": [110.335, -7.835, 110.405, -7.765],
             "layer_name": "yogyakarta_water",
+            "source": "parquet",
         })
     except RuntimeError:
         pass
@@ -422,6 +423,7 @@ try:
             "bbox": [110.335, -7.835, 110.405, -7.765],
             "filter_sql": "categories.primary = 'museum'",
             "layer_name": "yogyakarta_landmarks",
+            "source": "parquet",
         })
     except RuntimeError:
         pass
@@ -433,6 +435,257 @@ except ImportError:
     pass
 finally:
     tools._execute_duckdb_nonblocking = _orig_duck_exec
+
+# Verify dock 4-coord bbox formatting & Overture scope badge
+_fmt_bbox = dock.format_in_args({"bbox": [110.355, -7.808, 110.376, -7.780], "theme": "transportation"})
+assert "110.355" in _fmt_bbox and "-7.78" in _fmt_bbox, f"Truncated bbox display: {_fmt_bbox}"
+assert dock.categorize_tool("query_overture_maps", {"theme": "transportation", "bbox": [110.355, -7.808, 110.376, -7.780]}) == ("Overture", "transportation (bbox)")
+assert dock.categorize_tool("query_overture_maps", {"theme": "places", "filter_sql": None}) == ("Overture", "places (canvas)")
+
+# Verify live fast PMTiles / STAC-indexed Overture queries for Malioboro (< 10s each)
+T("new_project", {"crs": "EPSG:4326"})
+_t_roads = _t.monotonic()
+_roads_res = T("query_overture_maps", {
+    "theme": "transportation",
+    "bbox": [110.355, -7.808, 110.376, -7.780],
+    "layer_name": "malioboro_roads",
+    "limit": 500,
+})
+_dt_roads = _t.monotonic() - _t_roads
+print(f"malioboro_roads fetched {_roads_res['features']} features in {_dt_roads:.2f}s")
+assert _roads_res["features"] >= 2000 and _dt_roads < 10.0, (_roads_res, _dt_roads)
+
+_t_bld = _t.monotonic()
+_bld_res = T("query_overture_maps", {
+    "theme": "buildings",
+    "bbox": [110.355, -7.808, 110.376, -7.780],
+    "layer_name": "malioboro_buildings",
+    "limit": 500,
+})
+_dt_bld = _t.monotonic() - _t_bld
+print(f"malioboro_buildings fetched {_bld_res['features']} features in {_dt_bld:.2f}s")
+assert _bld_res["features"] >= 20000 and _dt_bld < 10.0, (_bld_res, _dt_bld)
+
+_t_plc = _t.monotonic()
+_plc_res = T("query_overture_maps", {
+    "theme": "places",
+    "bbox": [110.355, -7.808, 110.376, -7.780],
+    "layer_name": "malioboro_places",
+})
+_dt_plc = _t.monotonic() - _t_plc
+print(f"malioboro_places fetched {_plc_res['features']} features in {_dt_plc:.2f}s")
+assert _plc_res["features"] >= 1000 and _dt_plc < 10.0, (_plc_res, _dt_plc)
+
+_plc_cap = T("query_overture_maps", {
+    "theme": "places",
+    "bbox": [110.355, -7.808, 110.376, -7.780],
+    "layer_name": "malioboro_places_capped",
+    "limit": 150,
+    "fetch_all": False,
+})
+assert _plc_cap["features"] == 150, _plc_cap
+T("remove_layer", {"layer": "malioboro_places_capped"})
+
+_t_flt = _t.monotonic()
+_flt_res = T("query_overture_maps", {
+    "theme": "buildings",
+    "bbox": [110.355, -7.808, 110.376, -7.780],
+    "filter_sql": "height IS NOT NULL",
+    "layer_name": "malioboro_tall",
+    "limit": 200,
+})
+_dt_flt = _t.monotonic() - _t_flt
+print(f"malioboro_tall (filter_sql) fetched {_flt_res['features']} features in {_dt_flt:.2f}s")
+assert _flt_res["features"] >= 2000 and _dt_flt < 10.0, (_flt_res, _dt_flt)
+
+# Verify DuckDB spatial pagination strips small trailing LIMIT when fetch_all=True & paginates all rows
+try:
+    import duckdb as _duck_pag  # noqa: F401
+    _src_pt_gpkg = os.path.join(out, "pag_src.gpkg")
+    from osgeo import ogr as _ogr_pag, osr as _osr_pag
+    _p_drv = _ogr_pag.GetDriverByName("GPKG")
+    _p_ds = _p_drv.CreateDataSource(_src_pt_gpkg)
+    _p_srs = _osr_pag.SpatialReference(); _p_srs.ImportFromEPSG(4326)
+    _p_lyr = _p_ds.CreateLayer("pts", _p_srs, _ogr_pag.wkbPoint)
+    _p_lyr.CreateField(_ogr_pag.FieldDefn("pid", _ogr_pag.OFTInteger))
+    for _pi in range(8):
+        _pf = _ogr_pag.Feature(_p_lyr.GetLayerDefn())
+        _pf.SetField("pid", _pi)
+        _pg = _ogr_pag.Geometry(_ogr_pag.wkbPoint)
+        _pg.AddPoint(110.36 + _pi * 0.001, -7.79)
+        _pf.SetGeometry(_pg)
+        _p_lyr.CreateFeature(_pf)
+    _p_ds = None
+    _src_sql = _src_pt_gpkg.replace("\\", "/").replace("'", "''")
+    _duck_pag_res = T("query_duckdb_spatial", {
+        "query": f"SELECT pid, geom AS geometry FROM st_read('{_src_sql}') ORDER BY pid LIMIT 3",
+        "layer_name": "duckdb_paginated_pts",
+        "page_size": 3,
+        "fetch_all": True,
+    })
+    assert _duck_pag_res["features"] == 8, f"Expected all 8 paginated DuckDB features, got {_duck_pag_res}"
+    T("remove_layer", {"layer": "duckdb_paginated_pts"})
+except ImportError:
+    pass
+
+# Verify add_vector_layer pagination across ArcGIS REST & OGC WFS remote endpoints
+_orig_fetch_bytes = tools._fetch_http_bytes
+try:
+    _seen_urls = []
+    def _mock_remote_vector_bytes(url, headers=None, timeout=12):
+        _seen_urls.append(url)
+        if "FeatureServer" in url:
+            if "resultOffset=0" in url:
+                return json.dumps({
+                    "type": "FeatureCollection",
+                    "properties": {"exceededTransferLimit": True},
+                    "features": [
+                        {"type": "Feature", "properties": {"id": i}, "geometry": {"type": "Point", "coordinates": [110.36 + i * 0.001, -7.79]}}
+                        for i in range(50)
+                    ],
+                }).encode("utf-8")
+            return json.dumps({
+                "type": "FeatureCollection",
+                "properties": {"exceededTransferLimit": False},
+                "features": [
+                    {"type": "Feature", "properties": {"id": 50 + i}, "geometry": {"type": "Point", "coordinates": [110.36 + i * 0.001, -7.80]}}
+                    for i in range(15)
+                ],
+            }).encode("utf-8")
+        raise ValueError(f"Unexpected test URL: {url}")
+
+    tools._fetch_http_bytes = _mock_remote_vector_bytes
+    _arc_res = T("add_vector_layer", {
+        "path": "https://example.org/arcgis/rest/services/POIs/FeatureServer/0/query",
+        "name": "mock_arcgis_paginated",
+        "bbox": [110.35, -7.81, 110.38, -7.78],
+        "paginate": True,
+        "page_size": 100,
+    })
+    assert _arc_res["features"] == 65 and any("resultOffset=50" in u for u in _seen_urls), (_arc_res, _seen_urls)
+    T("remove_layer", {"layer": "mock_arcgis_paginated"})
+finally:
+    tools._fetch_http_bytes = _orig_fetch_bytes
+
+# Cartographic hierarchy, line-merged/thinned labeling, and live KPI layout checks
+_cat_res = T("style_categorized", {"layer": "malioboro_roads", "field": "class"})
+assert _cat_res.get("hierarchy") == "cased_roads", _cat_res
+assert tools._layer("malioboro_roads").renderer().usingSymbolLevels() is True
+
+T("set_labels", {"layer": "malioboro_roads", "field": "name", "font_size": 7.5})
+T("set_labels", {"layer": "malioboro_places", "field": "name", "font_size": 7.0})
+_r_lbl_cfg = tools._layer("malioboro_roads").labeling().settings()
+_p_lbl_cfg = tools._layer("malioboro_places").labeling().settings()
+assert getattr(_r_lbl_cfg, "mergeLines", False) or (
+    hasattr(_r_lbl_cfg, "placementSettings") and _r_lbl_cfg.placementSettings().mergeConnectedLines()
+)
+assert _p_lbl_cfg.thinningSettings().limitNumberOfLabelsEnabled() is True
+
+T("create_styled_layout", {
+    "name": "Malioboro_Bento_Test",
+    "style_theme": "bento_dashboard",
+    "title": "Yogyakarta · Malioboro Corridor",
+    "subtitle": "Urban Fabric & Street Network",
+    "credits": "Overture Maps",
+})
+from qgis.core import QgsLayoutItemLabel, QgsLayoutItemLegend
+_lay_test = QgsProject.instance().layoutManager().layoutByName("Malioboro_Bento_Test")
+assert _lay_test is not None
+_lbl_texts = [it.text() for it in _lay_test.items() if isinstance(it, QgsLayoutItemLabel)]
+assert all(("OPTIMAL" not in t and "100%" not in t) for t in _lbl_texts), _lbl_texts
+assert any(("BUILDINGS MAPPED" in t or f"{_bld_res['features']:,}" in t) for t in _lbl_texts), _lbl_texts
+_leg_items = [it for it in _lay_test.items() if isinstance(it, QgsLayoutItemLegend)]
+assert _leg_items
+_leg_titles = [ch.customProperty("legend/title-label") for ch in _leg_items[0].model().rootGroup().findLayers()]
+assert _leg_titles and all(t and "_" not in str(t) for t in _leg_titles), _leg_titles
+
+# Verify antique_historical & poster_minimalist layout framing (cover=True edge-to-edge fit) & complete elements
+from qgis.core import QgsLayoutItemMap, QgsLayoutItemPicture, QgsLayoutItemScaleBar, QgsLayoutItemShape
+_ant_res = T("create_styled_layout", {
+    "name": "Malioboro_Antique_Test",
+    "style_theme": "antique_historical",
+    "orientation": "portrait",
+    "title": "PLAN OF YOGYAKARTA",
+    "subtitle": "Historic Axis: Tugu — Malioboro — Kraton",
+    "credits": "Overture Maps",
+    "legend": True,
+    "north_arrow": True,
+    "scalebar": True,
+})
+_ant_lay = QgsProject.instance().layoutManager().layoutByName("Malioboro_Antique_Test")
+assert _ant_lay is not None
+_ant_maps = [it for it in _ant_lay.items() if isinstance(it, QgsLayoutItemMap)]
+_ant_shapes = [it for it in _ant_lay.items() if isinstance(it, QgsLayoutItemShape)]
+_ant_legends = [it for it in _ant_lay.items() if isinstance(it, QgsLayoutItemLegend)]
+_ant_pics = [it for it in _ant_lay.items() if isinstance(it, QgsLayoutItemPicture)]
+_ant_sbs = [it for it in _ant_lay.items() if isinstance(it, QgsLayoutItemScaleBar)]
+_ant_lbls = [it.text() for it in _ant_lay.items() if isinstance(it, QgsLayoutItemLabel)]
+assert _ant_maps and _ant_legends and _ant_pics and _ant_sbs, (len(_ant_maps), len(_ant_legends), len(_ant_pics), len(_ant_sbs))
+assert any("PLAN OF YOGYAKARTA" in t and "Overture Maps" in t for t in _ant_lbls), _ant_lbls
+# Verify parchment background shape (#f4ecd8) exists
+assert any(it.symbol() and it.symbol().color().name().lower() == "#f4ecd8" for it in _ant_shapes), "Missing #f4ecd8 parchment background"
+# Verify edge-to-edge cover-fit aspect ratio matches map frame rect
+_mp = _ant_maps[0]
+_ext_ar = _mp.extent().width() / max(_mp.extent().height(), 1e-9)
+_frm_ar = _mp.rect().width() / max(_mp.rect().height(), 1e-9)
+assert abs(_ext_ar - _frm_ar) / _frm_ar < 0.05, f"Map extent aspect {_ext_ar:.3f} != frame aspect {_frm_ar:.3f}"
+
+_post_res = T("create_styled_layout", {
+    "name": "Malioboro_Poster_Test",
+    "style_theme": "poster_minimalist",
+    "orientation": "portrait",
+    "title": "Y O G Y A K A R T A",
+    "subtitle": "MALIOBORO CORRIDOR",
+    "credits": "Overture Maps",
+})
+_post_lay = QgsProject.instance().layoutManager().layoutByName("Malioboro_Poster_Test")
+assert _post_lay is not None
+_post_mp = [it for it in _post_lay.items() if isinstance(it, QgsLayoutItemMap)][0]
+_p_ext_ar = _post_mp.extent().width() / max(_post_mp.extent().height(), 1e-9)
+_p_frm_ar = _post_mp.rect().width() / max(_post_mp.rect().height(), 1e-9)
+assert abs(_p_ext_ar - _p_frm_ar) / _p_frm_ar < 0.05, f"Poster extent aspect {_p_ext_ar:.3f} != frame aspect {_p_frm_ar:.3f}"
+
+# Verify snapshot_layout returns universal QA diagnostics across themes
+for _lay_nm in ("Malioboro_Bento_Test", "Malioboro_Antique_Test", "Malioboro_Poster_Test"):
+    _snap_qa = T("snapshot_layout", {"name": _lay_nm, "dpi": 72})
+    assert "qa" in _snap_qa and _snap_qa["qa"]["map_area_pct"] >= 45.0, (_lay_nm, _snap_qa.get("qa"))
+    assert not _snap_qa["qa"]["out_of_bounds_items"], (_lay_nm, _snap_qa["qa"])
+    assert not _snap_qa["qa"]["overlapping_items"], (_lay_nm, _snap_qa["qa"])
+
+# Verify update_layer(name=...) alias, style_categorized(column=...) alias, and outlier-extent exclusion
+_tmp_out = T("create_vector_layer", {"layer_name": "giant_outlier_river", "geometry_type": "Polygon", "fields": [{"name": "tag", "type": "string"}]})
+T("digitize_features", {"layer": "giant_outlier_river", "features": [{"geometry": [[110.20, -7.95], [110.50, -7.95], [110.50, -7.65], [110.20, -7.65], [110.20, -7.95]], "attributes": {"tag": "river"}}]})
+_upd_nm = T("update_layer", {"layer": "giant_outlier_river", "name": "Giant_River_Renamed"})
+assert _upd_nm["name"] == "Giant_River_Renamed", _upd_nm
+_col_cat = T("style_categorized", {"layer": "Giant_River_Renamed", "column": "tag"})
+assert _col_cat["categories"] >= 1, _col_cat
+T("create_styled_layout", {"name": "Outlier_Framing_Test", "style_theme": "antique_historical", "orientation": "portrait"})
+_out_mp = [it for it in QgsProject.instance().layoutManager().layoutByName("Outlier_Framing_Test").items() if isinstance(it, QgsLayoutItemMap)][0]
+assert _out_mp.extent().width() < 0.08, f"Giant outlier layer zoomed out map extent: {_out_mp.extent()}"
+# Verify explicit bbox locks layout directly to the requested bbox even with giant outlier layer present
+T("create_styled_layout", {
+    "name": "Explicit_BBox_Lock_Test",
+    "style_theme": "poster_minimalist",
+    "orientation": "portrait",
+    "bbox": [110.358, -7.806, 110.373, -7.783],
+})
+_bbox_mp = [it for it in QgsProject.instance().layoutManager().layoutByName("Explicit_BBox_Lock_Test").items() if isinstance(it, QgsLayoutItemMap)][0]
+assert abs(_bbox_mp.extent().width() - 0.015) < 0.004, f"Expected explicit bbox lock width ~0.015, got {_bbox_mp.extent().width()}"
+T("remove_layer", {"layer": "Giant_River_Renamed"})
+
+from qgis_ai_agent import runner as _runner
+assert any("Agent Orchestration" in lbl and val == "gemini-pro-orchestrator-g1-pro"
+           for lbl, val in _runner.DEFAULT_ADAPTER_MODELS["agy (Antigravity CLI)"]), "Missing Agent Orchestration in DEFAULT_ADAPTER_MODELS"
+
+# Protocol 0 vague prompt gating
+from qgis_ai_agent import prompts as _prompts
+assert skills.REGISTRY.is_vague_request("make city map yogyakarta around malioboro") is True
+assert skills.REGISTRY.is_vague_request("make city map of center yogyakarta around malioboro and tugu") is True
+assert "DO NOT EXECUTE MAP TOOLS YET" in _prompts.build("", "", "", "make city map yogyakarta around malioboro", False, is_vague=True)
+assert "DO NOT EXECUTE MAP TOOLS YET" not in _prompts.build("", "", "", "Tema: Street Network; Gaya Layout: Bento Dashboard", False, is_vague=False)
+
+_leaked_vsi = [x for x in (_gdal.ReadDir("/vsimem/") or []) if x.startswith("ov_pmt_")]
+assert not _leaked_vsi, f"Leaked /vsimem/ entries: {_leaked_vsi}"
 
 srv3 = ToolServer()
 srv3._busy = True

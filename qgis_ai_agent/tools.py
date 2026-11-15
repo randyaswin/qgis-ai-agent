@@ -6,20 +6,27 @@ Coverage follows the REA interaction map: project/CRS, layers, symbology,
 labels, processing, expressions, print layout, export, canvas snapshot.
 """
 import base64
+import bisect
+from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import gc
 import glob
+import gzip
 import html
 import io
+import json
 import logging
 import math
 import os
 import random
 import re
+import struct
 import tempfile
 import threading
 import time
 import traceback
+import urllib.parse
+import urllib.request
 from . import paths
 
 from qgis.PyQt import sip
@@ -331,8 +338,49 @@ def _canvas_freeze_guard():
         gc.collect()
 
 
+_ACTIVE_STUDY_BBOX = None
+
+
+def _record_study_bbox(bbox, crs_authid="EPSG:4326"):
+    """Remember the most recent explicit study-area bbox [xmin, ymin, xmax, ymax] for full-bbox layout framing."""
+    global _ACTIVE_STUDY_BBOX
+    if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+        try:
+            vals = [float(v) for v in bbox]
+            if vals[2] > vals[0] and vals[3] > vals[1]:
+                _ACTIVE_STUDY_BBOX = (vals, str(crs_authid or "EPSG:4326"))
+        except Exception:
+            pass
+
+
+def _study_bbox_rect(p, explicit_bbox=None):
+    """Return QgsRectangle in project CRS for an explicit bbox or the active session's recorded study bbox."""
+    src = None
+    if isinstance(explicit_bbox, (list, tuple)) and len(explicit_bbox) == 4:
+        try:
+            vals = [float(v) for v in explicit_bbox]
+            if vals[2] > vals[0] and vals[3] > vals[1]:
+                src = (vals, "EPSG:4326")
+        except Exception:
+            src = None
+    elif _ACTIVE_STUDY_BBOX is not None:
+        src = _ACTIVE_STUDY_BBOX
+    if not src:
+        return None
+    vals, src_authid = src
+    rect = QgsRectangle(*vals)
+    src_crs = QgsCoordinateReferenceSystem(src_authid)
+    if src_crs.isValid() and p.crs().isValid() and src_crs != p.crs():
+        tr = _safe_transform_extent(rect, src_crs, p.crs(), p)
+        if tr and _is_valid_extent(tr):
+            return tr
+    return rect if _is_valid_extent(rect) else None
+
+
 @tool("Clear the project and start fresh.", {"crs": S("string", "e.g. EPSG:4326 or EPSG:32748")})
 def new_project(crs="EPSG:4326"):
+    global _ACTIVE_STUDY_BBOX
+    _ACTIVE_STUDY_BBOX = None
     p = QgsProject.instance()
     with _canvas_freeze_guard():
         p.clear()
@@ -387,11 +435,303 @@ def open_project(path):
 
 
 # ---------------------------------------------------------------- layers
-@tool("Add a vector layer (shp, gpkg, geojson, csv-with-uri, PostGIS uri...).",
-      {"path": S("string", "file path or provider uri"), "name": S("string", "layer name"),
-       "provider": S("string", "ogr (default), delimitedtext, postgres, memory, wfs...")})
-def add_vector_layer(path, name=None, provider="ogr"):
-    lyr = QgsVectorLayer(path, name or os.path.splitext(os.path.basename(path))[0], provider)
+def _gpkg_first_layer_name(gpkg_path):
+    """Return the first OGR layer name inside a GeoPackage, or None."""
+    from osgeo import ogr
+
+    ds = ogr.Open(gpkg_path)
+    if ds is None:
+        return None
+    try:
+        lyr = ds.GetLayer(0)
+        return lyr.GetName() if lyr is not None else None
+    finally:
+        ds = None
+
+
+def _is_remote_vector_candidate(path, provider="ogr"):
+    """Return True if path/provider represents an HTTP/REST/WFS vector endpoint eligible for iterative fetching."""
+    if not isinstance(path, str) or not path.strip():
+        return False
+    low_path = path.strip().lower()
+    low_prov = (provider or "ogr").strip().lower()
+    if low_prov == "wfs":
+        return True
+    if not low_path.startswith(("http://", "https://")):
+        return False
+    # ArcGIS FeatureServer / MapServer REST query URLs
+    if re.search(r"/(?:featureserver|mapserver)/\d+(?:/query)?/?(?:\?|$)", low_path):
+        return True
+    # OGC WFS HTTP URLs
+    if "service=wfs" in low_path or "request=getfeature" in low_path or re.search(r"/wfs(?:/|\?|$)", low_path):
+        return True
+    # BBox-templated REST endpoints
+    if any(tok in low_path for tok in ("{xmin}", "{ymin}", "{xmax}", "{ymax}", "{bbox}")):
+        return True
+    # Explicit offset/page API endpoints (CKAN/Socrata/GBIF/GeoJSON APIs)
+    if any(tok in low_path for tok in ("resultoffset=", "startindex=", "offset=", "page=")):
+        return True
+    return False
+
+
+def _append_remote_bytes_to_gpkg(raw_bytes, tag, page_idx, out_file, target_layer_name="features"):
+    """Stage downloaded vector payload in a temp file and write/append into out_file GeoPackage. Returns (written_count, target_layer_name)."""
+    from osgeo import gdal, ogr
+
+    ext = ".geojson" if raw_bytes.lstrip()[:1] in (b"{", b"[") else ".xml"
+    tmp_src = os.path.join(tempfile.gettempdir(), f"rem_vec_{tag}_{threading.get_ident()}_{page_idx}{ext}")
+    ds = None
+    try:
+        with open(tmp_src, "wb") as fh:
+            fh.write(raw_bytes)
+        ds = ogr.Open(tmp_src)
+        if ds is None or ds.GetLayerCount() == 0:
+            return 0, target_layer_name
+        lyr = ds.GetLayer(0)
+        cnt = int(lyr.GetFeatureCount()) if lyr is not None else 0
+        ds = None
+        if cnt <= 0:
+            return 0, target_layer_name
+        exists = os.path.exists(out_file)
+        t_name = _gpkg_first_layer_name(out_file) if exists else target_layer_name
+        t_name = t_name or target_layer_name
+        opts_kw = {
+            "format": "GPKG",
+            "layerName": t_name,
+            "dstSRS": "EPSG:4326",
+            "reproject": True,
+        }
+        if exists:
+            opts_kw["accessMode"] = "append"
+        res = gdal.VectorTranslate(out_file, tmp_src, options=gdal.VectorTranslateOptions(**opts_kw))
+        if res is not None:
+            res = None
+        return cnt, t_name
+    finally:
+        ds = None
+        try:
+            if os.path.exists(tmp_src):
+                os.remove(tmp_src)
+        except Exception:
+            pass
+
+
+def _parse_qgis_wfs_uri(path):
+    """Extract base URL and TYPENAME from either a QGIS WFS URI string or an HTTP WFS URL."""
+    s = path.strip()
+    if s.lower().startswith(("http://", "https://")):
+        return s, None
+    url_m = re.search(r"url=['\"]([^'\"]+)['\"]", s, flags=re.IGNORECASE)
+    tn_m = re.search(r"typename=['\"]([^'\"]+)['\"]", s, flags=re.IGNORECASE)
+    return (url_m.group(1) if url_m else None), (tn_m.group(1) if tn_m else None)
+
+
+def _fetch_paginated_remote_vector_to_gpkg(path, provider="ogr", bbox=None, page_size=1000):
+    """Iteratively paginate or spatially tile a remote ArcGIS REST, WFS, or GeoJSON API into an indexed GPKG."""
+    if not _is_remote_vector_candidate(path, provider):
+        return None
+
+    batch_sz = max(50, min(int(page_size or 1000), 10000))
+    max_total = 250000
+    _cleanup_old_temp_files()
+    out_file = os.path.join(tempfile.gettempdir(), f"remote_vec_{int(time.time() * 1000)}.gpkg")
+    valid_bbox = isinstance(bbox, (list, tuple)) and len(bbox) == 4
+    total_cnt = 0
+    layer_tbl = "features"
+    tag = f"{int(time.time() * 1000)}"
+
+    try:
+        raw_s = path.strip()
+        low_s = raw_s.lower()
+        low_prov = (provider or "ogr").strip().lower()
+
+        # 1. ArcGIS REST FeatureServer / MapServer pagination via resultOffset & resultRecordCount
+        if re.search(r"/(?:featureserver|mapserver)/\d+(?:/query)?/?(?:\?|$)", low_s):
+            parts = urllib.parse.urlsplit(raw_s)
+            q_path = parts.path.rstrip("/")
+            if not q_path.lower().endswith("/query"):
+                q_path = q_path + "/query"
+            base_params = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
+            lower_keys = {k.lower(): k for k in base_params}
+            if "where" not in lower_keys:
+                base_params["where"] = "1=1"
+            if "outfields" not in lower_keys:
+                base_params["outFields"] = "*"
+            base_params[lower_keys.get("returngeometry", "returnGeometry")] = "true"
+            base_params[lower_keys.get("outsr", "outSR")] = "4326"
+            base_params[lower_keys.get("f", "f")] = "geojson"
+            if valid_bbox:
+                xmin, ymin, xmax, ymax = [float(v) for v in bbox]
+                base_params["geometry"] = f"{xmin},{ymin},{xmax},{ymax}"
+                base_params["geometryType"] = "esriGeometryEnvelope"
+                base_params["inSR"] = "4326"
+                base_params["spatialRel"] = "esriSpatialRelIntersects"
+
+            offset = 0
+            page_idx = 0
+            while total_cnt < max_total:
+                if CANCEL_REQUESTED:
+                    raise RuntimeError("Execution stopped by user.")
+                page_idx += 1
+                params = dict(base_params)
+                params["resultOffset"] = str(offset)
+                params["resultRecordCount"] = str(batch_sz)
+                page_url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, q_path, urllib.parse.urlencode(params), ""))
+                raw_bytes = _fetch_http_bytes(page_url, timeout=25)
+                payload = json.loads(raw_bytes.decode("utf-8"))
+                if isinstance(payload, dict) and payload.get("error"):
+                    raise RuntimeError(f"ArcGIS REST error: {payload['error']}")
+                feats = payload.get("features") if isinstance(payload, dict) else []
+                if not feats:
+                    break
+                added, layer_tbl = _append_remote_bytes_to_gpkg(raw_bytes, tag, page_idx, out_file, layer_tbl)
+                if added <= 0:
+                    break
+                total_cnt += added
+                offset += added
+                _report_progress("add_vector_layer", min(94, 15 + page_idx * 10), f"ArcGIS REST page {page_idx} ({total_cnt:,} features)...")
+                exceeded = payload.get("exceededTransferLimit")
+                if exceeded is None and isinstance(payload.get("properties"), dict):
+                    exceeded = payload["properties"].get("exceededTransferLimit")
+                if exceeded is False or (exceeded is None and added < batch_sz):
+                    break
+            return out_file if total_cnt > 0 and os.path.exists(out_file) else None
+
+        # 2. OGC WFS pagination via STARTINDEX & COUNT
+        wfs_url, wfs_typename = _parse_qgis_wfs_uri(raw_s)
+        if wfs_url and (low_prov == "wfs" or "service=wfs" in low_s or "request=getfeature" in low_s or re.search(r"/wfs(?:/|\?|$)", low_s)):
+            parts = urllib.parse.urlsplit(wfs_url)
+            base_params = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
+            lower_keys = {k.lower(): k for k in base_params}
+            base_params[lower_keys.get("service", "service")] = "WFS"
+            base_params[lower_keys.get("request", "request")] = "GetFeature"
+            ver = base_params.get(lower_keys.get("version", "version"), "2.0.0")
+            base_params[lower_keys.get("version", "version")] = ver
+            if wfs_typename and "typenames" not in lower_keys and "typename" not in lower_keys:
+                base_params["typeNames" if ver.startswith("2") else "typeName"] = wfs_typename
+            if "srsname" not in lower_keys:
+                base_params["srsName"] = "EPSG:4326"
+            if "outputformat" not in lower_keys:
+                base_params["outputFormat"] = "application/json"
+            if valid_bbox and "bbox" not in lower_keys:
+                xmin, ymin, xmax, ymax = [float(v) for v in bbox]
+                base_params["bbox"] = f"{xmin},{ymin},{xmax},{ymax},EPSG:4326"
+
+            offset = 0
+            page_idx = 0
+            while total_cnt < max_total:
+                if CANCEL_REQUESTED:
+                    raise RuntimeError("Execution stopped by user.")
+                page_idx += 1
+                params = dict(base_params)
+                params["startIndex" if ver.startswith("2") else "startIndex"] = str(offset)
+                params["count" if ver.startswith("2") else "maxFeatures"] = str(batch_sz)
+                page_url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, urllib.parse.urlencode(params), ""))
+                raw_bytes = _fetch_http_bytes(page_url, timeout=25)
+                added, layer_tbl = _append_remote_bytes_to_gpkg(raw_bytes, tag, page_idx, out_file, layer_tbl)
+                if added <= 0:
+                    break
+                total_cnt += added
+                offset += added
+                _report_progress("add_vector_layer", min(94, 15 + page_idx * 10), f"WFS page {page_idx} ({total_cnt:,} features)...")
+                if added < batch_sz:
+                    break
+            return out_file if total_cnt > 0 and os.path.exists(out_file) else None
+
+        # 3. BBox-templated REST URL (spatial tile grid iteration)
+        if any(tok in low_s for tok in ("{xmin}", "{ymin}", "{xmax}", "{ymax}", "{bbox}")):
+            if not valid_bbox:
+                raise ValueError("URL requires a 'bbox': [xmin, ymin, xmax, ymax] parameter for tiled fetching.")
+            xmin, ymin, xmax, ymax = [float(v) for v in bbox]
+            nx = max(1, min(6, math.ceil(abs(xmax - xmin) / 0.1)))
+            ny = max(1, min(6, math.ceil(abs(ymax - ymin) / 0.1)))
+            dx = (xmax - xmin) / nx
+            dy = (ymax - ymin) / ny
+            tiles = [
+                (xmin + ix * dx, ymin + iy * dy, xmin + (ix + 1) * dx, ymin + (iy + 1) * dy)
+                for ix in range(nx) for iy in range(ny)
+            ]
+            for t_idx, (tx0, ty0, tx1, ty1) in enumerate(tiles, start=1):
+                if CANCEL_REQUESTED:
+                    raise RuntimeError("Execution stopped by user.")
+                t_url = (
+                    raw_s.replace("{xmin}", str(tx0)).replace("{ymin}", str(ty0))
+                    .replace("{xmax}", str(tx1)).replace("{ymax}", str(ty1))
+                    .replace("{bbox}", f"{tx0},{ty0},{tx1},{ty1}")
+                )
+                raw_bytes = _fetch_http_bytes(t_url, timeout=25)
+                added, layer_tbl = _append_remote_bytes_to_gpkg(raw_bytes, tag, t_idx, out_file, layer_tbl)
+                total_cnt += added
+                _report_progress("add_vector_layer", min(94, int(15 + 75 * t_idx / len(tiles))), f"Tiled fetch {t_idx}/{len(tiles)} ({total_cnt:,} features)...")
+            return out_file if total_cnt > 0 and os.path.exists(out_file) else None
+
+        # 4. Generic offset/page GeoJSON REST endpoints
+        parts = urllib.parse.urlsplit(raw_s)
+        base_params = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
+        lower_keys = {k.lower(): k for k in base_params}
+        use_page_num = "page" in lower_keys and "offset" not in lower_keys
+        page_key = lower_keys.get("page", "page") if use_page_num else lower_keys.get("offset", "offset")
+        limit_key = lower_keys.get("limit") or lower_keys.get("per_page") or lower_keys.get("pagesize")
+        page_idx = 0
+        offset = 1 if use_page_num else 0
+        while total_cnt < max_total:
+            if CANCEL_REQUESTED:
+                raise RuntimeError("Execution stopped by user.")
+            page_idx += 1
+            params = dict(base_params)
+            params[page_key] = str(offset)
+            if limit_key:
+                params[limit_key] = str(batch_sz)
+            page_url = urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, urllib.parse.urlencode(params), ""))
+            raw_bytes = _fetch_http_bytes(page_url, timeout=25)
+            added, layer_tbl = _append_remote_bytes_to_gpkg(raw_bytes, tag, page_idx, out_file, layer_tbl)
+            if added <= 0:
+                break
+            total_cnt += added
+            offset += 1 if use_page_num else added
+            _report_progress("add_vector_layer", min(94, 15 + page_idx * 10), f"API page {page_idx} ({total_cnt:,} features)...")
+            if added < batch_sz and not limit_key:
+                # If API used its own smaller page limit when no limit_key was present, check added == 0 on next or stop if small
+                if page_idx == 1 and added >= 50:
+                    continue
+                break
+            elif limit_key and added < batch_sz:
+                break
+        return out_file if total_cnt > 0 and os.path.exists(out_file) else None
+    except Exception as exc:
+        if "Execution stopped by user" in str(exc):
+            raise
+        LOGGER.info(f"Paginated remote vector helper fell back to direct provider for {path!r}: {exc}")
+        if os.path.exists(out_file):
+            try:
+                os.remove(out_file)
+            except Exception:
+                pass
+        return None
+
+
+@tool("Add a vector layer (shp, gpkg, geojson, csv-with-uri, PostGIS uri, or paginated WFS / ArcGIS FeatureServer REST endpoints).",
+      {"path": S("string", "file path or provider uri"),
+       "name": S("string", "layer name"),
+       "provider": S("string", "ogr (default), delimitedtext, postgres, memory, wfs..."),
+       "bbox": S("array", "optional [xmin, ymin, xmax, ymax] in WGS84 for tiled/paginated remote fetching"),
+       "paginate": S("boolean", "iterate pages/tiles for remote WFS/FeatureServer/REST APIs until complete (default true)"),
+       "page_size": S("integer", "features per page/tile iteration (default 1000)")})
+def add_vector_layer(path, name=None, provider="ogr", bbox=None, paginate=True, page_size=1000):
+    if CANCEL_REQUESTED:
+        raise RuntimeError("Execution stopped by user.")
+    if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+        _record_study_bbox(bbox, "EPSG:4326")
+    resolved_name = name or os.path.splitext(os.path.basename(str(path).split("?")[0]))[0] or "Vector_Layer"
+    load_path = path
+    load_provider = provider
+    if paginate and _is_remote_vector_candidate(path, provider):
+        gpkg_path = _fetch_paginated_remote_vector_to_gpkg(path, provider=provider, bbox=bbox, page_size=page_size)
+        if gpkg_path and _count_gpkg_features(gpkg_path) > 0:
+            load_path = gpkg_path
+            load_provider = "ogr"
+
+    lyr = QgsVectorLayer(load_path, resolved_name, load_provider)
     if not lyr.isValid():
         raise ValueError(f"Invalid vector source: {path}")
     if not _is_valid_extent(lyr.extent()):
@@ -1245,15 +1585,16 @@ def remove_layer(layer=None, layer_id=None):
 
 
 @tool("Rename, show/hide, set opacity, set scale-visibility, or move a layer.",
-      {"layer": S("string", "name or id"), "new_name": S("string", ""), "visible": S("boolean", ""),
-       "opacity": S("number", "0..1"), "position": S("integer", "0 = top of stack"),
+      {"layer": S("string", "name or id"), "new_name": S("string", ""), "name": S("string", "alias for new_name"),
+       "visible": S("boolean", ""), "opacity": S("number", "0..1"), "position": S("integer", "0 = top of stack"),
        "min_scale": S("number", "denominator"), "max_scale": S("number", "denominator")})
-def update_layer(layer, new_name=None, visible=None, opacity=None, position=None, min_scale=None, max_scale=None):
+def update_layer(layer, new_name=None, visible=None, opacity=None, position=None, min_scale=None, max_scale=None, name=None):
     lyr = _layer(layer)
     root = QgsProject.instance().layerTreeRoot()
     node = root.findLayer(lyr.id())
-    if new_name:
-        lyr.setName(new_name)
+    resolved_name = new_name or name
+    if resolved_name:
+        lyr.setName(resolved_name)
     if visible is not None and node:
         node.setItemVisibilityChecked(bool(visible))
     if opacity is not None:
@@ -1280,6 +1621,7 @@ def zoom_to(layer=None, bbox=None, margin=0.05):
     c = _canvas()
     p = QgsProject.instance()
     if bbox:
+        _record_study_bbox(bbox, p.crs().authid() if p.crs().isValid() else "EPSG:4326")
         r = QgsRectangle(*bbox)
     else:
         lyr = _layer(layer)
@@ -1880,17 +2222,175 @@ def style_single(layer, color="#3388ff", outline_color=None, width=None, size=No
     return {"ok": True}
 
 
+_ROAD_CLASS_VALUES = {
+    "motorway", "trunk", "primary", "secondary", "tertiary",
+    "motorway_link", "trunk_link", "primary_link", "secondary_link", "tertiary_link",
+    "residential", "living_street", "unclassified", "service", "track",
+    "pedestrian", "footway", "path", "steps", "cycleway", "bridleway",
+    "standard_gauge", "rail", "light_rail", "narrow_gauge", "subway", "tram",
+}
+
+_ROAD_CLASS_TIERS = (
+    ("Primary / Arterial Road", ("motorway", "trunk", "primary", "motorway_link", "trunk_link", "primary_link"), "#b45309", "#f59e0b", 1.15, 0.72, 5),
+    ("Secondary Road", ("secondary", "secondary_link"), "#64748b", "#fbbf24", 0.90, 0.56, 4),
+    ("Tertiary Road", ("tertiary", "tertiary_link"), "#64748b", "#fde68a", 0.72, 0.44, 3),
+    ("Residential & Local Street", ("residential", "living_street", "unclassified"), "#94a3b8", "#f8fafc", 0.52, 0.30, 2),
+    ("Service & Access Road", ("service", "track"), "#cbd5e1", "#e2e8f0", 0.24, 0.14, 0),
+    ("Railway", ("standard_gauge", "rail", "light_rail", "narrow_gauge", "subway", "tram"), "#475569", None, 0.42, 0.0, 1),
+    ("Pedestrian & Footpath", ("pedestrian", "footway", "path", "steps", "cycleway", "bridleway"), "#cbd5e1", None, 0.14, 0.0, 0),
+)
+
+
+def _layer_stack_rank(lyr):
+    if lyr is None or not lyr.isValid():
+        return 5
+    if lyr.type() == Qgis.LayerType.Vector:
+        gt = lyr.geometryType()
+        if gt == Qgis.GeometryType.Point:
+            return 0
+        if gt == Qgis.GeometryType.Line:
+            return 1
+        if gt == Qgis.GeometryType.Polygon:
+            return 2
+        return 3
+    if lyr.providerType() == "wms":
+        return 5
+    return 4
+
+
+def _normalize_layer_order(p=None):
+    """Ensure Points -> Lines -> Polygons -> Rasters -> Basemaps stacking order."""
+    p = p or QgsProject.instance()
+    root = p.layerTreeRoot()
+    all_children = list(root.children())
+    layer_indices = [
+        (i, ch) for i, ch in enumerate(all_children)
+        if hasattr(ch, "layer") and callable(ch.layer) and ch.layer() is not None
+    ]
+    if len(layer_indices) <= 1:
+        return
+    first_pos = layer_indices[0][0]
+    layer_nodes = [ch for _, ch in layer_indices]
+    desired = sorted(
+        [(idx, ch) for idx, ch in enumerate(layer_nodes)],
+        key=lambda item: (_layer_stack_rank(item[1].layer()), item[0]),
+    )
+    if [ch for _, ch in desired] == layer_nodes:
+        return
+    for offset, (_, node) in enumerate(desired):
+        vis = node.isVisible() if hasattr(node, "isVisible") else True
+        clone = node.clone()
+        clone.setItemVisibilityChecked(bool(vis))
+        root.insertChildNode(first_pos + offset, clone)
+        root.removeChildNode(node)
+
+
+def _humanize_category_label(val):
+    s = str(val) if val is not None else ""
+    if "_" in s and s.replace("_", "").isalnum() and s == s.lower():
+        return s.replace("_", " ").title()
+    return s
+
+
+def _make_cased_line_symbol(casing_color, fill_color, casing_width, fill_width, fill_pass, opacity=1.0):
+    from qgis.core import QgsLineSymbol, QgsSimpleLineSymbolLayer
+    sym = QgsLineSymbol()
+    sym.deleteSymbolLayer(0)
+    if fill_color and fill_width > 0:
+        casing = QgsSimpleLineSymbolLayer()
+        casing.setColor(QColor(casing_color))
+        casing.setWidth(float(casing_width))
+        casing.setPenCapStyle(Qt.PenCapStyle.RoundCap)
+        casing.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        casing.setRenderingPass(1 if fill_pass >= 2 else 0)
+        sym.appendSymbolLayer(casing)
+
+        inner = QgsSimpleLineSymbolLayer()
+        inner.setColor(QColor(fill_color))
+        inner.setWidth(float(fill_width))
+        inner.setPenCapStyle(Qt.PenCapStyle.RoundCap)
+        inner.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        inner.setRenderingPass(int(fill_pass))
+        sym.appendSymbolLayer(inner)
+    else:
+        stroke = QgsSimpleLineSymbolLayer()
+        stroke.setColor(QColor(casing_color))
+        stroke.setWidth(float(casing_width))
+        stroke.setPenCapStyle(Qt.PenCapStyle.RoundCap)
+        stroke.setPenJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        stroke.setRenderingPass(int(fill_pass))
+        sym.appendSymbolLayer(stroke)
+    if opacity is not None:
+        sym.setOpacity(float(opacity))
+    return sym
+
+
+def _style_road_hierarchy(lyr, field, raw_values, width_scale=1.0, opacity=1.0):
+    val_by_low = {}
+    for v in raw_values:
+        if v is None:
+            continue
+        k = str(v).strip().lower()
+        if k not in val_by_low:
+            val_by_low[k] = v
+
+    cats = []
+    matched_keys = set()
+    w_mult = max(0.5, float(width_scale) / 0.4) if width_scale is not None else 1.0
+    w_mult = min(w_mult, 1.8)
+
+    for label, members, casing_col, fill_col, cw, fw, r_pass in _ROAD_CLASS_TIERS:
+        present = [val_by_low[m] for m in members if m in val_by_low]
+        if not present:
+            continue
+        matched_keys.update(str(x).strip().lower() for x in present)
+        eff_opacity = min(float(opacity), 0.55) if r_pass == 0 else float(opacity)
+        sym = _make_cased_line_symbol(casing_col, fill_col, cw * w_mult, fw * w_mult, r_pass, opacity=eff_opacity)
+        cat_val = present[0] if len(present) == 1 else present
+        cats.append(QgsRendererCategory(cat_val, sym, label))
+
+    leftovers = [v for v in raw_values if v is not None and str(v).strip().lower() not in matched_keys]
+    if leftovers:
+        sym_other = _make_cased_line_symbol("#94a3b8", None, 0.25 * w_mult, 0.0, 0, opacity=opacity)
+        cat_val = leftovers[0] if len(leftovers) == 1 else leftovers
+        cats.append(QgsRendererCategory(cat_val, sym_other, "Other Ways"))
+
+    ren = QgsCategorizedSymbolRenderer(field, cats)
+    ren.setUsingSymbolLevels(True)
+    return ren
+
+
 @tool("Categorized (unique values) style.",
       {"layer": S("string", ""), "field": S("string", "field or expression"), "ramp": S("string", "e.g. Spectral, Set1, Viridis"),
        "outline_color": S("string", ""), "opacity": S("number", "0..1 fill opacity, default 1.0"),
        "width": S("number", "outline/line width mm"),
        "color_map": S("object", "optional explicit {value: '#rrggbb'} overrides")})
-def style_categorized(layer, field, ramp="Spectral", outline_color=None, opacity=1.0, width=None, color_map=None):
+def style_categorized(layer, field=None, ramp="Spectral", outline_color=None, opacity=1.0, width=None, color_map=None, column=None):
+    field = field or column
+    if not field:
+        raise ValueError("style_categorized requires 'field' (attribute column name)")
     lyr = _layer(layer)
     idx = lyr.fields().indexOf(field)
     raw_values = sorted(lyr.uniqueValues(idx), key=str) if idx >= 0 else []
     MAX_CATS = 250
     values = raw_values[:MAX_CATS]
+
+    is_road_layer = (
+        lyr.type() == Qgis.LayerType.Vector
+        and lyr.geometryType() == Qgis.GeometryType.Line
+        and not color_map
+        and (
+            str(field).strip().lower() in ("class", "highway", "subtype", "fclass", "road_class")
+            or len({str(v).strip().lower() for v in values} & _ROAD_CLASS_VALUES) >= 2
+        )
+    )
+    if is_road_layer and values:
+        ren = _style_road_hierarchy(lyr, field, values, width_scale=width, opacity=opacity)
+        lyr.setRenderer(ren)
+        lyr.triggerRepaint()
+        _iface().layerTreeView().refreshLayerSymbology(lyr.id())
+        return {"categories": len(ren.categories()), "total_unique": len(raw_values), "hierarchy": "cased_roads"}
+
     r = _ramp(ramp)
     cmap = {str(k).strip().lower(): v for k, v in color_map.items()} if isinstance(color_map, dict) else {}
     cats = []
@@ -1899,7 +2399,7 @@ def style_categorized(layer, field, ramp="Spectral", outline_color=None, opacity
         s_val = str(v)
         col = cmap.get(s_val.strip().lower()) or r.color(i / n).name()
         sym = _symbol(lyr, color=col, outline_color=outline_color, width=width, opacity=opacity)
-        cats.append(QgsRendererCategory(v, sym, s_val))
+        cats.append(QgsRendererCategory(v, sym, _humanize_category_label(v)))
     lyr.setRenderer(QgsCategorizedSymbolRenderer(field, cats))
     lyr.triggerRepaint()
     _iface().layerTreeView().refreshLayerSymbology(lyr.id())
@@ -1910,7 +2410,10 @@ def style_categorized(layer, field, ramp="Spectral", outline_color=None, opacity
       {"layer": S("string", ""), "field": S("string", "numeric field or expression"), "classes": S("integer", "default 5"),
        "method": S("string", "jenks|quantile|equal|pretty|stddev"), "ramp": S("string", "e.g. YlOrRd, Reds, Viridis"),
        "invert_ramp": S("boolean", ""), "outline_color": S("string", "")})
-def style_graduated(layer, field, classes=5, method="jenks", ramp="YlOrRd", invert_ramp=False, outline_color=None):
+def style_graduated(layer, field=None, classes=5, method="jenks", ramp="YlOrRd", invert_ramp=False, outline_color=None, column=None):
+    field = field or column
+    if not field:
+        raise ValueError("style_graduated requires 'field' (numeric column name)")
     lyr = _layer(layer)
     meth = {"jenks": QgsClassificationJenks, "quantile": QgsClassificationQuantile,
             "equal": QgsClassificationEqualInterval, "pretty": QgsClassificationPrettyBreaks,
@@ -1976,17 +2479,35 @@ def list_color_ramps():
       {"layer": S("string", ""), "field": S("string", "field name"), "expression": S("string", "overrides field"),
        "size": S("number", "pt, default 9"), "color": S("string", ""), "font": S("string", "family"),
        "bold": S("boolean", ""), "buffer_size": S("number", "halo mm, default 1"), "buffer_color": S("string", ""),
-       "placement": S("string", "around_point|over_point|horizontal|free|curved|parallel"), "enabled": S("boolean", "")})
+       "placement": S("string", "around_point|over_point|horizontal|free|curved|parallel"),
+       "max_labels": S("integer", "optional max rendered labels cap to prevent clutter"),
+       "enabled": S("boolean", "")})
 def set_labels(layer, field=None, expression=None, size=9, color="#000000", font=None, bold=False,
-               buffer_size=1.0, buffer_color="#ffffff", placement=None, enabled=True):
+               buffer_size=1.0, buffer_color="#ffffff", placement=None, max_labels=None, enabled=True):
     lyr = _layer(layer)
     if not enabled:
         lyr.setLabelsEnabled(False)
         lyr.triggerRepaint()
         return {"labels": False}
     s = QgsPalLayerSettings()
-    s.fieldName = expression or field
-    s.isExpression = bool(expression)
+    gtype = lyr.geometryType()
+    if (
+        not expression
+        and gtype == Qgis.GeometryType.Line
+        and field
+        and str(field).strip().lower() == "name"
+        and lyr.fields().indexOf("class") >= 0
+    ):
+        s.fieldName = (
+            "CASE WHEN COALESCE(\"class\", '') NOT IN "
+            "('footway', 'path', 'steps', 'service', 'track', 'bridleway', 'cycleway') "
+            "THEN \"name\" END"
+        )
+        s.isExpression = True
+    else:
+        s.fieldName = expression or field
+        s.isExpression = bool(expression)
+
     fmt = QgsTextFormat()
     f = QFont(font) if font else fmt.font()
     f.setBold(bool(bold))
@@ -2000,11 +2521,52 @@ def set_labels(layer, field=None, expression=None, size=9, color="#000000", font
         b.setColor(QColor(buffer_color))
         fmt.setBuffer(b)
     s.setFormat(fmt)
+
     P = Qgis.LabelPlacement
     pm = {"around_point": P.AroundPoint, "over_point": P.OverPoint, "horizontal": P.Horizontal,
           "free": P.Free, "curved": P.Curved, "parallel": P.Line}
-    if placement in pm:
+    if placement in pm and not (gtype == Qgis.GeometryType.Line and placement == "around_point"):
         s.placement = pm[placement]
+    elif gtype == Qgis.GeometryType.Line:
+        s.placement = P.Curved if hasattr(P, "Curved") else P.Line
+
+    try:
+        s.obstacleSettings().setIsObstacle(True)
+    except Exception:
+        pass
+
+    ts = s.thinningSettings()
+    if gtype == Qgis.GeometryType.Line:
+        s.mergeLines = True
+        s.repeatDistance = 85.0
+        ts.setAllowDuplicateRemoval(True)
+        ts.setMinimumDistanceToDuplicate(55.0)
+        ts.setLabelMarginDistance(3.0)
+        ts.setMinimumFeatureSize(4.0)
+        cap = int(max_labels) if max_labels is not None else 35
+        if cap > 0:
+            ts.setLimitNumberLabelsEnabled(True)
+            ts.setMaximumNumberLabels(cap)
+    elif gtype == Qgis.GeometryType.Point:
+        feat_cnt = lyr.featureCount()
+        if max_labels is not None or feat_cnt > 30:
+            cap = int(max_labels) if max_labels is not None else 25
+            ts.setAllowDuplicateRemoval(True)
+            ts.setLimitNumberLabelsEnabled(True)
+            ts.setMaximumNumberLabels(cap)
+            ts.setLabelMarginDistance(4.5)
+            ts.setMinimumDistanceToDuplicate(30.0)
+            s.priority = 3
+    elif gtype == Qgis.GeometryType.Polygon:
+        feat_cnt = lyr.featureCount()
+        if max_labels is not None or feat_cnt > 40:
+            cap = int(max_labels) if max_labels is not None else 25
+            ts.setLimitNumberLabelsEnabled(True)
+            ts.setMaximumNumberLabels(cap)
+            ts.setLabelMarginDistance(3.0)
+            ts.setMinimumFeatureSize(4.0)
+    s.setThinningSettings(ts)
+
     lyr.setLabeling(QgsVectorLayerSimpleLabeling(s))
     lyr.setLabelsEnabled(True)
     lyr.triggerRepaint()
@@ -2139,7 +2701,115 @@ def snapshot_canvas(width=1000, height=700):
     return {"__image__": base64.b64encode(bytes(buf.data())).decode(), "mime": "image/png"}
 
 
-@tool("Render a visual preview image of a print layout and return it as an image. ALWAYS call this after creating or modifying a layout to visually verify layout balance, check for overflowing legend items, inspect text proportions, and verify that the map fills the page before finalizing.",
+def _audit_layout_quality(lay):
+    """Compute objective geometry & composition diagnostics for a print layout so the agent can iterate."""
+    from qgis.core import (
+        QgsLayoutItemMap, QgsLayoutItemLegend, QgsLayoutItemLabel,
+        QgsLayoutItemScaleBar, QgsLayoutItemPicture, QgsLayoutItemShape,
+    )
+    page = lay.pageCollection().page(0)
+    W = float(page.pageSize().width())
+    H = float(page.pageSize().height())
+    page_area = max(W * H, 1.0)
+
+    maps = []
+    overlays = []
+    legends = []
+    labels = []
+    scalebars = []
+    pictures = []
+    warnings = []
+
+    for it in lay.items():
+        if not hasattr(it, "isVisible") or not it.isVisible():
+            continue
+        if isinstance(it, QgsLayoutItemMap):
+            pos = it.pos()
+            rect = it.rect()
+            x, y, w, h = float(pos.x()), float(pos.y()), float(rect.width()), float(rect.height())
+            if w > 0.1 and h > 0.1:
+                maps.append((it, x, y, w, h))
+            continue
+        if not isinstance(it, (QgsLayoutItemLabel, QgsLayoutItemLegend, QgsLayoutItemScaleBar, QgsLayoutItemPicture)):
+            continue
+        pos = it.pos()
+        rect = it.rect()
+        x, y, w, h = float(pos.x()), float(pos.y()), float(rect.width()), float(rect.height())
+        if w <= 0.1 or h <= 0.1:
+            continue
+
+        kind = type(it).__name__.replace("QgsLayoutItem", "")
+        entry = (kind, x, y, x + w, y + h, it)
+        if isinstance(it, QgsLayoutItemLegend):
+            legends.append(it)
+        elif isinstance(it, QgsLayoutItemLabel):
+            labels.append(it)
+        elif isinstance(it, QgsLayoutItemScaleBar):
+            scalebars.append(it)
+        elif isinstance(it, QgsLayoutItemPicture):
+            pictures.append(it)
+        overlays.append(entry)
+
+    map_area_pct = round(sum(w * h for _, _, _, w, h in maps) / page_area * 100.0, 1)
+    if maps and map_area_pct < 40.0:
+        warnings.append(f"Hero map covers only {map_area_pct}% of page; consider expanding map frame.")
+
+    for mp_it, _, _, mw, mh in maps:
+        ext = mp_it.extent()
+        ew, eh = float(ext.width()), float(ext.height())
+        if ew <= 0 or eh <= 0:
+            warnings.append("Map item has empty extent.")
+        elif abs(ew - 360.0) < 1e-3 and abs(eh - 180.0) < 1e-3:
+            warnings.append("Map item is still at world fallback extent (-180..180); zoom to study area.")
+
+    oob = []
+    for kind, x1, y1, x2, y2, _ in overlays:
+        if x1 < -1.5 or y1 < -1.5 or x2 > W + 1.5 or y2 > H + 1.5:
+            oob.append(f"{kind}@({x1:.1f},{y1:.1f}..{x2:.1f},{y2:.1f})")
+    if oob:
+        warnings.append(f"Out-of-bounds items ({len(oob)}): {', '.join(oob[:4])}")
+
+    overlaps = []
+    for i in range(len(overlays)):
+        k1, ax1, ay1, ax2, ay2, _ = overlays[i]
+        for j in range(i + 1, len(overlays)):
+            k2, bx1, by1, bx2, by2, _ = overlays[j]
+            ix = min(ax2, bx2) - max(ax1, bx1)
+            iy = min(ay2, by2) - max(ay1, by1)
+            if ix > 2.0 and iy > 2.0:
+                overlaps.append(f"{k1} vs {k2} ({ix:.1f}x{iy:.1f}mm)")
+    if overlaps:
+        warnings.append(f"Overlapping layout items: {', '.join(overlaps[:4])}")
+
+    leg_count = 0
+    for lg in legends:
+        nodes = lg.model().rootGroup().findLayers()
+        leg_count += len(nodes)
+        for ch in nodes:
+            nm = str(ch.customProperty("legend/title-label") or ch.name() or "").lower()
+            if any(b in nm for b in ("esri", "basemap", "osm standard", "carto", "band 1")):
+                warnings.append(f"Unpruned background/raw layer in legend: {nm}")
+    if leg_count > 10:
+        warnings.append(f"Legend has {leg_count} layers; consider pruning or multi-column layout.")
+
+    return {
+        "page_mm": [round(W, 1), round(H, 1)],
+        "map_area_pct": map_area_pct,
+        "item_counts": {
+            "maps": len(maps),
+            "legends": len(legends),
+            "scalebars": len(scalebars),
+            "north_arrows": len(pictures),
+            "labels": len(labels),
+        },
+        "out_of_bounds_items": oob,
+        "overlapping_items": overlaps,
+        "legend_layers_count": leg_count,
+        "qa_warnings": warnings,
+    }
+
+
+@tool("Render a visual preview image of a print layout plus objective layout QA diagnostics (map_area_pct, out_of_bounds_items, overlapping_items, legend_layers_count, qa_warnings). ALWAYS call this after creating or modifying a layout and iterate until the visual composition and qa_warnings are clean.",
       {"name": S("string", "layout name (default: first or active layout)"), "dpi": S("integer", "render DPI (default: 120)")})
 def snapshot_layout(name=None, dpi=120, layout=None, layout_name=None, **kwargs):
     p = QgsProject.instance()
@@ -2156,12 +2826,269 @@ def snapshot_layout(name=None, dpi=120, layout=None, layout_name=None, **kwargs)
         raise ValueError(f"No print layout found. Available layouts: {[l.name() for l in mgr.printLayouts()]}")
 
     raw_b64 = _export_layout_preview_b64(lay, dpi=dpi)
+    qa = _audit_layout_quality(lay)
     return {
         "__image__": raw_b64,
         "mime": "image/png",
         "layout": lay.name(),
-        "page_mm": [lay.pageCollection().page(0).pageSize().width(), lay.pageCollection().page(0).pageSize().height()]
+        "page_mm": [lay.pageCollection().page(0).pageSize().width(), lay.pageCollection().page(0).pageSize().height()],
+        "qa": qa,
     }
+
+
+def _humanize_layer_title(name: str) -> str:
+    """Turn raw layer names like Overture_Transportation into clean legend titles."""
+    known_upper = {
+        "rtrw", "rdtr", "poi", "aoi", "dem", "demnas", "osm", "ndvi", "ndwi", "lulc",
+        "kdb", "klb", "wgs", "utm", "bnpb", "inarisk", "bmkg", "bps", "big", "das",
+        "klhk", "atr", "bpn", "crs", "gdp", "pm25", "nox", "co2", "rgb", "sar",
+    }
+    aliases = {
+        "overture_transportation": "Road Network",
+        "overture_buildings": "Building Footprints",
+        "overture_places": "Points of Interest",
+        "overture_divisions": "Administrative Boundaries",
+        "overture_base": "Land & Water Base",
+    }
+    raw = str(name or "").strip()
+    if not raw:
+        return "Layer"
+    low_key = re.sub(r"[\s\-]+", "_", raw.lower()).strip("_")
+    if low_key in aliases:
+        return aliases[low_key]
+    for prefix in ("overture_", "osm_", "stac_", "qgis_"):
+        if low_key.startswith(prefix) and len(low_key) > len(prefix):
+            raw = raw[len(prefix):]
+            break
+    tokens = [t for t in re.split(r"[_\-\s]+", raw) if t]
+    out = []
+    for tok in tokens:
+        tl = tok.lower()
+        if tl in known_upper or (tok.isupper() and len(tok) <= 4):
+            out.append(tl.upper())
+        else:
+            out.append(tok.capitalize())
+    return " ".join(out) or raw
+
+
+def _compute_project_kpis(p) -> dict:
+    """Compute real live layer/feature/extent metrics from the active QGIS project."""
+    from qgis.core import (
+        QgsVectorLayer, QgsWkbTypes, QgsDistanceArea,
+        QgsCoordinateTransform, QgsGeometry, QgsPointXY, Qgis,
+    )
+    skip_terms = (
+        "esri", "osm", "carto", "basemap", "hillshade", "xyz", "canvas",
+        "satellite", "terrain", "google", "bing", "stamen", "opentopomap",
+        "positron", "dark_matter", "voyager",
+    )
+    layers = [l for l in p.mapLayers().values() if not any(t in l.name().lower() for t in skip_terms)]
+    vec_layers = [l for l in layers if isinstance(l, QgsVectorLayer)]
+    total_features = point_features = line_features = polygon_features = 0
+    roads_count = buildings_count = places_count = 0
+    extent = None
+    for lyr in vec_layers:
+        fc = int(lyr.featureCount() or 0)
+        if fc < 0:
+            fc = 0
+        total_features += fc
+        gt = lyr.geometryType()
+        ln = lyr.name().lower()
+        if gt == QgsWkbTypes.GeometryType.PointGeometry:
+            point_features += fc
+            if any(k in ln for k in ("place", "poi", "landmark", "facility", "school", "hospital")):
+                places_count += fc
+        elif gt == QgsWkbTypes.GeometryType.LineGeometry:
+            line_features += fc
+            if any(k in ln for k in ("road", "street", "transport", "highway", "route", "corridor", "jalan")):
+                roads_count += fc
+        elif gt == QgsWkbTypes.GeometryType.PolygonGeometry:
+            polygon_features += fc
+            if any(k in ln for k in ("building", "footprint", "bangunan", "bldg")):
+                buildings_count += fc
+        ext = lyr.extent()
+        if ext and not ext.isEmpty() and lyr.crs().isValid():
+            try:
+                if lyr.crs() != p.crs():
+                    ext = QgsCoordinateTransform(lyr.crs(), p.crs(), p).transformBoundingBox(ext)
+                extent = ext if extent is None else extent.united(ext)
+            except Exception:
+                pass
+    area_km2 = width_km = height_km = 0.0
+    if extent is not None and not extent.isEmpty():
+        try:
+            da = QgsDistanceArea()
+            da.setSourceCrs(p.crs(), p.transformContext())
+            da.setEllipsoid(p.crs().ellipsoidAcronym() or "WGS84")
+            raw_area = abs(da.measureArea(QgsGeometry.fromRect(extent)))
+            raw_w = da.measureLine(QgsPointXY(extent.xMinimum(), extent.center().y()),
+                                   QgsPointXY(extent.xMaximum(), extent.center().y()))
+            raw_h = da.measureLine(QgsPointXY(extent.center().x(), extent.yMinimum()),
+                                   QgsPointXY(extent.center().x(), extent.yMaximum()))
+            area_km2 = da.convertAreaMeasurement(raw_area, Qgis.AreaUnit.SquareKilometers)
+            width_km = da.convertLengthMeasurement(raw_w, Qgis.DistanceUnit.Kilometers)
+            height_km = da.convertLengthMeasurement(raw_h, Qgis.DistanceUnit.Kilometers)
+        except Exception:
+            area_km2 = 0.0
+    crs_authid = p.crs().authid() if p.crs().isValid() else "EPSG:4326"
+    if buildings_count > 0 and roads_count > 0:
+        kpi1_label = "BUILDINGS MAPPED"
+        kpi1_value = f"{buildings_count:,}"
+        kpi1_sub = f"{roads_count:,} roads &middot; {places_count or point_features:,} POIs"
+    elif roads_count > 0:
+        kpi1_label = "ROAD SEGMENTS"
+        kpi1_value = f"{roads_count:,}"
+        kpi1_sub = f"{total_features:,} total features"
+    elif total_features > 0:
+        kpi1_label = "FEATURES MAPPED"
+        kpi1_value = f"{total_features:,}"
+        kpi1_sub = f"{len(vec_layers)} vector layer{'s' if len(vec_layers) != 1 else ''}"
+    else:
+        kpi1_label = "ACTIVE LAYERS"
+        kpi1_value = f"{len(layers)}"
+        kpi1_sub = crs_authid
+
+    if area_km2 >= 0.05:
+        kpi2_label = "STUDY AREA"
+        kpi2_value = f"{area_km2:.1f} km²" if area_km2 < 100 else f"{area_km2:,.0f} km²"
+        kpi2_sub = f"{width_km:.1f} &times; {height_km:.1f} km &middot; {crs_authid}"
+    else:
+        kpi2_label = "DATA LAYERS"
+        kpi2_value = f"{len(layers)}"
+        kpi2_sub = crs_authid
+
+    return {
+        "layer_count": len(layers),
+        "vector_layer_count": len(vec_layers),
+        "total_features": total_features,
+        "point_features": point_features,
+        "line_features": line_features,
+        "polygon_features": polygon_features,
+        "roads_count": roads_count,
+        "buildings_count": buildings_count,
+        "places_count": places_count,
+        "area_km2": round(area_km2, 2),
+        "width_km": round(width_km, 2),
+        "height_km": round(height_km, 2),
+        "crs_authid": crs_authid,
+        "kpi1_label": kpi1_label,
+        "kpi1_value": kpi1_value,
+        "kpi1_sub": kpi1_sub,
+        "kpi2_label": kpi2_label,
+        "kpi2_value": kpi2_value,
+        "kpi2_sub": kpi2_sub,
+    }
+
+
+def _configure_clean_legend(
+    leg,
+    mp,
+    lay,
+    title="Legend",
+    dark=False,
+    font_family="Arial",
+    title_pt=10.0,
+    group_pt=8.5,
+    item_pt=8.0,
+    max_items_per_layer=12,
+):
+    """Prune basemaps, humanize layer titles, cap noisy symbol lists, and style typography with QgsTextFormat."""
+    from qgis.core import QgsLegendStyle, QgsTextFormat, QgsRasterLayer, QgsMapLayerLegendUtils
+    from qgis.PyQt.QtGui import QColor, QFont
+
+    leg.setLinkedMap(mp)
+    leg.setTitle(title or "")
+    leg.setAutoUpdateModel(False)
+    skip_terms = (
+        "esri", "osm", "carto", "basemap", "hillshade", "xyz", "canvas",
+        "satellite", "terrain", "google", "bing", "stamen", "opentopomap",
+        "positron", "dark_matter", "voyager",
+    )
+    root = leg.model().rootGroup()
+    orig_children = list(root.findLayers())
+    for ch in orig_children:
+        lyr = ch.layer() if hasattr(ch, "layer") else None
+        low = (ch.name() or "").lower()
+        is_basemap_prov = bool(lyr is not None and isinstance(lyr, QgsRasterLayer) and lyr.providerType() == "wms")
+        if any(st in low for st in skip_terms) or (
+            is_basemap_prov and any(st in low for st in ("map", "gray", "light", "dark", "street", "tile"))
+        ):
+            parent = ch.parent()
+            if parent is not None:
+                parent.removeChildNode(ch)
+    if len(root.findLayers()) == 0 and orig_children:
+        leg.setAutoUpdateModel(True)
+    else:
+        for ch in list(root.findLayers()):
+            lyr = ch.layer() if hasattr(ch, "layer") else None
+            cname = lyr.name() if lyr is not None else ch.name()
+            ch.setCustomProperty("legend/title-label", _humanize_layer_title(cname))
+            try:
+                nodes = leg.model().layerLegendNodes(ch)
+                if max_items_per_layer and len(nodes) > max_items_per_layer:
+                    QgsMapLayerLegendUtils.setLegendNodeOrder(ch, list(range(int(max_items_per_layer))))
+                    leg.model().refreshLayerLegend(ch)
+            except Exception:
+                pass
+
+    title_color = QColor("#f8fafc" if dark else "#0f172a")
+    sub_color = QColor("#e2e8f0" if dark else "#1e293b")
+    lbl_color = QColor("#cbd5e1" if dark else "#334155")
+
+    def _mk_fmt(pt_size, color, bold=False):
+        fmt = QgsTextFormat()
+        fnt = QFont(font_family, int(round(pt_size)))
+        fnt.setBold(bold)
+        fmt.setFont(fnt)
+        fmt.setSize(float(pt_size))
+        fmt.setColor(color)
+        return fmt
+
+    leg.rstyle(QgsLegendStyle.Style.Title).setTextFormat(_mk_fmt(title_pt, title_color, bold=True))
+    leg.rstyle(QgsLegendStyle.Style.Group).setTextFormat(_mk_fmt(group_pt, sub_color, bold=True))
+    leg.rstyle(QgsLegendStyle.Style.Subgroup).setTextFormat(_mk_fmt(group_pt, sub_color, bold=True))
+    leg.rstyle(QgsLegendStyle.Style.SymbolLabel).setTextFormat(_mk_fmt(item_pt, lbl_color, bold=False))
+    try:
+        leg.rstyle(QgsLegendStyle.Style.Title).setMargin(QgsLegendStyle.Side.Bottom, 2.0)
+        leg.rstyle(QgsLegendStyle.Style.Subgroup).setMargin(QgsLegendStyle.Side.Top, 1.8)
+        leg.rstyle(QgsLegendStyle.Style.Subgroup).setMargin(QgsLegendStyle.Side.Bottom, 0.8)
+        leg.rstyle(QgsLegendStyle.Style.Symbol).setMargin(QgsLegendStyle.Side.Bottom, 0.6)
+    except Exception:
+        pass
+    try:
+        leg.setSymbolWidth(6.0)
+        leg.setSymbolHeight(3.2)
+        leg.setBoxSpace(2.5)
+        leg.updateLegend()
+    except Exception:
+        pass
+    return leg
+
+
+def _add_layout_card_shape(lay, x, y, w, h, fill="#ffffff", stroke="#cbd5e1", stroke_w=0.25, radius_mm=1.5):
+    """Draw a real vector rounded-rectangle card so Qt ModeHtml borders aren't dropped."""
+    from qgis.core import (
+        QgsLayoutItemShape, QgsFillSymbol, QgsLayoutPoint, QgsLayoutSize,
+        QgsLayoutMeasurement, QgsUnitTypes, Qgis,
+    )
+    mm = QgsUnitTypes.LayoutUnit.LayoutMillimeters if hasattr(QgsUnitTypes, "LayoutUnit") else Qgis.LayoutUnit.Millimeters
+    shp = QgsLayoutItemShape(lay)
+    shp.setShapeType(QgsLayoutItemShape.Shape.Rectangle)
+    if radius_mm and radius_mm > 0:
+        shp.setCornerRadius(QgsLayoutMeasurement(float(radius_mm), mm))
+    props = {
+        "color": fill,
+        "outline_color": stroke or "transparent",
+        "outline_width": str(stroke_w),
+        "outline_width_unit": "MM",
+    }
+    if not stroke:
+        props["outline_style"] = "no"
+    shp.setSymbol(QgsFillSymbol.createSimple(props))
+    lay.addLayoutItem(shp)
+    shp.attemptMove(QgsLayoutPoint(float(x), float(y), mm))
+    shp.attemptResize(QgsLayoutSize(float(w), float(h), mm))
+    return shp
 
 
 # ---------------------------------------------------------------- print layout
@@ -2171,10 +3098,11 @@ def snapshot_layout(name=None, dpi=120, layout=None, layout_name=None, **kwargs)
        "orientation": S("string", "landscape|portrait"), "legend": S("boolean", "default true"),
        "scalebar": S("boolean", "default true"), "north_arrow": S("boolean", "default true"),
        "legend_layers": S("array", "only these layers in legend", items={"type": "string"}),
-       "extent_layer": S("string", "fit map to this layer (default: canvas extent)"),
+       "extent_layer": S("string", "fit map to this layer (default: study bbox or core data extent)"),
+       "bbox": S("array", "optional explicit [xmin,ymin,xmax,ymax] in WGS84 to lock full map face", items={"type": "number"}),
        "grid": S("boolean", "draw coordinate grid")})
 def create_layout(name="Map", title="", subtitle="", credits="", page_size="A4", orientation="landscape",
-                  legend=True, scalebar=True, north_arrow=True, legend_layers=None, extent_layer=None, grid=False):
+                  legend=True, scalebar=True, north_arrow=True, legend_layers=None, extent_layer=None, grid=False, bbox=None):
     p = QgsProject.instance()
     mgr = p.layoutManager()
     old = mgr.layoutByName(name)
@@ -2217,20 +3145,65 @@ def create_layout(name="Map", title="", subtitle="", credits="", page_size="A4",
 
     mp = QgsLayoutItemMap(lay)
     mp.setRect(0, 0, 10, 10)
+    _normalize_layer_order(p)
     lay.addLayoutItem(mp)
     mp.setCrs(p.crs())
     mp.attemptMove(QgsLayoutPoint(m, top, mm))
     mp.attemptResize(QgsLayoutSize(W - 2 * m - side, H - top - bottom, mm))
-    if extent_layer:
+    has_basemap = any(l.isValid() and l.providerType() == "wms" for l in p.mapLayers().values())
+    ext = _study_bbox_rect(p, bbox) if bbox else None
+    if ext is None and extent_layer:
         try:
             lyr = _layer(extent_layer)
             ext = QgsCoordinateTransform(lyr.crs(), p.crs(), p).transformBoundingBox(lyr.extent())
-            ext.scale(1.05)
         except Exception:
-            ext = _canvas().extent()
-    else:
+            ext = None
+    if ext is None:
+        ext = _study_bbox_rect(p, None)
+    if ext is None:
+        from qgis.core import QgsRectangle
+        cands = []
+        for lyr in p.mapLayers().values():
+            if not lyr.isValid() or lyr.providerType() == "wms":
+                continue
+            try:
+                le = lyr.extent()
+                if le.isEmpty() or not math.isfinite(le.xMinimum()) or not math.isfinite(le.xMaximum()):
+                    continue
+                te = QgsCoordinateTransform(lyr.crs(), p.crs(), p).transformBoundingBox(le)
+                cands.append((max(float(te.width()) * float(te.height()), 0.0), te))
+            except Exception:
+                pass
+        if len(cands) >= 2:
+            areas = sorted(a for a, _ in cands)
+            med = areas[len(areas) // 2]
+            if med > 0:
+                filt = [te for a, te in cands if a <= med * 2.2]
+                if filt:
+                    cands = [(0.0, te) for te in filt]
+        for _, te in cands:
+            ext = QgsRectangle(te) if ext is None else (ext.combineExtentWith(te) or ext)
+    if ext is None:
         ext = _canvas().extent()
-    mp.zoomToExtent(ext)
+    if has_basemap:
+        ext.scale(1.05)
+        mp.zoomToExtent(ext)
+    else:
+        ew, eh = float(ext.width()), float(ext.height())
+        mw_f, mh_f = float(mp.rect().width()), float(mp.rect().height())
+        if ew > 0 and eh > 0 and mw_f > 0 and mh_f > 0:
+            from qgis.core import QgsRectangle
+            f_ar = mw_f / mh_f
+            e_ar = ew / eh
+            cx, cy = ext.center().x(), ext.center().y()
+            if e_ar > f_ar:
+                nw, nh = eh * f_ar, eh
+            else:
+                nw, nh = ew, ew / f_ar
+            ext = QgsRectangle(cx - nw / 2.0, cy - nh / 2.0, cx + nw / 2.0, cy + nh / 2.0)
+            mp.setExtent(ext)
+        else:
+            mp.zoomToExtent(ext)
     mp.setFrameEnabled(True)
     if grid:
         from qgis.core import QgsLayoutItemMapGrid
@@ -2247,6 +3220,7 @@ def create_layout(name="Map", title="", subtitle="", credits="", page_size="A4",
         lg = QgsLayoutItemLegend(lay)
         lg.setTitle("Legend")
         lg.setLinkedMap(mp)
+        lay.addLayoutItem(lg)
         if legend_layers:
             lg.setAutoUpdateModel(False)
             root = lg.model().rootGroup()
@@ -2254,7 +3228,11 @@ def create_layout(name="Map", title="", subtitle="", credits="", page_size="A4",
             for n in list(root.findLayers()):
                 if n.layerId() not in keep:
                     n.parent().removeChildNode(n)
-        lay.addLayoutItem(lg)
+            for n in list(root.findLayers()):
+                if n.layer():
+                    n.setCustomProperty("legend/title-label", _humanize_layer_title(n.layer().name()))
+        else:
+            _configure_clean_legend(lg, mp, lay, title="Legend", max_items_per_layer=8)
         if orientation == "landscape":
             lg.attemptMove(QgsLayoutPoint(W - m - side + 5, top, mm))
         else:
@@ -2620,6 +3598,7 @@ def add_layout_callout_box(layout=None, x=0, y=0, width=50, height=15, title="",
        "subtitle": S("string", "subtitle or administrative region"),
        "credits": S("string", "mandatory real data source attribution"),
        "extent_layer": S("string", "main study area layer name"),
+       "bbox": S("array", "optional explicit [xmin,ymin,xmax,ymax] in WGS84 to lock full map face", items={"type": "number"}),
        "key_extent_layer": S("string", "optional regional overview / second scenario extent layer"),
        "page_size": S("string", "A4|A3|A2, default A4"),
        "orientation": S("string", "landscape|portrait, default landscape"),
@@ -2627,7 +3606,7 @@ def add_layout_callout_box(layout=None, x=0, y=0, width=50, height=15, title="",
        "agency": S("string", "government agency or municipal department name")})
 def create_styled_layout(name="Map", style_theme="planning_official", title="", subtitle="", credits="",
                          extent_layer=None, key_extent_layer=None, page_size="A4", orientation="landscape",
-                         grid=False, agency="", **kwargs):
+                         grid=False, agency="", bbox=None, **kwargs):
     import html as _html
     import math
     from qgis.core import (
@@ -2640,6 +3619,8 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
 
     name = name or kwargs.get("layout_name") or kwargs.get("layout") or "Map"
     p = QgsProject.instance()
+    _normalize_layer_order(p)
+    kpis = _compute_project_kpis(p)
     mgr = p.layoutManager()
     old = mgr.layoutByName(name)
     if old:
@@ -2671,27 +3652,84 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
     is_cyberpunk = th in ("cyberpunk", "cyberpunk_hud", "synthwave", "neon_dark", "hud", "sci_fi", "neon")
     is_nautical = th in ("nautical", "nautical_bathymetric", "marine", "hydrographic", "admiralty")
 
-    def _setup_extent(mp_item, lyr_name):
+    def _combined_data_extent():
+        candidates = []
+        for lyr in p.mapLayers().values():
+            if lyr.isValid() and lyr.providerType() != "wms" and _is_valid_extent(lyr.extent()):
+                tr = _safe_transform_extent(lyr.extent(), lyr.crs(), p.crs(), p)
+                if tr and _is_valid_extent(tr):
+                    area = max(float(tr.width()) * float(tr.height()), 0.0)
+                    candidates.append((area, tr))
+        if not candidates:
+            return None
+        if len(candidates) >= 2:
+            areas = sorted(a for a, _ in candidates)
+            med_area = areas[len(areas) // 2]
+            if med_area > 0:
+                filtered = [tr for a, tr in candidates if a <= med_area * 2.2]
+                if filtered:
+                    candidates = [(0.0, tr) for tr in filtered]
+        comb = None
+        for _, tr in candidates:
+            comb = QgsRectangle(tr) if comb is None else (comb.combineExtentWith(tr) or comb)
+        return comb
+
+    def _fit_extent_to_frame(mp_item, ext, cover=False):
+        if ext is None or not _is_valid_extent(ext):
+            return ext
+        fw = mp_item.rect().width()
+        fh = mp_item.rect().height()
+        if cover and fw > 0 and fh > 0 and ext.width() > 0 and ext.height() > 0:
+            frame_ratio = fw / fh
+            data_ratio = ext.width() / ext.height()
+            cx = ext.center().x()
+            cy = ext.center().y()
+            if data_ratio < frame_ratio:
+                w = ext.width()
+                h = w / frame_ratio
+            else:
+                h = ext.height()
+                w = h * frame_ratio
+            cov_ext = QgsRectangle(cx - w * 0.5, cy - h * 0.5, cx + w * 0.5, cy + h * 0.5)
+            mp_item.setExtent(cov_ext)
+            return cov_ext
+        mp_item.zoomToExtent(ext)
+        return ext
+
+    def _setup_extent(mp_item, lyr_name, cover=None):
+        has_basemap = any(l.isValid() and l.providerType() == "wms" for l in p.mapLayers().values())
+        use_cover = (not has_basemap) if cover is None else bool(cover)
+        if bbox:
+            explicit_rect = _study_bbox_rect(p, bbox)
+            if explicit_rect is not None:
+                return _fit_extent_to_frame(mp_item, explicit_rect, cover=use_cover)
         if lyr_name:
             try:
                 lyr = _layer(lyr_name)
                 ext = QgsCoordinateTransform(lyr.crs(), p.crs(), p).transformBoundingBox(lyr.extent())
-                ext.scale(1.05)
-                mp_item.zoomToExtent(ext)
-                return ext
+                if not use_cover:
+                    ext.scale(1.05)
+                return _fit_extent_to_frame(mp_item, ext, cover=use_cover)
             except Exception:
                 pass
+        study_rect = _study_bbox_rect(p, None)
+        if study_rect is not None:
+            return _fit_extent_to_frame(mp_item, study_rect, cover=use_cover)
+        data_ext = _combined_data_extent()
+        if data_ext is not None:
+            if not use_cover:
+                data_ext.scale(1.04)
+            return _fit_extent_to_frame(mp_item, data_ext, cover=use_cover)
         canv = _canvas()
         if canv and hasattr(canv, "extent"):
             ext = canv.extent()
-            mp_item.zoomToExtent(ext)
-            return ext
+            return _fit_extent_to_frame(mp_item, ext, cover=use_cover)
         from qgis.core import QgsRectangle
         ext = QgsRectangle(-180, -90, 180, 90)
         mp_item.zoomToExtent(ext)
         return ext
 
-    def _apply_grid(mp_item, ext):
+    def _apply_grid(mp_item, ext, line_color="#94a3b8", text_color="#334155", font_family="Arial"):
         g = QgsLayoutItemMapGrid("grid", mp_item)
         g.setStyle(QgsLayoutItemMapGrid.GridStyle.Cross if (is_planning or is_relief) else QgsLayoutItemMapGrid.GridStyle.Solid)
         g.setCrossLength(1.5)
@@ -2722,7 +3760,15 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.ShowAll, QgsLayoutItemMapGrid.BorderSide.Bottom)
         g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.ShowAll, QgsLayoutItemMapGrid.BorderSide.Left)
         g.setAnnotationDirection(QgsLayoutItemMapGrid.Vertical, QgsLayoutItemMapGrid.BorderSide.Left)
-        g.setLineSymbol(QgsLineSymbol.createSimple({"color": "#94a3b8", "width": "0.15", "opacity": "0.6"}))
+        if hasattr(g, "setAnnotationFrameDistance"):
+            g.setAnnotationFrameDistance(1.5)
+        g_fmt = QgsTextFormat()
+        g_fmt.setFont(QFont(font_family, 6))
+        g_fmt.setSize(6.0)
+        g_fmt.setColor(QColor(text_color))
+        if hasattr(g, "setAnnotationTextFormat"):
+            g.setAnnotationTextFormat(g_fmt)
+        g.setLineSymbol(QgsLineSymbol.createSimple({"color": line_color, "width": "0.15", "opacity": "0.55"}))
         mp_item.grids().addGrid(g)
 
     def _add_divider(rx, cy, rw):
@@ -2893,10 +3939,10 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
 
         lbl_title = QgsLayoutItemLabel(lay)
         lbl_title.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
-        sub_html = f"<div style='font-size:7.5px; color:#475569; margin-top:2px;'>{_html.escape(subtitle)}</div>" if subtitle else ""
+        sub_html = f"<div style='font-size:8pt; color:#475569; margin-top:2px;'>{_html.escape(subtitle)}</div>" if subtitle else ""
         lbl_title.setText(
             f"<div style='text-align:center; font-family:Arial, sans-serif; padding:4px 3px;'>"
-            f"<div style='font-size:10px; font-weight:bold; color:#0f172a; letter-spacing:0.3px;'>{_html.escape(title or 'PETA RENCANA TATA RUANG')}</div>"
+            f"<div style='font-size:10.5pt; font-weight:bold; color:#0f172a; letter-spacing:0.3px;'>{_html.escape(title or 'PETA RENCANA TATA RUANG')}</div>"
             f"{sub_html}"
             f"</div>"
         )
@@ -2980,8 +4026,8 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         leg = QgsLayoutItemLegend(lay)
         leg.setLinkedMap(mp)
         leg.setTitle("")
-        leg.setAutoUpdateModel(True)
         lay.addLayoutItem(leg)
+        _configure_clean_legend(leg, mp, lay, title="", title_pt=9.5, group_pt=8.0, item_pt=7.5, max_items_per_layer=10)
         leg.attemptMove(QgsLayoutPoint(right_x + 1.0, curr_y, mm))
         leg.attemptResize(QgsLayoutSize(right_w - 2.0, leg_avail_h, mm))
         leg.setBackgroundColor(QColor(255, 255, 255, 0))
@@ -3048,18 +4094,19 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         # Centered Classic Header Card
         header_h = 20.0 if title else 0
         if title:
+            _add_layout_card_shape(lay, m + 20.0, m, W - 2 * m - 40.0, header_h, fill="#fbf9f4", stroke="#263238", stroke_w=0.3, radius_mm=0.0)
             header_card = QgsLayoutItemLabel(lay)
             header_card.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
-            sub_txt = f"<div style='font-size:9.5px; font-style:italic; color:#374151; margin-top:2px;'>{_html.escape(subtitle)}</div>" if subtitle else ""
+            sub_txt = f"<div style='font-size:9.5pt; font-style:italic; color:#374151; margin-top:2px;'>{_html.escape(subtitle)}</div>" if subtitle else ""
             header_card.setText(
-                f"<div style='font-family:Georgia, serif; text-align:center; padding:4px; background:#fbf9f4; border:1px solid #263238;'>"
-                f"<div style='font-size:14px; font-weight:bold; color:#1a1a1a; letter-spacing:1px; text-transform:uppercase;'>{_html.escape(title)}</div>"
+                f"<div style='font-family:Georgia, serif; text-align:center;'>"
+                f"<div style='font-size:14pt; font-weight:bold; color:#1a1a1a; letter-spacing:1px; text-transform:uppercase;'>{_html.escape(title)}</div>"
                 f"{sub_txt}"
                 f"</div>"
             )
             lay.addLayoutItem(header_card)
-            header_card.attemptMove(QgsLayoutPoint(m + 20.0, m, mm))
-            header_card.attemptResize(QgsLayoutSize(W - 2 * m - 40.0, header_h, mm))
+            header_card.attemptMove(QgsLayoutPoint(m + 22.0, m + 2.0, mm))
+            header_card.attemptResize(QgsLayoutSize(W - 2 * m - 44.0, header_h - 4.0, mm))
 
         map_top = m + (header_h + 3.0 if title else 0)
         map_w = W - 2 * m
@@ -3081,12 +4128,12 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         # Floating framed legend inside map
         leg = QgsLayoutItemLegend(lay)
         leg.setLinkedMap(mp)
-        leg.setTitle("LEGEND")
+        lay.addLayoutItem(leg)
+        _configure_clean_legend(leg, mp, lay, title="LEGEND", font_family="Georgia", title_pt=9.5, group_pt=8.0, item_pt=7.5, max_items_per_layer=8)
         leg.setBackgroundColor(QColor("#fcfbf7"))
         leg.setFrameEnabled(True)
         leg.setFrameStrokeColor(QColor("#263238"))
         leg.setFrameStrokeWidth(QgsLayoutMeasurement(0.3, mm))
-        lay.addLayoutItem(leg)
         leg.attemptMove(QgsLayoutPoint(m + map_w - 65.0, map_top + map_h - 60.0, mm))
         leg.attemptResize(QgsLayoutSize(60.0, 55.0, mm))
 
@@ -3127,10 +4174,10 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         if title:
             header_card = QgsLayoutItemLabel(lay)
             header_card.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
-            sub_txt = f"<span style='font-size:9.5px; color:#64748b; font-weight:normal; margin-left:8px;'>{_html.escape(subtitle)}</span>" if subtitle else ""
+            sub_txt = f"<span style='font-size:9pt; color:#64748b; font-weight:normal; margin-left:8px;'>{_html.escape(subtitle)}</span>" if subtitle else ""
             header_card.setText(
                 f"<div style='font-family:Arial, sans-serif; padding:2px 4px; border-bottom:1.5px solid #0f172a;'>"
-                f"<span style='font-size:13px; font-weight:bold; color:#0f172a;'>{_html.escape(title)}</span>{sub_txt}"
+                f"<span style='font-size:13pt; font-weight:bold; color:#0f172a;'>{_html.escape(title)}</span>{sub_txt}"
                 f"</div>"
             )
             lay.addLayoutItem(header_card)
@@ -3155,26 +4202,27 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.3, mm))
 
         # Right Statistical Sidecard
+        _add_layout_card_shape(lay, right_x, map_top, right_w, 22.0, fill="#f8fafc", stroke="#e2e8f0", stroke_w=0.25, radius_mm=1.5)
         stat_card = QgsLayoutItemLabel(lay)
         stat_card.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
         stat_card.setText(
-            f"<div style='font-family:Arial, sans-serif; background:#f8fafc; border:1px solid #e2e8f0; border-radius:4px; padding:6px;'>"
-            f"<div style='font-size:8.5px; font-weight:bold; color:#1e293b; text-transform:uppercase;'>STATISTICAL DISTRIBUTION</div>"
-            f"<div style='font-size:7px; color:#64748b; margin-top:2px;'>Method: Natural Breaks (Jenks) · 5 Classes</div>"
+            f"<div style='font-family:Arial, sans-serif;'>"
+            f"<div style='font-size:7.5pt; font-weight:bold; color:#1e293b; text-transform:uppercase;'>{_html.escape(kpis['kpi1_label'])}</div>"
+            f"<div style='font-size:12pt; font-weight:bold; color:#0284c7; margin-top:1px;'>{_html.escape(kpis['kpi1_value'])}</div>"
+            f"<div style='font-size:6.5pt; color:#64748b; margin-top:1px;'>{kpis['kpi2_label']}: {_html.escape(kpis['kpi2_value'])}</div>"
             f"</div>"
         )
         lay.addLayoutItem(stat_card)
-        stat_card.attemptMove(QgsLayoutPoint(right_x, map_top, mm))
-        stat_card.attemptResize(QgsLayoutSize(right_w, 20.0, mm))
+        stat_card.attemptMove(QgsLayoutPoint(right_x + 2.5, map_top + 2.0, mm))
+        stat_card.attemptResize(QgsLayoutSize(right_w - 5.0, 18.0, mm))
 
         # Thematic Legend
         leg = QgsLayoutItemLegend(lay)
         leg.setLinkedMap(mp)
-        leg.setTitle("CLASSIFICATION:")
-        leg.setAutoUpdateModel(True)
         lay.addLayoutItem(leg)
-        leg.attemptMove(QgsLayoutPoint(right_x, map_top + 23.0, mm))
-        leg.attemptResize(QgsLayoutSize(right_w, map_h - 25.0, mm))
+        _configure_clean_legend(leg, mp, lay, title="LEGEND", title_pt=9.5, group_pt=8.0, item_pt=7.5, max_items_per_layer=10)
+        leg.attemptMove(QgsLayoutPoint(right_x, map_top + 25.0, mm))
+        leg.attemptResize(QgsLayoutSize(right_w, map_h - 27.0, mm))
 
         # Scale bar inside map with clean pill badge
         _create_clean_scalebar(mp, style="Stepped Line", position="bottom-left", pad=5.0,
@@ -3212,11 +4260,11 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
 
         lbl_head = QgsLayoutItemLabel(lay)
         lbl_head.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
-        sub_html = f"<span style='font-size:7.5px; color:#94a3b8; margin-left:8px; font-weight:normal;'>{_html.escape(subtitle)}</span>" if subtitle else ""
+        sub_html = f"<span style='font-size:8pt; color:#94a3b8; margin-left:8px; font-weight:normal;'>{_html.escape(subtitle)}</span>" if subtitle else ""
         lbl_head.setText(
             f"<div style='font-family:Arial, sans-serif; padding:2px 6px; line-height:1.2;'>"
-            f"<span style='background:#ef4444; color:#ffffff; font-size:6.5px; font-weight:bold; padding:1px 4px; border-radius:2px;'>SITUATIONAL ALERT & CRISIS ASSESSMENT</span><br>"
-            f"<span style='font-size:10.5px; font-weight:bold; color:#ffffff;'>{_html.escape(title or 'DISASTER & HAZARD SITUATION MAP')}</span>{sub_html}"
+            f"<span style='background:#ef4444; color:#ffffff; font-size:6.5pt; font-weight:bold; padding:1px 4px;'>SPATIAL SITUATION BRIEFING</span><br>"
+            f"<span style='font-size:11pt; font-weight:bold; color:#ffffff;'>{_html.escape(title or 'DISASTER & HAZARD SITUATION MAP')}</span>{sub_html}"
             f"</div>"
         )
         lay.addLayoutItem(lbl_head)
@@ -3242,74 +4290,55 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         mp.setFrameStrokeColor(QColor("#334155"))
         mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.35, mm))
 
-        # Right Column: KPI Cards Panel
+        # Right Column: Live KPI Cards Panel
         card_h = 18.0
-        kpis = [
-            ("HAZARD & EXPOSURE AREA", "CRITICAL IMPACT ZONE", "#dc2626"),
-            ("POPULATION AT RISK", "HUMAN VULNERABILITY COUNT", "#ea580c"),
-            ("EMERGENCY SITUATION", "RESPONSE HQ & ACCESS STATUS", "#0284c7")
+        info_cards = [
+            (kpis["kpi1_label"], kpis["kpi1_value"], kpis["kpi1_sub"], "#dc2626"),
+            (kpis["kpi2_label"], kpis["kpi2_value"], kpis["kpi2_sub"], "#ea580c"),
+            ("LAYER INVENTORY", f"{kpis['layer_count']} Active", f"Points: {kpis['point_features']:,} &bull; Lines: {kpis['line_features']:,}", "#0284c7"),
         ]
         curr_ry = map_top
-        for i, (kpi_title, kpi_sub, kpi_color) in enumerate(kpis):
+        for i, (kpi_title, kpi_val, kpi_sub, kpi_color) in enumerate(info_cards):
             cy = curr_ry + i * (card_h + 2.0)
-            c_shape = QgsLayoutItemShape(lay)
-            c_shape.setShapeType(QgsLayoutItemShape.Shape.Rectangle)
-            c_shape.setSymbol(QgsFillSymbol.createSimple({"color": "#ffffff", "outline_color": "#cbd5e1", "outline_width": "0.3"}))
-            lay.addLayoutItem(c_shape)
-            c_shape.attemptMove(QgsLayoutPoint(right_x, cy, mm))
-            c_shape.attemptResize(QgsLayoutSize(right_w, card_h, mm))
+            _add_layout_card_shape(lay, right_x, cy, right_w, card_h, fill="#ffffff", stroke="#cbd5e1", stroke_w=0.25, radius_mm=1.2)
+            _add_layout_card_shape(lay, right_x, cy, 1.3, card_h, fill=kpi_color, stroke=None, radius_mm=0.0)
 
             c_lbl = QgsLayoutItemLabel(lay)
             c_lbl.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
             c_lbl.setText(
-                f"<div style='font-family:Arial, sans-serif; padding:2px 4px; border-left:3px solid {kpi_color}; line-height:1.2;'>"
-                f"<div style='font-size:6.5px; font-weight:bold; color:#475569; text-transform:uppercase;'>{kpi_title}</div>"
-                f"<div style='font-size:9.5px; font-weight:bold; color:#0f172a; margin-top:1px;'>MONITORED / ACTIVE</div>"
-                f"<div style='font-size:6px; color:#64748b;'>{kpi_sub}</div>"
+                f"<div style='font-family:Arial, sans-serif; line-height:1.2;'>"
+                f"<div style='font-size:6.5pt; font-weight:bold; color:#475569; text-transform:uppercase;'>{_html.escape(kpi_title)}</div>"
+                f"<div style='font-size:11pt; font-weight:bold; color:#0f172a; margin-top:1px;'>{_html.escape(kpi_val)}</div>"
+                f"<div style='font-size:6pt; color:#64748b;'>{kpi_sub}</div>"
                 f"</div>"
             )
             lay.addLayoutItem(c_lbl)
-            c_lbl.attemptMove(QgsLayoutPoint(right_x, cy, mm))
-            c_lbl.attemptResize(QgsLayoutSize(right_w, card_h, mm))
+            c_lbl.attemptMove(QgsLayoutPoint(right_x + 3.0, cy + 1.8, mm))
+            c_lbl.attemptResize(QgsLayoutSize(right_w - 5.0, card_h - 3.6, mm))
 
-        curr_ry += len(kpis) * (card_h + 2.0)
+        curr_ry += len(info_cards) * (card_h + 2.0)
 
-        # Right Column: Thematic Legend Box (vertical space ~100mm, plenty of room without overflowing!)
+        # Right Column: Thematic Legend Box
         leg_h = map_top + map_h - curr_ry
         if leg_h > 30.0:
-            leg_bg = QgsLayoutItemShape(lay)
-            leg_bg.setShapeType(QgsLayoutItemShape.Shape.Rectangle)
-            leg_bg.setSymbol(QgsFillSymbol.createSimple({"color": "#ffffff", "outline_color": "#cbd5e1", "outline_width": "0.3"}))
-            lay.addLayoutItem(leg_bg)
-            leg_bg.attemptMove(QgsLayoutPoint(right_x, curr_ry, mm))
-            leg_bg.attemptResize(QgsLayoutSize(right_w, leg_h, mm))
+            _add_layout_card_shape(lay, right_x, curr_ry, right_w, leg_h, fill="#ffffff", stroke="#cbd5e1", stroke_w=0.25, radius_mm=1.2)
 
             leg = QgsLayoutItemLegend(lay)
             leg.setLinkedMap(mp)
-            leg.setTitle("MAP LEGEND")
-            leg.setBackgroundColor(QColor(255, 255, 255, 0))
-            leg.setAutoUpdateModel(False)
             lay.addLayoutItem(leg)
+            _configure_clean_legend(leg, mp, lay, title="MAP LEGEND", title_pt=9.5, group_pt=8.0, item_pt=7.5, max_items_per_layer=10)
+            leg.setBackgroundColor(QColor(255, 255, 255, 0))
+            leg.setFrameEnabled(False)
+            leg.attemptMove(QgsLayoutPoint(right_x + 2.0, curr_ry + 1.5, mm))
+            leg.attemptResize(QgsLayoutSize(right_w - 4.0, leg_h - 3.0, mm))
 
-            # Auto-prune background layers (basemaps, hillshades, raw rasters)
-            skip_terms = ("esri", "osm", "carto", "basemap", "hillshade", "xyz", "canvas", "satellite", "terrain")
-            root = leg.model().rootGroup()
-            for ch in list(root.children()):
-                low = ch.name().lower() if hasattr(ch, "name") else ""
-                if any(st in low for st in skip_terms):
-                    root.removeChildNode(ch)
-            if len(root.children()) == 0:
-                leg.setAutoUpdateModel(True)
-            leg.attemptMove(QgsLayoutPoint(right_x + 1.5, curr_ry + 1.0, mm))
-            leg.attemptResize(QgsLayoutSize(right_w - 3.0, leg_h - 2.0, mm))
-
-        # Bottom Credit & Technical Metadata Footer (Compact, 1-2 lines, clean)
+        # Bottom Credit & Technical Metadata Footer
         foot_y = map_top + map_h + 1.5
         lbl_cred = QgsLayoutItemLabel(lay)
         lbl_cred.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
-        crs_str = p.crs().authid() if p.crs().isValid() else "WGS 84"
+        crs_str = kpis["crs_authid"]
         lbl_cred.setText(
-            f"<div style='font-family:Arial, sans-serif; font-size:6.5px; color:#64748b; line-height:1.2;'>"
+            f"<div style='font-family:Arial, sans-serif; font-size:6.8pt; color:#64748b; line-height:1.2;'>"
             f"<b>Data Sources:</b> {_html.escape(credits or 'Official Government Agencies, OpenStreetMap, Satellite Imagery')} &nbsp;&bull;&nbsp; "
             f"<b>CRS:</b> {crs_str} &nbsp;&bull;&nbsp; <b>Cartography:</b> QGIS Copilot"
             f"</div>"
@@ -3355,38 +4384,30 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
 
         # Floating Architectural Title Stamp in negative space (top-right)
         stamp_w = 80.0
-        stamp_h = 24.0
+        stamp_h = 25.0
+        _add_layout_card_shape(lay, W - m - stamp_w - 5.0, m + 5.0, stamp_w, stamp_h, fill="#ffffff", stroke="#94a3b8", stroke_w=0.25, radius_mm=1.2)
         lbl_stamp = QgsLayoutItemLabel(lay)
         lbl_stamp.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
         plan_title = title or "SITE MASTER PLAN"
         plan_sub = subtitle or "Landscape & Environmental Architecture"
         lbl_stamp.setText(
-            f"<div style='font-family:Century Gothic, Helvetica, Arial, sans-serif; background:rgba(255,255,255,0.92); border:1px solid #94a3b8; border-radius:3px; padding:5px 8px;'>"
-            f"<div style='font-size:6.5px; font-weight:bold; color:#059669; letter-spacing:1.2px; text-transform:uppercase;'>MASTER PLAN & DESIGN PROPOSAL</div>"
-            f"<div style='font-size:11.5px; font-weight:800; color:#1e293b; text-transform:uppercase; margin-top:1px;'>{_html.escape(plan_title)}</div>"
-            f"<div style='font-size:7px; color:#64748b; margin-top:2px;'>{_html.escape(plan_sub)}</div>"
-            f"<div style='font-size:6px; color:#94a3b8; margin-top:2px;'>CRS: {p.crs().authid()} &bull; {_html.escape(credits or 'Survey & Planning Bureau')}</div>"
+            f"<div style='font-family:Century Gothic, Helvetica, Arial, sans-serif;'>"
+            f"<div style='font-size:6.5pt; font-weight:bold; color:#059669; letter-spacing:1.2px; text-transform:uppercase;'>MASTER PLAN & DESIGN PROPOSAL</div>"
+            f"<div style='font-size:11.5pt; font-weight:bold; color:#1e293b; text-transform:uppercase; margin-top:2px;'>{_html.escape(plan_title)}</div>"
+            f"<div style='font-size:7.5pt; color:#64748b; margin-top:2px;'>{_html.escape(plan_sub)}</div>"
+            f"<div style='font-size:6pt; color:#94a3b8; margin-top:2px;'>CRS: {kpis['crs_authid']} &bull; {_html.escape(credits or 'Survey & Planning Bureau')}</div>"
             f"</div>"
         )
         lay.addLayoutItem(lbl_stamp)
-        lbl_stamp.attemptMove(QgsLayoutPoint(W - m - stamp_w - 5.0, m + 5.0, mm))
-        lbl_stamp.attemptResize(QgsLayoutSize(stamp_w, stamp_h, mm))
+        lbl_stamp.attemptMove(QgsLayoutPoint(W - m - stamp_w - 2.5, m + 7.0, mm))
+        lbl_stamp.attemptResize(QgsLayoutSize(stamp_w - 5.0, stamp_h - 4.0, mm))
 
         # Floating Clean Legend Badge (bottom-right)
         leg = QgsLayoutItemLegend(lay)
         leg.setLinkedMap(mp)
-        leg.setTitle("LAND USE & FEATURES")
-        leg.setAutoUpdateModel(False)
         lay.addLayoutItem(leg)
-        skip_terms = ("esri", "osm", "carto", "basemap", "hillshade", "xyz", "canvas", "satellite", "terrain")
-        root = leg.model().rootGroup()
-        for ch in list(root.children()):
-            low = ch.name().lower() if hasattr(ch, "name") else ""
-            if any(st in low for st in skip_terms):
-                root.removeChildNode(ch)
-        if len(root.children()) == 0:
-            leg.setAutoUpdateModel(True)
-        leg.setBackgroundColor(QColor(255, 255, 255, 230))
+        _configure_clean_legend(leg, mp, lay, title="LEGEND", title_pt=9.5, group_pt=8.0, item_pt=7.5, max_items_per_layer=10)
+        leg.setBackgroundColor(QColor(255, 255, 255, 235))
         leg.setFrameEnabled(True)
         leg.setFrameStrokeColor(QColor("#cbd5e1"))
         leg.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
@@ -3412,6 +4433,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
     # THEME 5: MINIMALIST CITY ART POSTER (Full-Bleed, Modern Floating Typography)
     # =========================================================================
     if is_poster:
+        _add_layout_card_shape(lay, 0, 0, W, H, fill="#fafaf9", stroke="transparent", stroke_w=0, radius_mm=0)
         m = 10.0
         # Clean modern outer mat border
         mat = QgsLayoutItemShape(lay)
@@ -3429,12 +4451,25 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         mp.setRect(0, 0, 10, 10)
         lay.addLayoutItem(mp)
         mp.setCrs(p.crs())
+        mp.setBackgroundEnabled(True)
+        mp.setBackgroundColor(QColor("#f8fafc"))
         mp.attemptMove(QgsLayoutPoint(m, m, mm))
         mp.attemptResize(QgsLayoutSize(map_w, map_h, mm))
-        main_ext = _setup_extent(mp, extent_layer)
+        main_ext = _setup_extent(mp, extent_layer, cover=True)
         mp.setFrameEnabled(True)
         mp.setFrameStrokeColor(QColor("#0f172a"))
         mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.4, mm))
+
+        if kwargs.get("scalebar"):
+            _create_clean_scalebar(mp, style="Line Ticks Down", position="bottom-left", pad=5.0,
+                                   color="#0f172a", background="rgba(250,250,249,0.8)", frame_color=None)
+        if kwargs.get("north_arrow"):
+            na = QgsLayoutItemPicture(lay)
+            na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
+            na.setLinkedMap(mp)
+            lay.addLayoutItem(na)
+            na.attemptResize(QgsLayoutSize(8.0, 11.0, mm))
+            na.attemptMove(QgsLayoutPoint(m + map_w - 12.0, m + 4.0, mm))
 
         # Floating Art Poster Typography Block
         lbl_art = QgsLayoutItemLabel(lay)
@@ -3445,9 +4480,9 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         coord_txt = f"{crs_code} &bull; {_html.escape(credits)}" if credits else crs_code
         lbl_art.setText(
             f"<div style='text-align:center; font-family:Century Gothic, Helvetica Neue, Arial, sans-serif; padding-top:2px;'>"
-            f"<div style='font-size:24px; font-weight:800; color:#0f172a; letter-spacing:4px; text-transform:uppercase;'>{_html.escape(city_title)}</div>"
-            f"<div style='font-size:9.5px; font-weight:600; color:#64748b; letter-spacing:2px; text-transform:uppercase; margin-top:2px;'>{_html.escape(region_sub)}</div>"
-            f"<div style='font-size:6.5px; color:#94a3b8; letter-spacing:1px; margin-top:3px;'>{coord_txt}</div>"
+            f"<div style='font-size:22pt; font-weight:bold; color:#0f172a; letter-spacing:4px; text-transform:uppercase;'>{_html.escape(city_title)}</div>"
+            f"<div style='font-size:9.5pt; font-weight:bold; color:#64748b; letter-spacing:2px; text-transform:uppercase; margin-top:2px;'>{_html.escape(region_sub)}</div>"
+            f"<div style='font-size:6.8pt; color:#94a3b8; letter-spacing:1px; margin-top:3px;'>{coord_txt}</div>"
             f"</div>"
         )
         lay.addLayoutItem(lbl_art)
@@ -3478,44 +4513,46 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.3, mm))
 
         # Floating Research Context & Title Block (in negative space)
+        _add_layout_card_shape(lay, m + 6.0, H - m - 46.0, 90.0, 22.0, fill="#0f172a", stroke="#334155", stroke_w=0.3, radius_mm=1.5)
         lbl_sci = QgsLayoutItemLabel(lay)
         lbl_sci.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
-        sub_lead = f"<div style='font-size:7.5px; color:#94a3b8; margin-bottom:2px;'>{_html.escape(subtitle)}</div>" if subtitle else ""
+        sub_lead = f"<div style='font-size:7.5pt; color:#94a3b8; margin-bottom:2px;'>{_html.escape(subtitle)}</div>" if subtitle else ""
         lbl_sci.setText(
-            f"<div style='font-family:Arial, sans-serif; background:rgba(15,23,42,0.85); border:1px solid #334155; border-radius:4px; padding:6px 8px;'>"
+            f"<div style='font-family:Arial, sans-serif;'>"
             f"{sub_lead}"
-            f"<div style='font-size:12px; font-weight:bold; color:#f8fafc; line-height:1.25;'>{_html.escape(title or 'SCIENTIFIC THEMATIC ANALYSIS')}</div>"
-            f"<div style='font-size:6.5px; color:#cbd5e1; margin-top:3px; line-height:1.2;'>Observed records & continuous spatial projection</div>"
+            f"<div style='font-size:12pt; font-weight:bold; color:#f8fafc; line-height:1.25;'>{_html.escape(title or 'SCIENTIFIC THEMATIC ANALYSIS')}</div>"
+            f"<div style='font-size:6.8pt; color:#cbd5e1; margin-top:3px; line-height:1.2;'>{kpis['total_features']:,} features across {kpis['layer_count']} layers &bull; {kpis['crs_authid']}</div>"
             f"</div>"
         )
         lay.addLayoutItem(lbl_sci)
-        lbl_sci.attemptMove(QgsLayoutPoint(m + 6.0, H - m - 45.0, mm))
-        lbl_sci.attemptResize(QgsLayoutSize(90.0, 22.0, mm))
+        lbl_sci.attemptMove(QgsLayoutPoint(m + 8.5, H - m - 44.0, mm))
+        lbl_sci.attemptResize(QgsLayoutSize(85.0, 18.0, mm))
 
         # Floating Continuous Gradient Ramp Legend
+        _add_layout_card_shape(lay, m + 6.0, H - m - 22.0, 90.0, 16.0, fill="#0f172a", stroke="#334155", stroke_w=0.3, radius_mm=1.5)
         ramp_lbl = QgsLayoutItemLabel(lay)
         ramp_lbl.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
         ramp_lbl.setText(
-            f"<div style='font-family:Arial, sans-serif; background:rgba(15,23,42,0.85); border:1px solid #334155; border-radius:4px; padding:4px 6px;'>"
-            f"<div style='font-size:6.5px; color:#94a3b8; font-weight:bold; margin-bottom:2px;'>RELATIVE VALUE DISTRIBUTION</div>"
-            f"<div style='height:7px; width:100%; background:linear-gradient(to right, #440154, #3b528b, #21918c, #5ec962, #fde725); border-radius:2px;'></div>"
-            f"<table width='100%' style='margin-top:2px; font-size:6.5px; color:#cbd5e1; font-family:monospace;'>"
+            f"<div style='font-family:Arial, sans-serif;'>"
+            f"<div style='font-size:6.5pt; color:#94a3b8; font-weight:bold; margin-bottom:2px;'>RELATIVE VALUE DISTRIBUTION</div>"
+            f"<div style='height:7px; width:100%; background:linear-gradient(to right, #440154, #3b528b, #21918c, #5ec962, #fde725);'></div>"
+            f"<table width='100%' style='margin-top:2px; font-size:6.5pt; color:#cbd5e1; font-family:monospace;'>"
             f"<tr><td align='left'>Low / Min</td><td align='center'>Median</td><td align='right'>High / Extreme</td></tr>"
             f"</table>"
             f"</div>"
         )
         lay.addLayoutItem(ramp_lbl)
-        ramp_lbl.attemptMove(QgsLayoutPoint(m + 6.0, H - m - 21.0, mm))
-        ramp_lbl.attemptResize(QgsLayoutSize(90.0, 16.0, mm))
+        ramp_lbl.attemptMove(QgsLayoutPoint(m + 8.5, H - m - 20.0, mm))
+        ramp_lbl.attemptResize(QgsLayoutSize(85.0, 12.0, mm))
 
         # Institutional Metadata / Branding Block in lower right negative space
         lbl_inst = QgsLayoutItemLabel(lay)
         lbl_inst.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
         lbl_inst.setText(
-            f"<div style='font-family:Arial, sans-serif; text-align:right; color:#94a3b8; font-size:6.5px; line-height:1.3;'>"
-            f"<span style='color:#f8fafc; font-weight:bold; font-size:8px;'>RESEARCH INITIATIVE &bull; GIS LAB</span><br>"
+            f"<div style='font-family:Arial, sans-serif; text-align:right; color:#94a3b8; font-size:6.8pt; line-height:1.3;'>"
+            f"<span style='color:#f8fafc; font-weight:bold; font-size:8pt;'>{_html.escape(kpis['kpi2_label'])}: {_html.escape(kpis['kpi2_value'])}</span><br>"
             f"Sources: {_html.escape(credits or 'Global Open Data, Earth Observation STAC')}<br>"
-            f"CRS: {p.crs().authid()} &bull; Map Cartography: QGIS Copilot"
+            f"CRS: {kpis['crs_authid']} &bull; QGIS Copilot"
             f"</div>"
         )
         lay.addLayoutItem(lbl_inst)
@@ -3534,10 +4571,10 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         header_h = 22.0
         lbl_head = QgsLayoutItemLabel(lay)
         lbl_head.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
-        lead_txt = f"<div style='font-size:7.5px; color:#475569; font-style:italic; margin-top:2px; line-height:1.3;'>{_html.escape(subtitle)}</div>" if subtitle else ""
+        lead_txt = f"<div style='font-size:8.5pt; color:#475569; font-style:italic; margin-top:2px; line-height:1.3;'>{_html.escape(subtitle)}</div>" if subtitle else ""
         lbl_head.setText(
             f"<div style='font-family:Georgia, serif; padding:2px 4px; border-bottom:1.5px solid #0f172a;'>"
-            f"<div style='font-size:18px; font-weight:bold; color:#0f172a; letter-spacing:0.5px;'>{_html.escape(title or 'EDITORIAL ATLAS STORY')}</div>"
+            f"<div style='font-size:17pt; font-weight:bold; color:#0f172a; letter-spacing:0.5px;'>{_html.escape(title or 'EDITORIAL ATLAS STORY')}</div>"
             f"{lead_txt}"
             f"</div>"
         )
@@ -3563,32 +4600,25 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.3, mm))
 
         # Floating KPI Callout Box inside Map Negative Space
+        _add_layout_card_shape(lay, m + 4.0, map_top + 4.0, 58.0, 20.0, fill="#ffffff", stroke="#cbd5e1", stroke_w=0.25, radius_mm=1.2)
         lbl_call = QgsLayoutItemLabel(lay)
         lbl_call.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
         lbl_call.setText(
-            f"<div style='font-family:Arial, sans-serif; background:rgba(255,255,255,0.92); border:1px solid #cbd5e1; border-radius:4px; padding:4px 6px;'>"
-            f"<div style='font-size:14px; font-weight:bold; color:#0284c7;'>KEY REGION</div>"
-            f"<div style='font-size:6.5px; color:#475569; line-height:1.2;'>High-priority environmental & socio-economic impact corridor</div>"
+            f"<div style='font-family:Arial, sans-serif;'>"
+            f"<div style='font-size:6.5pt; font-weight:bold; color:#64748b; text-transform:uppercase;'>{_html.escape(kpis['kpi1_label'])}</div>"
+            f"<div style='font-size:12.5pt; font-weight:bold; color:#0284c7;'>{_html.escape(kpis['kpi1_value'])}</div>"
+            f"<div style='font-size:6pt; color:#475569; line-height:1.2;'>{kpis['kpi2_label']}: {_html.escape(kpis['kpi2_value'])}</div>"
             f"</div>"
         )
         lay.addLayoutItem(lbl_call)
-        lbl_call.attemptMove(QgsLayoutPoint(m + 4.0, map_top + 4.0, mm))
-        lbl_call.attemptResize(QgsLayoutSize(55.0, 18.0, mm))
+        lbl_call.attemptMove(QgsLayoutPoint(m + 6.5, map_top + 5.8, mm))
+        lbl_call.attemptResize(QgsLayoutSize(53.0, 16.5, mm))
 
         # Right Column: Multi-Column Legend
         leg = QgsLayoutItemLegend(lay)
         leg.setLinkedMap(mp)
-        leg.setTitle("CLASSIFICATION")
-        leg.setAutoUpdateModel(False)
         lay.addLayoutItem(leg)
-        skip_terms = ("esri", "osm", "carto", "basemap", "hillshade", "xyz", "canvas", "satellite", "terrain")
-        root = leg.model().rootGroup()
-        for ch in list(root.children()):
-            low = ch.name().lower() if hasattr(ch, "name") else ""
-            if any(st in low for st in skip_terms):
-                root.removeChildNode(ch)
-        if len(root.children()) == 0:
-            leg.setAutoUpdateModel(True)
+        _configure_clean_legend(leg, mp, lay, title="LEGEND", font_family="Georgia", title_pt=9.5, group_pt=8.0, item_pt=7.5, max_items_per_layer=10)
         leg.setBackgroundColor(QColor("#f8fafc"))
         leg.setFrameEnabled(True)
         leg.setFrameStrokeColor(QColor("#cbd5e1"))
@@ -3636,7 +4666,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
     # THEME 8: ANTIQUE / HISTORICAL ENGRAVED PLAN (Parchment & Ornate Cartouche)
     # =========================================================================
     if is_antique:
-        page.setBackgroundColor(QColor("#f4ecd8"))
+        _add_layout_card_shape(lay, 0, 0, W, H, fill="#f4ecd8", stroke="transparent", stroke_w=0, radius_mm=0)
         m = 9.0
         # Ornate Double Neatline Border
         out_neat = QgsLayoutItemShape(lay)
@@ -3660,34 +4690,62 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         mp.setRect(0, 0, 10, 10)
         lay.addLayoutItem(mp)
         mp.setCrs(p.crs())
+        mp.setBackgroundEnabled(True)
+        mp.setBackgroundColor(QColor("#f4ecd8"))
         mp.attemptMove(QgsLayoutPoint(m, m, mm))
         mp.attemptResize(QgsLayoutSize(map_w, map_h, mm))
-        main_ext = _setup_extent(mp, extent_layer)
+        main_ext = _setup_extent(mp, extent_layer, cover=True)
         mp.setFrameEnabled(True)
         mp.setFrameStrokeColor(QColor("#2e2115"))
         mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.4, mm))
-        _apply_grid(mp, main_ext)
+        _apply_grid(mp, main_ext, line_color="#8c7355", text_color="#4a3728", font_family="Georgia")
 
-        # Classical Corner Cartouche Title in Negative Space (bottom-right)
-        cart_w = 65.0
-        cart_h = 24.0
+        # Antique North Arrow / Compass Rose (top-right inside map frame)
+        if kwargs.get("north_arrow", True):
+            na = QgsLayoutItemPicture(lay)
+            na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
+            na.setLinkedMap(mp)
+            lay.addLayoutItem(na)
+            na.attemptResize(QgsLayoutSize(10.0, 14.0, mm))
+            na.attemptMove(QgsLayoutPoint(m + map_w - 15.0, m + 5.0, mm))
+
+        # Compact Framed Parchment Legend (top-left inside map frame)
+        if kwargs.get("legend", True):
+            leg = QgsLayoutItemLegend(lay)
+            leg.setLinkedMap(mp)
+            lay.addLayoutItem(leg)
+            _configure_clean_legend(leg, mp, lay, title="LEGEND", font_family="Georgia", title_pt=8.5, group_pt=7.5, item_pt=7.0, max_items_per_layer=8)
+            leg.setBackgroundColor(QColor(244, 236, 216, 235))
+            leg.setFrameEnabled(True)
+            leg.setFrameStrokeColor(QColor("#2e2115"))
+            leg.setFrameStrokeWidth(QgsLayoutMeasurement(0.25, mm))
+            leg.attemptMove(QgsLayoutPoint(m + 4.5, m + 4.5, mm))
+            leg.attemptResize(QgsLayoutSize(min(50.0, map_w * 0.30), min(58.0, map_h * 0.30), mm))
+
+        # Classical Corner Cartouche Title + Credits in Negative Space (bottom-right)
+        cart_w = min(76.0, map_w * 0.44)
+        cart_h = 30.0 if credits else 25.0
+        _add_layout_card_shape(lay, W - m - cart_w - 4.0, H - m - cart_h - 4.0, cart_w, cart_h, fill="#f4ecd8", stroke="#2e2115", stroke_w=0.35, radius_mm=0.0)
         lbl_cart = QgsLayoutItemLabel(lay)
         lbl_cart.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
         plan_title = title or "PLAN OF THE CITY"
+        cred_line = f"<div style='font-size:5.8pt; color:#5c4738; margin-top:3px; line-height:1.2;'>{_html.escape(credits)} &bull; {kpis['crs_authid']}</div>" if credits else f"<div style='font-size:5.8pt; color:#5c4738; margin-top:3px;'>CRS: {kpis['crs_authid']}</div>"
         lbl_cart.setText(
-            f"<div style='font-family:Georgia, serif; text-align:center; background:#f4ecd8; border:1px solid #2e2115; padding:4px;'>"
-            f"<div style='font-size:12px; font-weight:bold; letter-spacing:1px; color:#2e2115; text-transform:uppercase;'>{_html.escape(plan_title)}</div>"
-            f"<div style='font-size:7.5px; font-style:italic; color:#4a3728; margin-top:1px;'>{_html.escape(subtitle or 'Accurately delineated from authentic surveys')}</div>"
+            f"<div style='font-family:Georgia, serif; text-align:center;'>"
+            f"<div style='font-size:11.5pt; font-weight:bold; letter-spacing:1px; color:#2e2115; text-transform:uppercase;'>{_html.escape(plan_title)}</div>"
+            f"<div style='font-size:7.5pt; font-style:italic; color:#4a3728; margin-top:2px;'>{_html.escape(subtitle or 'Surveyed Topographical Plan')}</div>"
+            f"{cred_line}"
             f"</div>"
         )
         lay.addLayoutItem(lbl_cart)
-        lbl_cart.attemptMove(QgsLayoutPoint(W - m - cart_w - 4.0, H - m - cart_h - 4.0, mm))
-        lbl_cart.attemptResize(QgsLayoutSize(cart_w, cart_h, mm))
+        lbl_cart.attemptMove(QgsLayoutPoint(W - m - cart_w - 2.0, H - m - cart_h - 2.0, mm))
+        lbl_cart.attemptResize(QgsLayoutSize(cart_w - 4.0, cart_h - 4.0, mm))
 
         # Antique Scale Bar (classical single box with authentic sepia ink styling)
-        _create_clean_scalebar(mp, style="Single Box", position="bottom-left", pad=6.0,
-                               font_family="Georgia", font_size=6.5, color="#2e2115", secondary_color="#f4ecd8",
-                               background="#f4ecd8", frame_color="#2e2115")
+        if kwargs.get("scalebar", True):
+            _create_clean_scalebar(mp, style="Single Box", position="bottom-left", pad=6.0,
+                                   font_family="Georgia", font_size=6.5, color="#2e2115", secondary_color="#f4ecd8",
+                                   background="#f4ecd8", frame_color="#2e2115")
 
         _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
@@ -3735,84 +4793,86 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
 
         # Card 1: Title & Executive Summary Card
         card1_h = 28.0
+        _add_layout_card_shape(lay, right_x, curr_y, right_w, card1_h, fill="#ffffff", stroke="#cbd5e1", stroke_w=0.25, radius_mm=1.8)
         lbl_b1 = QgsLayoutItemLabel(lay)
         lbl_b1.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
-        sub_txt = f"<div style='font-size:7.5px; color:#64748b; margin-top:2px;'>{_html.escape(subtitle)}</div>" if subtitle else ""
+        sub_txt = f"<div style='font-size:8pt; color:#64748b; margin-top:2px;'>{_html.escape(subtitle)}</div>" if subtitle else ""
         lbl_b1.setText(
-            f"<div style='font-family:Arial, sans-serif; background:#ffffff; border:1px solid #cbd5e1; border-radius:4px; padding:6px 8px;'>"
-            f"<div style='font-size:6.5px; font-weight:bold; color:#0284c7; text-transform:uppercase; letter-spacing:0.8px;'>BENTO GEODASHBOARD</div>"
-            f"<div style='font-size:11px; font-weight:bold; color:#0f172a; margin-top:1px; line-height:1.2;'>{_html.escape(title or 'SPATIAL ANALYTICS')}</div>"
+            f"<div style='font-family:Arial, sans-serif;'>"
+            f"<div style='font-size:6.8pt; font-weight:bold; color:#0284c7; text-transform:uppercase; letter-spacing:0.8px;'>CARTOGRAPHIC OVERVIEW</div>"
+            f"<div style='font-size:12pt; font-weight:bold; color:#0f172a; margin-top:2px; line-height:1.15;'>{_html.escape(title or 'SPATIAL ANALYTICS')}</div>"
             f"{sub_txt}"
             f"</div>"
         )
         lay.addLayoutItem(lbl_b1)
-        lbl_b1.attemptMove(QgsLayoutPoint(right_x, curr_y, mm))
-        lbl_b1.attemptResize(QgsLayoutSize(right_w, card1_h, mm))
+        lbl_b1.attemptMove(QgsLayoutPoint(right_x + 2.5, curr_y + 2.0, mm))
+        lbl_b1.attemptResize(QgsLayoutSize(right_w - 5.0, card1_h - 4.0, mm))
         curr_y += card1_h + gap
 
-        # Card 2: Dual KPI Stat Metrics
+        # Card 2: Dual Live KPI Stat Cards (backed by real vector corner shapes)
         card2_h = 24.0
-        lbl_b2 = QgsLayoutItemLabel(lay)
-        lbl_b2.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
-        lbl_b2.setText(
-            f"<table width='100%' cellpadding='0' cellspacing='4' style='font-family:Arial, sans-serif;'>"
-            f"<tr>"
-            f"<td width='50%' style='background:#ffffff; border:1px solid #cbd5e1; border-radius:4px; padding:4px 6px; text-align:center;'>"
-            f"<div style='font-size:6px; font-weight:bold; color:#64748b; text-transform:uppercase;'>EXTENT METRIC</div>"
-            f"<div style='font-size:13px; font-weight:800; color:#0f172a; margin-top:1px;'>100%</div>"
-            f"<div style='font-size:6px; color:#10b981;'>Covered & Verified</div>"
-            f"</td>"
-            f"<td width='50%' style='background:#ffffff; border:1px solid #cbd5e1; border-radius:4px; padding:4px 6px; text-align:center;'>"
-            f"<div style='font-size:6px; font-weight:bold; color:#64748b; text-transform:uppercase;'>STATUS TIER</div>"
-            f"<div style='font-size:13px; font-weight:800; color:#0284c7; margin-top:1px;'>OPTIMAL</div>"
-            f"<div style='font-size:6px; color:#64748b;'>Multi-Criteria Grade</div>"
-            f"</td>"
-            f"</tr>"
-            f"</table>"
+        k_gap = 2.5
+        kw = (right_w - k_gap) / 2.0
+        _add_layout_card_shape(lay, right_x, curr_y, kw, card2_h, fill="#ffffff", stroke="#cbd5e1", stroke_w=0.25, radius_mm=1.8)
+        _add_layout_card_shape(lay, right_x + kw + k_gap, curr_y, kw, card2_h, fill="#ffffff", stroke="#cbd5e1", stroke_w=0.25, radius_mm=1.8)
+
+        lbl_b2_l = QgsLayoutItemLabel(lay)
+        lbl_b2_l.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        lbl_b2_l.setText(
+            f"<div style='font-family:Arial, sans-serif; text-align:center;'>"
+            f"<div style='font-size:6.5pt; font-weight:bold; color:#64748b; text-transform:uppercase;'>{_html.escape(kpis['kpi1_label'])}</div>"
+            f"<div style='font-size:12.5pt; font-weight:bold; color:#0f172a; margin-top:2px;'>{_html.escape(kpis['kpi1_value'])}</div>"
+            f"<div style='font-size:6pt; color:#059669; margin-top:1px;'>{kpis['kpi1_sub']}</div>"
+            f"</div>"
         )
-        lay.addLayoutItem(lbl_b2)
-        lbl_b2.attemptMove(QgsLayoutPoint(right_x, curr_y, mm))
-        lbl_b2.attemptResize(QgsLayoutSize(right_w, card2_h, mm))
+        lay.addLayoutItem(lbl_b2_l)
+        lbl_b2_l.attemptMove(QgsLayoutPoint(right_x + 1.5, curr_y + 2.0, mm))
+        lbl_b2_l.attemptResize(QgsLayoutSize(kw - 3.0, card2_h - 4.0, mm))
+
+        lbl_b2_r = QgsLayoutItemLabel(lay)
+        lbl_b2_r.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        lbl_b2_r.setText(
+            f"<div style='font-family:Arial, sans-serif; text-align:center;'>"
+            f"<div style='font-size:6.5pt; font-weight:bold; color:#64748b; text-transform:uppercase;'>{_html.escape(kpis['kpi2_label'])}</div>"
+            f"<div style='font-size:12.5pt; font-weight:bold; color:#0284c7; margin-top:2px;'>{_html.escape(kpis['kpi2_value'])}</div>"
+            f"<div style='font-size:6pt; color:#64748b; margin-top:1px;'>{kpis['kpi2_sub']}</div>"
+            f"</div>"
+        )
+        lay.addLayoutItem(lbl_b2_r)
+        lbl_b2_r.attemptMove(QgsLayoutPoint(right_x + kw + k_gap + 1.5, curr_y + 2.0, mm))
+        lbl_b2_r.attemptResize(QgsLayoutSize(kw - 3.0, card2_h - 4.0, mm))
         curr_y += card2_h + gap
 
-        # Card 3: Categorized Legend Card (auto-pruned)
-        card3_h = avail_h - curr_y + m - 20.0
+        # Card 3: Categorized Legend Card (auto-pruned & humanized)
+        card3_h = max(32.0, avail_h - curr_y + m - 22.0)
+        _add_layout_card_shape(lay, right_x, curr_y, right_w, card3_h, fill="#ffffff", stroke="#cbd5e1", stroke_w=0.25, radius_mm=1.8)
         leg = QgsLayoutItemLegend(lay)
         leg.setLinkedMap(mp)
-        leg.setTitle("CLASSIFICATION")
-        leg.setAutoUpdateModel(False)
         lay.addLayoutItem(leg)
-        skip_terms = ("esri", "osm", "carto", "basemap", "hillshade", "xyz", "canvas", "satellite", "terrain")
-        root = leg.model().rootGroup()
-        for ch in list(root.children()):
-            low = ch.name().lower() if hasattr(ch, "name") else ""
-            if any(st in low for st in skip_terms):
-                root.removeChildNode(ch)
-        if len(root.children()) == 0:
-            leg.setAutoUpdateModel(True)
-        leg.setBackgroundColor(QColor("#ffffff"))
-        leg.setFrameEnabled(True)
-        leg.setFrameStrokeColor(QColor("#cbd5e1"))
-        leg.setFrameStrokeWidth(QgsLayoutMeasurement(0.25, mm))
-        leg.attemptMove(QgsLayoutPoint(right_x, curr_y, mm))
-        leg.attemptResize(QgsLayoutSize(right_w, card3_h, mm))
+        _configure_clean_legend(leg, mp, lay, title="LEGEND", title_pt=9.5, group_pt=8.0, item_pt=7.5, max_items_per_layer=10)
+        leg.setBackgroundColor(QColor(255, 255, 255, 0))
+        leg.setFrameEnabled(False)
+        leg.attemptMove(QgsLayoutPoint(right_x + 2.0, curr_y + 2.0, mm))
+        leg.attemptResize(QgsLayoutSize(right_w - 4.0, card3_h - 4.0, mm))
         curr_y += card3_h + gap
 
         # Card 4: Metadata & Provenance Card
-        card4_h = avail_h - curr_y + m
+        card4_h = max(14.0, avail_h - curr_y + m)
+        _add_layout_card_shape(lay, right_x, curr_y, right_w, card4_h, fill="#ffffff", stroke="#cbd5e1", stroke_w=0.25, radius_mm=1.8)
         lbl_b4 = QgsLayoutItemLabel(lay)
         lbl_b4.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
-        crs_code = p.crs().authid() if p.crs().isValid() else "WGS 84"
+        crs_code = kpis["crs_authid"]
+        scale_val = int(round(mp.scale())) if mp.scale() else 0
+        scale_txt = f"1:{scale_val:,}" if scale_val > 0 else "Auto"
         lbl_b4.setText(
-            f"<div style='font-family:Arial, sans-serif; background:#ffffff; border:1px solid #cbd5e1; border-radius:4px; padding:4px 6px; font-size:6.5px; color:#64748b; line-height:1.25;'>"
-            f"<b>Sources:</b> {_html.escape(credits or 'Official Spatial Repositories')} &nbsp;&bull;&nbsp; "
-            f"<b>CRS:</b> {crs_code}<br>"
-            f"<b>Platform:</b> QGIS Copilot &nbsp;&bull;&nbsp; Publication Edition"
+            f"<div style='font-family:Arial, sans-serif; font-size:6.8pt; color:#475569; line-height:1.3;'>"
+            f"<b>Sources:</b> {_html.escape(credits or 'Official Spatial Repositories')}<br>"
+            f"<b>CRS:</b> {crs_code} &bull; <b>Scale:</b> {scale_txt}"
             f"</div>"
         )
         lay.addLayoutItem(lbl_b4)
-        lbl_b4.attemptMove(QgsLayoutPoint(right_x, curr_y, mm))
-        lbl_b4.attemptResize(QgsLayoutSize(right_w, card4_h, mm))
+        lbl_b4.attemptMove(QgsLayoutPoint(right_x + 2.5, curr_y + 2.0, mm))
+        lbl_b4.attemptResize(QgsLayoutSize(right_w - 5.0, card4_h - 4.0, mm))
 
         _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale(),
@@ -3859,13 +4919,13 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_a = QgsLayoutItemLabel(lay)
         lbl_a.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
         lbl_a.setText(
-            f"<div style='font-family:Arial, sans-serif; background:rgba(15,23,42,0.85); color:#ffffff; font-size:7.5px; font-weight:bold; padding:2px 6px; border-radius:3px;'>"
+            f"<div style='font-family:Arial, sans-serif; background:#0f172a; color:#ffffff; font-size:7.5pt; font-weight:bold; padding:2px 6px;'>"
             f"PHASE A &bull; BASELINE STATE"
             f"</div>"
         )
         lay.addLayoutItem(lbl_a)
         lbl_a.attemptMove(QgsLayoutPoint(m + 3.0, map_top + 3.0, mm))
-        lbl_a.attemptResize(QgsLayoutSize(45.0, 7.0, mm))
+        lbl_a.attemptResize(QgsLayoutSize(48.0, 7.5, mm))
 
         # Right Map (Scenario B / Post-Event)
         mp2 = QgsLayoutItemMap(lay)
@@ -3885,13 +4945,13 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_b = QgsLayoutItemLabel(lay)
         lbl_b.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
         lbl_b.setText(
-            f"<div style='font-family:Arial, sans-serif; background:rgba(2,132,199,0.85); color:#ffffff; font-size:7.5px; font-weight:bold; padding:2px 6px; border-radius:3px;'>"
+            f"<div style='font-family:Arial, sans-serif; background:#0284c7; color:#ffffff; font-size:7.5pt; font-weight:bold; padding:2px 6px;'>"
             f"PHASE B &bull; SCENARIO / IMPACT"
             f"</div>"
         )
         lay.addLayoutItem(lbl_b)
         lbl_b.attemptMove(QgsLayoutPoint(m + half_w + gap + 3.0, map_top + 3.0, mm))
-        lbl_b.attemptResize(QgsLayoutSize(45.0, 7.0, mm))
+        lbl_b.attemptResize(QgsLayoutSize(50.0, 7.5, mm))
 
         # Bottom Shared Dock: Scale bar & Legend & Credits
         foot_y = map_top + map_h + gap
@@ -3901,8 +4961,8 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_meta = QgsLayoutItemLabel(lay)
         lbl_meta.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
         lbl_meta.setText(
-            f"<div style='font-family:Arial, sans-serif; font-size:6.5px; color:#64748b; line-height:1.2; text-align:right;'>"
-            f"Synchronized Dual Extent &bull; Sources: {_html.escape(credits or 'Multi-temporal Datasets')} &bull; QGIS Copilot"
+            f"<div style='font-family:Arial, sans-serif; font-size:7pt; color:#64748b; line-height:1.25; text-align:right;'>"
+            f"Synchronized Dual Extent &bull; Sources: {_html.escape(credits or 'Multi-temporal Datasets')} &bull; CRS: {kpis['crs_authid']}"
             f"</div>"
         )
         lay.addLayoutItem(lbl_meta)
@@ -3924,8 +4984,8 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lbl_head.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
         lbl_head.setText(
             f"<div style='font-family:Arial, sans-serif; padding:2px;'>"
-            f"<div style='font-size:12px; font-weight:bold; color:#0f172a; text-transform:uppercase;'>{_html.escape(title or 'CORRIDOR ROUTE & TRAIL GUIDE')}</div>"
-            f"<div style='font-size:7.5px; color:#64748b;'>{_html.escape(subtitle or 'Linear Infrastructure / Elevation & Waypoints Profile')}</div>"
+            f"<div style='font-size:13pt; font-weight:bold; color:#0f172a; text-transform:uppercase;'>{_html.escape(title or 'CORRIDOR ROUTE & TRAIL GUIDE')}</div>"
+            f"<div style='font-size:8.5pt; color:#64748b;'>{_html.escape(subtitle or 'Linear Infrastructure & Spatial Profile')}</div>"
             f"</div>"
         )
         lay.addLayoutItem(lbl_head)
@@ -3948,27 +5008,30 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         mp.setFrameStrokeColor(QColor("#cbd5e1"))
         mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.3, mm))
 
-        # Bottom Corridor Profile & Waypoint Strip
+        # Bottom Corridor Summary Strip (live KPIs, vector card border)
         strip_y = map_top + map_h + gap
+        _add_layout_card_shape(lay, m, strip_y, map_w, strip_h, fill="#f8fafc", stroke="#cbd5e1", stroke_w=0.25, radius_mm=1.5)
         lbl_strip = QgsLayoutItemLabel(lay)
         lbl_strip.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        scale_val = int(round(mp.scale())) if mp.scale() else 0
+        scale_txt = f"1:{scale_val:,}" if scale_val > 0 else "Auto"
         lbl_strip.setText(
-            f"<div style='font-family:Arial, sans-serif; background:#f8fafc; border:1px solid #cbd5e1; border-radius:4px; padding:4px 8px;'>"
-            f"<div style='font-size:7px; font-weight:bold; color:#0284c7; text-transform:uppercase;'>ROUTE MILESTONES & PROFILE</div>"
-            f"<table width='100%' style='margin-top:2px; font-size:7px; color:#334155;'>"
+            f"<div style='font-family:Arial, sans-serif;'>"
+            f"<div style='font-size:7.5pt; font-weight:bold; color:#0284c7; text-transform:uppercase;'>CORRIDOR SUMMARY METRICS</div>"
+            f"<table width='100%' style='margin-top:3px; font-size:7.5pt; color:#334155;'>"
             f"<tr>"
-            f"<td width='25%'><b>[KM 0.0]</b> Start Point / Terminal</td>"
-            f"<td width='25%'><b>[KM 25.0]</b> Mid-Valley Waypoint</td>"
-            f"<td width='25%'><b>[KM 50.0]</b> Summit / High Elevation</td>"
-            f"<td width='25%' align='right'><b>[KM 75.0]</b> Finish Station</td>"
+            f"<td width='28%'><b>{_html.escape(kpis['kpi1_label'])}:</b> {_html.escape(kpis['kpi1_value'])}</td>"
+            f"<td width='28%'><b>{_html.escape(kpis['kpi2_label'])}:</b> {_html.escape(kpis['kpi2_value'])}</td>"
+            f"<td width='22%'><b>Layers:</b> {kpis['layer_count']} active</td>"
+            f"<td width='22%' align='right'><b>Scale:</b> {scale_txt}</td>"
             f"</tr>"
             f"</table>"
-            f"<div style='font-size:6px; color:#64748b; margin-top:3px;'>Data Sources: {_html.escape(credits or 'Open Route Data')} &bull; Projected CRS: {p.crs().authid()}</div>"
+            f"<div style='font-size:6.8pt; color:#64748b; margin-top:4px;'>Data Sources: {_html.escape(credits or 'Open Route Data')} &bull; Projected CRS: {kpis['crs_authid']}</div>"
             f"</div>"
         )
         lay.addLayoutItem(lbl_strip)
-        lbl_strip.attemptMove(QgsLayoutPoint(m, strip_y, mm))
-        lbl_strip.attemptResize(QgsLayoutSize(map_w, strip_h, mm))
+        lbl_strip.attemptMove(QgsLayoutPoint(m + 3.0, strip_y + 2.5, mm))
+        lbl_strip.attemptResize(QgsLayoutSize(map_w - 6.0, strip_h - 5.0, mm))
 
         # Scale bar cleanly floating inside corridor map
         _create_clean_scalebar(mp, style="Stepped Line", position="bottom-left", pad=5.0,
@@ -4007,31 +5070,33 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         _apply_grid(mp, main_ext)
 
         # Floating HUD Telemetry Terminal Box (top-left)
+        _add_layout_card_shape(lay, m + 4.0, m + 4.0, 80.0, 19.0, fill="#090a0f", stroke="#00f0ff", stroke_w=0.35, radius_mm=1.0)
         lbl_hud = QgsLayoutItemLabel(lay)
         lbl_hud.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
         lbl_hud.setText(
-            f"<div style='font-family:Courier New, monospace; background:rgba(9,10,15,0.90); border:1px solid #00f0ff; border-radius:3px; padding:4px 6px;'>"
-            f"<div style='font-size:7px; color:#00f0ff; letter-spacing:1px; font-weight:bold;'>// HUD GEOSPATIAL FEED [ONLINE]</div>"
-            f"<div style='font-size:11px; font-weight:bold; color:#ff007f; text-transform:uppercase;'>{_html.escape(title or 'CYBERPUNK NEON MATRIX')}</div>"
-            f"<div style='font-size:6.5px; color:#10b981;'>CRS: {p.crs().authid()} &bull; LAT/LON RADAR SCAN ACTIVE</div>"
+            f"<div style='font-family:Courier New, monospace;'>"
+            f"<div style='font-size:7pt; color:#00f0ff; letter-spacing:1px; font-weight:bold;'>// GEOSPATIAL MATRIX &bull; {kpis['total_features']:,} FEATURES</div>"
+            f"<div style='font-size:11pt; font-weight:bold; color:#ff007f; text-transform:uppercase;'>{_html.escape(title or 'CYBERPUNK NEON MATRIX')}</div>"
+            f"<div style='font-size:6.5pt; color:#10b981;'>CRS: {kpis['crs_authid']} &bull; {kpis['layer_count']} ACTIVE LAYERS</div>"
             f"</div>"
         )
         lay.addLayoutItem(lbl_hud)
-        lbl_hud.attemptMove(QgsLayoutPoint(m + 4.0, m + 4.0, mm))
-        lbl_hud.attemptResize(QgsLayoutSize(75.0, 18.0, mm))
+        lbl_hud.attemptMove(QgsLayoutPoint(m + 6.0, m + 5.5, mm))
+        lbl_hud.attemptResize(QgsLayoutSize(76.0, 16.0, mm))
 
         # Bottom Right Attribution HUD
+        _add_layout_card_shape(lay, W - m - 68.0, H - m - 13.0, 64.0, 10.0, fill="#090a0f", stroke="#ff007f", stroke_w=0.35, radius_mm=1.0)
         lbl_tele = QgsLayoutItemLabel(lay)
         lbl_tele.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
         lbl_tele.setText(
-            f"<div style='font-family:Courier New, monospace; background:rgba(9,10,15,0.90); border:1px solid #ff007f; padding:3px 5px; font-size:6px; color:#94a3b8; text-align:right;'>"
-            f"<span style='color:#ff007f; font-weight:bold;'>PROVENANCE:</span> {_html.escape(credits or 'Synthetic Earth Observation')}<br>"
-            f"OPERATIONAL TELEMETRY &bull; QGIS AGY CORE"
+            f"<div style='font-family:Courier New, monospace; font-size:6.2pt; color:#94a3b8; text-align:right;'>"
+            f"<span style='color:#ff007f; font-weight:bold;'>PROVENANCE:</span> {_html.escape(credits or 'Spatial Observation')}<br>"
+            f"{_html.escape(kpis['kpi2_label'])}: {_html.escape(kpis['kpi2_value'])}"
             f"</div>"
         )
         lay.addLayoutItem(lbl_tele)
-        lbl_tele.attemptMove(QgsLayoutPoint(W - m - 65.0, H - m - 12.0, mm))
-        lbl_tele.attemptResize(QgsLayoutSize(60.0, 9.0, mm))
+        lbl_tele.attemptMove(QgsLayoutPoint(W - m - 66.5, H - m - 11.8, mm))
+        lbl_tele.attemptResize(QgsLayoutSize(61.0, 8.0, mm))
 
         _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
@@ -4067,21 +5132,22 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         _apply_grid(mp, main_ext)
 
         # Formal Nautical Cartouche in Ocean Space (bottom-right)
-        cart_w = 75.0
+        cart_w = 78.0
         cart_h = 28.0
+        _add_layout_card_shape(lay, W - m - cart_w - 4.0, H - m - cart_h - 4.0, cart_w, cart_h, fill="#fbf5dc", stroke="#1e293b", stroke_w=0.35, radius_mm=0.0)
         lbl_naut = QgsLayoutItemLabel(lay)
         lbl_naut.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
         lbl_naut.setText(
-            f"<div style='font-family:Times New Roman, serif; text-align:center; background:#fbf5dc; border:1px solid #1e293b; padding:4px 6px;'>"
-            f"<div style='font-size:6.5px; letter-spacing:1px; color:#475569; text-transform:uppercase;'>HYDROGRAPHIC SURVEY & NAVIGATION CHART</div>"
-            f"<div style='font-size:11px; font-weight:bold; color:#0f172a; text-transform:uppercase; margin-top:1px;'>{_html.escape(title or 'COASTAL WATERS & CHANNELS')}</div>"
-            f"<div style='font-size:6.5px; font-style:italic; color:#334155; margin-top:2px;'>Depths and Soundings in Meters &bull; Chart Datum: WGS 84</div>"
-            f"<div style='font-size:5.5px; color:#64748b; margin-top:1px;'>Data: {_html.escape(credits or 'Hydrographic Offices & Open Data')}</div>"
+            f"<div style='font-family:Times New Roman, serif; text-align:center;'>"
+            f"<div style='font-size:6.5pt; letter-spacing:1px; color:#475569; text-transform:uppercase;'>HYDROGRAPHIC SURVEY & NAVIGATION CHART</div>"
+            f"<div style='font-size:11pt; font-weight:bold; color:#0f172a; text-transform:uppercase; margin-top:2px;'>{_html.escape(title or 'COASTAL WATERS & CHANNELS')}</div>"
+            f"<div style='font-size:6.8pt; font-style:italic; color:#334155; margin-top:2px;'>Chart Datum: {kpis['crs_authid']} &bull; {_html.escape(kpis['kpi2_value'])}</div>"
+            f"<div style='font-size:6pt; color:#64748b; margin-top:2px;'>Data: {_html.escape(credits or 'Hydrographic Offices & Open Data')}</div>"
             f"</div>"
         )
         lay.addLayoutItem(lbl_naut)
-        lbl_naut.attemptMove(QgsLayoutPoint(W - m - cart_w - 4.0, H - m - cart_h - 4.0, mm))
-        lbl_naut.attemptResize(QgsLayoutSize(cart_w, cart_h, mm))
+        lbl_naut.attemptMove(QgsLayoutPoint(W - m - cart_w - 2.0, H - m - cart_h - 2.0, mm))
+        lbl_naut.attemptResize(QgsLayoutSize(cart_w - 4.0, cart_h - 4.0, mm))
 
         # Compass Rose / North Arrow
         na = QgsLayoutItemPicture(lay)
@@ -4105,18 +5171,19 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
     m = 10.0
     header_h = 18.0 if title else 0
     if title:
+        _add_layout_card_shape(lay, m, m, W - 2 * m, header_h, fill="#ffffff", stroke="#cfd8dc", stroke_w=0.25, radius_mm=1.5)
         header_card = QgsLayoutItemLabel(lay)
         header_card.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
-        sub_txt = f"<div style='font-size: 10px; color: #546e7a; margin-top: 2px;'>{_html.escape(subtitle)}</div>" if subtitle else ""
+        sub_txt = f"<div style='font-size: 9.5pt; color: #546e7a; margin-top: 2px;'>{_html.escape(subtitle)}</div>" if subtitle else ""
         header_card.setText(
-            f"<div style='font-family: Arial, sans-serif; text-align: center; padding: 4px; background: #ffffff; border: 1px solid #cfd8dc; border-radius: 4px;'>"
-            f"<div style='font-size: 14px; font-weight: bold; color: #0f172a;'>{_html.escape(title)}</div>"
+            f"<div style='font-family: Arial, sans-serif; text-align: center;'>"
+            f"<div style='font-size: 14pt; font-weight: bold; color: #0f172a;'>{_html.escape(title)}</div>"
             f"{sub_txt}"
             f"</div>"
         )
         lay.addLayoutItem(header_card)
-        header_card.attemptMove(QgsLayoutPoint(m, m, mm))
-        header_card.attemptResize(QgsLayoutSize(W - 2 * m, header_h, mm))
+        header_card.attemptMove(QgsLayoutPoint(m + 2.5, m + 2.0, mm))
+        header_card.attemptResize(QgsLayoutSize(W - 2 * m - 5.0, header_h - 4.0, mm))
 
     map_top = m + (header_h + 3.0 if title else 0)
     map_w = W - 2 * m
@@ -4248,7 +5315,7 @@ def load_skill(name, reference=None):
 def list_public_geodata_sources():
     return {
         "overture_maps": {
-            "description": "Global open map features from Overture Maps Foundation (Meta, Microsoft, Amazon, TomTom) queried directly over S3 parquet with zero API keys (auto-tiled when count > tile_threshold).",
+            "description": "Global open map features from Overture Maps Foundation (Meta, Microsoft, Amazon, TomTom) fetched via fast PMTiles vector tiles with automatic STAC-indexed GeoParquet fallback (zero API keys).",
             "themes": {
                 "places": ["place"],
                 "buildings": ["building"],
@@ -4436,13 +5503,17 @@ def list_public_geodata_sources():
     }
 
 
-@tool("Search public STAC catalogs (e.g. Earth Search Sentinel-2, Landsat, Copernicus DEM) for Cloud-Optimized GeoTIFFs (COGs) matching an area of interest.",
+@tool("Search public STAC catalogs (e.g. Earth Search Sentinel-2, Landsat, Copernicus DEM) for Cloud-Optimized GeoTIFFs (COGs) matching an area of interest across paginated results.",
       {"collections": S("array", "collection IDs e.g. ['sentinel-2-l2a'] or ['cop-dem-glo-30']", items={"type": "string"}),
        "bbox": S("array", "optional [xmin, ymin, xmax, ymax] in WGS84 (default: current map canvas extent)"),
        "datetime": S("string", "optional date/range e.g. '2026-09-01/2026-10-31' or '2026-10-15'"),
-       "limit": S("integer", "max items to return, default 3"),
+       "limit": S("integer", "max items to return across pages, default 20"),
+       "page_size": S("integer", "items requested per STAC page iteration, default 10"),
+       "fetch_all": S("boolean", "iterate across STAC pages up to ceiling so full bbox coverage is returned (default true)"),
        "api_url": S("string", "STAC endpoint URL, default 'https://earth-search.aws.element84.com/v1'")})
-def search_stac_items(collections, bbox=None, datetime=None, limit=3, api_url=None):
+def search_stac_items(collections, bbox=None, datetime=None, limit=20, page_size=10, fetch_all=True, api_url=None):
+    if CANCEL_REQUESTED:
+        raise RuntimeError("Execution stopped by user.")
     from pystac_client import Client
     endpoint = api_url or "https://earth-search.aws.element84.com/v1"
     client = Client.open(endpoint)
@@ -4459,24 +5530,35 @@ def search_stac_items(collections, bbox=None, datetime=None, limit=3, api_url=No
         else:
             bbox = [-180, -85, 180, 85]
 
-    params = {"collections": collections, "bbox": bbox, "max_items": int(limit)}
+    req_limit = max(1, int(limit or 20))
+    max_items = max(req_limit, 20) if fetch_all else req_limit
+    per_page = min(max_items, max(1, min(int(page_size or 10), 100)))
+    params = {"collections": collections, "bbox": bbox, "max_items": max_items, "limit": per_page}
     if datetime:
         params["datetime"] = datetime
 
     search = client.search(**params)
     results = []
-    for item in search.items():
-        assets = {}
-        for a_key, a_val in item.assets.items():
-            if a_val.href and (a_val.href.endswith((".tif", ".tiff")) or a_val.media_type in ("image/tiff", "application/x-geotiff")):
-                assets[a_key] = {"href": a_val.href, "title": a_val.title or a_key}
-        results.append({
-            "id": item.id,
-            "datetime": str(item.datetime or item.properties.get("datetime")),
-            "cloud_cover": item.properties.get("eo:cloud_cover"),
-            "bbox": item.bbox,
-            "cog_assets": assets
-        })
+    for page_idx, page in enumerate(search.pages(), start=1):
+        if CANCEL_REQUESTED:
+            raise RuntimeError("Execution stopped by user.")
+        for item in page:
+            assets = {}
+            for a_key, a_val in item.assets.items():
+                if a_val.href and (a_val.href.endswith((".tif", ".tiff")) or a_val.media_type in ("image/tiff", "application/x-geotiff")):
+                    assets[a_key] = {"href": a_val.href, "title": a_val.title or a_key}
+            results.append({
+                "id": item.id,
+                "datetime": str(item.datetime or item.properties.get("datetime")),
+                "cloud_cover": item.properties.get("eo:cloud_cover"),
+                "bbox": item.bbox,
+                "cog_assets": assets
+            })
+            if len(results) >= max_items:
+                break
+        _report_progress("search_stac_items", min(95, page_idx * 15), f"Fetched STAC page {page_idx} ({len(results)} items)...")
+        if len(results) >= max_items:
+            break
     return {"endpoint": endpoint, "searched_bbox": bbox, "found_count": len(results), "items": results}
 
 
@@ -4498,6 +5580,7 @@ def load_public_cog(url, name=None):
     p = QgsProject.instance()
     is_first = len([l for l in p.mapLayers().values() if l.providerType() != "wms"]) == 0
     p.addMapLayer(lyr)
+    _normalize_layer_order(p)
     if is_first and _is_valid_extent(lyr.extent()):
         safe_ext = _safe_transform_extent(lyr.extent(), lyr.crs(), p.crs(), p)
         if safe_ext:
@@ -4603,6 +5686,7 @@ def _load_exported_gpkg_layer(out_file, layer_label, err_prefix="Failed to load 
     p = QgsProject.instance()
     is_first = len([l for l in p.mapLayers().values() if l.providerType() != "wms"]) == 0
     p.addMapLayer(lyr)
+    _normalize_layer_order(p)
     if is_first and _is_valid_extent(lyr.extent()):
         safe_ext = _safe_transform_extent(lyr.extent(), lyr.crs(), p.crs(), p)
         if safe_ext:
@@ -4616,21 +5700,1167 @@ def _load_exported_gpkg_layer(out_file, layer_label, err_prefix="Failed to load 
     return _layer_info(lyr)
 
 
-@tool("Query Overture Maps Foundation open data (buildings, places/POI, transportation/roads, water) directly from S3 parquet using DuckDB and load it into QGIS.",
+from collections import OrderedDict
+
+_OVERTURE_DEFAULT_RELEASE = "2026-10-21.0"
+_OVERTURE_RELEASE_LOCK = threading.Lock()
+_OVERTURE_RELEASE_CACHE = None
+_PMTILES_HEADER_CACHE = {}
+_PMTILES_LEAF_CACHE = {}
+_PMTILES_TILE_CACHE = OrderedDict()
+_PMTILES_TILE_CACHE_MAX = 32
+_PMTILES_TILE_LOCK = threading.Lock()
+_HTTP_SESSION = None
+_HTTP_SESSION_LOCK = threading.Lock()
+_OVERTURE_STAC_COL_CACHE = {}
+_OVERTURE_STAC_ITEM_CACHE = {}
+
+_OVERTURE_THEME_SCHEMA = {
+    "places": [("id", "str"), ("name", "str"), ("category", "str"), ("confidence", "float")],
+    "buildings": [("id", "str"), ("name", "str"), ("height", "float"), ("num_floors", "int")],
+    "transportation": [("id", "str"), ("name", "str"), ("class", "str"), ("subtype", "str"), ("subclass", "str")],
+    "base": [("id", "str"), ("name", "str"), ("subtype", "str"), ("class", "str")],
+    "divisions": [
+        ("id", "str"), ("name", "str"), ("subtype", "str"), ("class", "str"),
+        ("admin_level", "int"), ("country", "str"), ("region", "str"),
+    ],
+}
+
+
+def _get_http_session():
+    """Return a shared connection-pooled requests.Session when available, else None."""
+    global _HTTP_SESSION
+    with _HTTP_SESSION_LOCK:
+        if _HTTP_SESSION is not None:
+            return _HTTP_SESSION or None
+        try:
+            import requests
+            from requests.adapters import HTTPAdapter
+            sess = requests.Session()
+            sess.headers.update({"User-Agent": "QGIS-AI-Agent/1.1"})
+            adapter = HTTPAdapter(pool_connections=8, pool_maxsize=8)
+            sess.mount("https://", adapter)
+            sess.mount("http://", adapter)
+            _HTTP_SESSION = sess
+        except Exception:
+            _HTTP_SESSION = False
+        return _HTTP_SESSION or None
+
+
+def _fetch_http_bytes(url, headers=None, timeout=12):
+    """Download raw bytes over HTTP(S) with connection pooling and cancellation checks."""
+    if CANCEL_REQUESTED:
+        raise RuntimeError("Execution stopped by user.")
+    sess = _get_http_session()
+    if sess is not None:
+        resp = sess.get(url, headers=headers or {}, timeout=timeout)
+        resp.raise_for_status()
+        return resp.content
+    hdrs = {"User-Agent": "QGIS-AI-Agent/1.1"}
+    if headers:
+        hdrs.update(headers)
+    req = urllib.request.Request(url, headers=hdrs)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def _fetch_http_range(url, start, length, timeout=12):
+    """Fetch a closed byte slice via HTTP Range header."""
+    if length <= 0:
+        return b""
+    return _fetch_http_bytes(url, headers={"Range": f"bytes={start}-{start + length - 1}"}, timeout=timeout)
+
+
+def _fetch_pmtiles_tile_cached(url, z, x, y, start, length):
+    """Fetch a PMTiles tile with a bounded in-memory LRU cache to speed up repeat/filtered queries."""
+    key = (url, z, x, y)
+    with _PMTILES_TILE_LOCK:
+        cached = _PMTILES_TILE_CACHE.get(key)
+        if cached is not None:
+            _PMTILES_TILE_CACHE.move_to_end(key)
+            return cached
+    raw = _fetch_http_range(url, start, length, timeout=12)
+    with _PMTILES_TILE_LOCK:
+        _PMTILES_TILE_CACHE[key] = raw
+        _PMTILES_TILE_CACHE.move_to_end(key)
+        while len(_PMTILES_TILE_CACHE) > _PMTILES_TILE_CACHE_MAX:
+            _PMTILES_TILE_CACHE.popitem(last=False)
+    return raw
+
+
+def _get_overture_release(default=_OVERTURE_DEFAULT_RELEASE):
+    """Discover and cache the latest Overture Maps release tag from stac.overturemaps.org."""
+    global _OVERTURE_RELEASE_CACHE
+    with _OVERTURE_RELEASE_LOCK:
+        if _OVERTURE_RELEASE_CACHE:
+            return _OVERTURE_RELEASE_CACHE
+    try:
+        raw = _fetch_http_bytes("https://stac.overturemaps.org/catalog.json", timeout=5)
+        cat = json.loads(raw.decode("utf-8"))
+        for link in cat.get("links", []):
+            if link.get("latest") and link.get("href"):
+                m = re.search(r"/(\d{4}-\d{2}-\d{2}\.\d+)/catalog\.json", link["href"])
+                if m:
+                    with _OVERTURE_RELEASE_LOCK:
+                        _OVERTURE_RELEASE_CACHE = m.group(1)
+                    return m.group(1)
+    except Exception as exc:
+        LOGGER.warning(f"Overture STAC release discovery failed ({exc}); using {default}")
+    with _OVERTURE_RELEASE_LOCK:
+        _OVERTURE_RELEASE_CACHE = default
+    return default
+
+
+def _pmtiles_rotate(n, x, y, rx, ry):
+    if ry == 0:
+        if rx == 1:
+            x = n - 1 - x
+            y = n - 1 - y
+        x, y = y, x
+    return x, y
+
+
+def _zxy_to_tile_id(z, x, y):
+    """Encode slippy-map tile (z, x, y) into a PMTiles v3 Hilbert tile ID."""
+    if z == 0:
+        return 0
+    acc = ((1 << (z * 2)) - 1) // 3
+    n = 1 << z
+    d = 0
+    s = n >> 1
+    tx, ty = x, y
+    while s > 0:
+        rx = 1 if (tx & s) > 0 else 0
+        ry = 1 if (ty & s) > 0 else 0
+        d += s * s * ((3 * rx) ^ ry)
+        tx, ty = _pmtiles_rotate(s, tx, ty, rx, ry)
+        s >>= 1
+    return acc + d
+
+
+def _read_varint(buf, pos):
+    shift = 0
+    result = 0
+    while True:
+        b = buf[pos]
+        pos += 1
+        result |= (b & 0x7F) << shift
+        if not (b & 0x80):
+            return result, pos
+        shift += 7
+
+
+def _deserialize_pmtiles_dir(raw_bytes):
+    """Decompress and decode a PMTiles v3 directory into parallel column tuples."""
+    data = gzip.decompress(raw_bytes)
+    n, pos = _read_varint(data, 0)
+    tile_ids, run_lengths, lengths, offsets = [], [], [], []
+    last_id = 0
+    for _ in range(n):
+        v, pos = _read_varint(data, pos)
+        last_id += v
+        tile_ids.append(last_id)
+    for _ in range(n):
+        v, pos = _read_varint(data, pos)
+        run_lengths.append(v)
+    for _ in range(n):
+        v, pos = _read_varint(data, pos)
+        lengths.append(v)
+    for i in range(n):
+        v, pos = _read_varint(data, pos)
+        offsets.append(offsets[i - 1] + lengths[i - 1] if (v == 0 and i > 0) else v - 1)
+    return tile_ids, offsets, lengths, run_lengths
+
+
+def _find_pmtiles_entry(dir_tuple, target_id):
+    tile_ids, offsets, lengths, run_lengths = dir_tuple
+    idx = bisect.bisect_right(tile_ids, target_id) - 1
+    if idx < 0:
+        return None
+    return tile_ids[idx], offsets[idx], lengths[idx], run_lengths[idx]
+
+
+def _lonlat_to_tile_xy(lon, lat, z):
+    n = 1 << z
+    x = int((lon + 180.0) / 360.0 * n)
+    lat_c = max(-85.05112878, min(85.05112878, lat))
+    y = int((1.0 - math.asinh(math.tan(math.radians(lat_c))) / math.pi) / 2.0 * n)
+    return max(0, min(n - 1, x)), max(0, min(n - 1, y))
+
+
+def _lonlat_to_3857(lon, lat):
+    x = lon * 20037508.342789244 / 180.0
+    lat_c = max(-85.05112878, min(85.05112878, lat))
+    y = math.log(math.tan((90.0 + lat_c) * math.pi / 360.0)) * 20037508.342789244 / math.pi
+    return x, y
+
+
+def _pmtiles_header_and_root(url):
+    """Fetch and cache the PMTiles v3 header + decoded root directory."""
+    if url in _PMTILES_HEADER_CACHE:
+        return _PMTILES_HEADER_CACHE[url]
+    head = _fetch_http_range(url, 0, 16384, timeout=10)
+    if len(head) < 102 or head[:7] != b"PMTiles" or head[7] != 3:
+        raise ValueError(f"Invalid PMTiles v3 header at {url}")
+    root_off, root_bytes, _, _, leaf_off, _, tile_off, _ = struct.unpack("<QQQQQQQQ", head[8:72])
+    internal_comp, _tile_comp, _tile_type, min_zoom, max_zoom = struct.unpack("<BBBBB", head[97:102])
+    if internal_comp != 2:
+        raise ValueError(f"Unsupported PMTiles internal directory compression ({internal_comp}) at {url}")
+    if root_off + root_bytes <= len(head):
+        root_raw = head[root_off:root_off + root_bytes]
+    else:
+        root_raw = _fetch_http_range(url, root_off, root_bytes, timeout=10)
+    hdr = {
+        "root_dir": _deserialize_pmtiles_dir(root_raw),
+        "leaf_dirs_offset": leaf_off,
+        "tile_data_offset": tile_off,
+        "min_zoom": min_zoom,
+        "max_zoom": max_zoom,
+    }
+    _PMTILES_HEADER_CACHE[url] = hdr
+    return hdr
+
+
+def _resolve_pmtiles_tile_range(url, hdr, z, x, y):
+    """Locate the byte offset and length for tile (z, x, y), caching traversed leaf directories."""
+    tid = _zxy_to_tile_id(z, x, y)
+    cur_dir = hdr["root_dir"]
+    for _ in range(4):
+        ent = _find_pmtiles_entry(cur_dir, tid)
+        if not ent:
+            return None
+        etid, off, length, rl = ent
+        if rl == 0:
+            cache_key = (url, off, length)
+            if cache_key not in _PMTILES_LEAF_CACHE:
+                raw_leaf = _fetch_http_range(url, hdr["leaf_dirs_offset"] + off, length, timeout=10)
+                _PMTILES_LEAF_CACHE[cache_key] = _deserialize_pmtiles_dir(raw_leaf)
+            cur_dir = _PMTILES_LEAF_CACHE[cache_key]
+        else:
+            if tid < etid + rl:
+                return z, x, y, hdr["tile_data_offset"] + off, length
+            return None
+    return None
+
+
+def _choose_pmtiles_tiles(xmin, ymin, xmax, ymax, min_zoom, max_zoom, t_name):
+    """Select an appropriate PMTiles zoom level and tile list (up to 64 tiles for iterative batch fetching)."""
+    def _tiles_for_z(z):
+        tx0, ty0 = _lonlat_to_tile_xy(xmin, ymax, z)
+        tx1, ty1 = _lonlat_to_tile_xy(xmax, ymin, z)
+        return [(z, x, y) for x in range(tx0, tx1 + 1) for y in range(ty0, ty1 + 1)]
+
+    max_allowed = 64
+    tiles = _tiles_for_z(max_zoom)
+    if len(tiles) <= max_allowed:
+        return max_zoom, tiles
+
+    if t_name in ("transportation", "base", "divisions"):
+        floor_z = max(min_zoom, max_zoom - 3)
+        for z in range(max_zoom - 1, floor_z - 1, -1):
+            cand = _tiles_for_z(z)
+            if len(cand) <= max_allowed:
+                return z, cand
+
+    return None, []
+
+
+def _parse_json_primary(raw_val):
+    if not raw_val:
+        return None
+    if isinstance(raw_val, dict):
+        return raw_val.get("primary")
+    try:
+        parsed = json.loads(raw_val)
+        if isinstance(parsed, dict):
+            return parsed.get("primary")
+    except Exception:
+        pass
+    return None
+
+
+def _build_lyr_field_index(lyr):
+    defn = lyr.GetLayerDefn()
+    return {defn.GetFieldDefn(i).GetName(): i for i in range(defn.GetFieldCount())}
+
+
+def _extract_overture_pmtiles_attrs(feat, t_name, fallback_idx, field_idx=None):
+    """Extract normalized Overture attributes from a decoded MVT feature using pre-resolved field indices."""
+    if field_idx is None:
+        defn = feat.GetDefnRef()
+        field_idx = {defn.GetFieldDefn(i).GetName(): i for i in range(defn.GetFieldCount())}
+
+    def _get(fname):
+        idx = field_idx.get(fname)
+        if idx is None or not feat.IsFieldSetAndNotNull(idx):
+            return None
+        return feat.GetField(idx)
+
+    raw_id = _get("id")
+    feat_id = str(raw_id) if raw_id not in (None, "") else f"pmt_{fallback_idx}"
+    name = _get("@name") or _parse_json_primary(_get("names"))
+    attrs = {"id": feat_id, "name": str(name) if name not in (None, "") else None}
+
+    if t_name == "places":
+        cat = _parse_json_primary(_get("taxonomy")) or _get("basic_category")
+        attrs["category"] = str(cat) if cat not in (None, "") else None
+        conf = _get("confidence")
+        try:
+            attrs["confidence"] = float(conf) if conf is not None else None
+        except (TypeError, ValueError):
+            attrs["confidence"] = None
+    elif t_name == "buildings":
+        h = _get("height")
+        nf = _get("num_floors")
+        attrs["height"] = float(h) if h is not None else None
+        attrs["num_floors"] = int(nf) if nf is not None else None
+    elif t_name == "transportation":
+        for k in ("class", "subtype", "subclass"):
+            v = _get(k)
+            attrs[k] = str(v) if v not in (None, "") else None
+    elif t_name == "base":
+        for k in ("subtype", "class"):
+            v = _get(k)
+            attrs[k] = str(v) if v not in (None, "") else None
+    elif t_name == "divisions":
+        for k in ("subtype", "class", "country", "region"):
+            v = _get(k)
+            attrs[k] = str(v) if v not in (None, "") else None
+        al = _get("admin_level")
+        attrs["admin_level"] = int(al) if al is not None else None
+    else:
+        for k in ("subtype", "class"):
+            v = _get(k)
+            attrs[k] = str(v) if v not in (None, "") else None
+    return attrs
+
+
+def _balance_records_4x4(records, xmin, ymin, xmax, ymax, limit):
+    """Select up to `limit` features evenly across a 4x4 grid covering [xmin, xmax] x [ymin, ymax], prioritizing higher-confidence named features."""
+    if len(records) <= limit:
+        return records
+    n_grid = 4
+    dx = max(1e-9, (xmax - xmin) / n_grid)
+    dy = max(1e-9, (ymax - ymin) / n_grid)
+    buckets = [[] for _ in range(n_grid * n_grid)]
+    for rec in records:
+        cx, cy = rec[2], rec[3]
+        gx = max(0, min(n_grid - 1, int((cx - xmin) / dx)))
+        gy = max(0, min(n_grid - 1, int((cy - ymin) / dy)))
+        buckets[gy * n_grid + gx].append(rec)
+
+    def _rec_score(rec):
+        if len(rec) > 4:
+            return rec[4]
+        attrs = rec[0] if isinstance(rec[0], dict) else {}
+        try:
+            conf = float(attrs.get("confidence") or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        return (1 if attrs.get("name") else 0, conf)
+
+    for b in buckets:
+        if len(b) > 1:
+            b.sort(key=_rec_score, reverse=True)
+
+    out = []
+    pos = 0
+    while len(out) < limit:
+        added = False
+        for b in buckets:
+            if pos < len(b):
+                out.append(b[pos])
+                added = True
+                if len(out) >= limit:
+                    break
+        if not added:
+            break
+        pos += 1
+    return out
+
+
+def _determine_ogr_wkb_type(records):
+    """Choose a specific OGR geometry type when homogeneous, else wkbUnknown."""
+    from osgeo import ogr
+
+    families = set()
+    for _, geom, _, _ in records:
+        flat = ogr.GT_Flatten(geom.GetGeometryType())
+        if flat in (ogr.wkbPoint, ogr.wkbMultiPoint):
+            families.add("point")
+        elif flat in (ogr.wkbLineString, ogr.wkbMultiLineString):
+            families.add("line")
+        elif flat in (ogr.wkbPolygon, ogr.wkbMultiPolygon):
+            families.add("polygon")
+        else:
+            families.add("other")
+    if families == {"point"}:
+        return ogr.wkbPoint
+    if families == {"line"}:
+        return ogr.wkbMultiLineString
+    if families == {"polygon"}:
+        return ogr.wkbMultiPolygon
+    return ogr.wkbUnknown
+
+
+def _write_pmtiles_records_to_gpkg(records, fields_spec, gpkg_path):
+    """Write normalized `(attrs, geom, cx, cy)` records to an EPSG:4326 GeoPackage."""
+    from osgeo import ogr, osr
+
+    if os.path.exists(gpkg_path):
+        try:
+            os.remove(gpkg_path)
+        except Exception:
+            pass
+    target_wkb = _determine_ogr_wkb_type(records)
+    drv = ogr.GetDriverByName("GPKG")
+    ds = drv.CreateDataSource(gpkg_path)
+    if ds is None:
+        raise RuntimeError(f"Failed to create GeoPackage at {gpkg_path}")
+    try:
+        srs = osr.SpatialReference()
+        srs.ImportFromEPSG(4326)
+        srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        lyr = ds.CreateLayer("features", srs, target_wkb)
+        type_map = {"str": ogr.OFTString, "float": ogr.OFTReal, "int": ogr.OFTInteger}
+        for fname, fkind in fields_spec:
+            lyr.CreateField(ogr.FieldDefn(fname, type_map.get(fkind, ogr.OFTString)))
+        defn = lyr.GetLayerDefn()
+        lyr.StartTransaction()
+        for attrs, geom, _, _ in records:
+            feat = ogr.Feature(defn)
+            for fname, _ in fields_spec:
+                val = attrs.get(fname)
+                if val is not None:
+                    feat.SetField(fname, val)
+            out_geom = geom
+            flat = ogr.GT_Flatten(geom.GetGeometryType())
+            if target_wkb == ogr.wkbMultiPolygon and flat == ogr.wkbPolygon:
+                out_geom = ogr.ForceToMultiPolygon(geom.Clone())
+            elif target_wkb == ogr.wkbMultiLineString and flat == ogr.wkbLineString:
+                out_geom = ogr.ForceToMultiLineString(geom.Clone())
+            elif target_wkb == ogr.wkbPoint and flat == ogr.wkbMultiPoint and geom.GetGeometryCount() > 0:
+                out_geom = geom.GetGeometryRef(0).Clone()
+            feat.SetGeometry(out_geom)
+            lyr.CreateFeature(feat)
+        lyr.CommitTransaction()
+    finally:
+        ds = None
+
+
+def _normalize_pmtiles_filter_sql(filter_sql):
+    """Map nested Overture Parquet field paths in filter_sql to flat GPKG column names."""
+    sql = filter_sql
+    sql = re.sub(r"\bnames\.primary\b", "name", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\btaxonomy\.primary\b", "category", sql, flags=re.IGNORECASE)
+    sql = re.sub(r"\bcategories\.primary\b", "category", sql, flags=re.IGNORECASE)
+    return sql
+
+
+def _count_gpkg_features(gpkg_path):
+    from osgeo import ogr
+
+    if not os.path.exists(gpkg_path):
+        return 0
+    ds = ogr.Open(gpkg_path)
+    if ds is None:
+        return 0
+    try:
+        lyr = ds.GetLayer(0)
+        return int(lyr.GetFeatureCount()) if lyr is not None else 0
+    finally:
+        ds = None
+
+
+def _deduplicate_gpkg_points(gpkg_path):
+    """Remove cross-tile duplicate point features sharing identical Overture `id` values in-place."""
+    from osgeo import ogr
+
+    if not os.path.exists(gpkg_path):
+        return 0
+    ds = ogr.Open(gpkg_path, 1)
+    if ds is None:
+        return _count_gpkg_features(gpkg_path)
+    try:
+        lyr = ds.GetLayer(0)
+        if lyr is None:
+            return 0
+        defn = lyr.GetLayerDefn()
+        id_idx = defn.GetFieldIndex("id")
+        if id_idx < 0:
+            return int(lyr.GetFeatureCount())
+        seen = set()
+        dup_fids = []
+        for feat in lyr:
+            if not feat.IsFieldSetAndNotNull(id_idx):
+                continue
+            fid_val = str(feat.GetField(id_idx) or "")
+            if not fid_val:
+                continue
+            if fid_val in seen:
+                dup_fids.append(feat.GetFID())
+            else:
+                seen.add(fid_val)
+        if dup_fids:
+            lyr.StartTransaction()
+            for dfid in dup_fids:
+                lyr.DeleteFeature(dfid)
+            lyr.CommitTransaction()
+        return int(lyr.GetFeatureCount())
+    finally:
+        ds = None
+
+
+def _apply_local_duckdb_filter(raw_gpkg, out_file, fields_spec, norm_filter, xmin, ymin, xmax, ymax, safe_limit, fetch_all=True, t_name="buildings"):
+    """Run arbitrary SQL filter locally over a temporary PMTiles GeoPackage (full deduplicated extraction when fetch_all=True)."""
+    raw_sql = raw_gpkg.replace("\\", "/").replace("'", "''")
+    out_sql = out_file.replace("\\", "/").replace("'", "''")
+    if fetch_all:
+        agg_cols = []
+        for fname, _ in fields_spec:
+            if fname == "id":
+                agg_cols.append("id")
+            else:
+                agg_cols.append(f"ANY_VALUE({fname}) AS {fname}")
+        geom_expr = "ANY_VALUE(geom) AS geometry" if t_name == "places" else "ST_Union_Agg(geom) AS geometry"
+        copy_sql = f"""
+        COPY (
+            SELECT {', '.join(agg_cols)}, {geom_expr}
+            FROM st_read('{raw_sql}')
+            WHERE ({norm_filter})
+            GROUP BY id
+            LIMIT {safe_limit}
+        ) TO '{out_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
+        """
+    else:
+        select_cols = ", ".join(fname for fname, _ in fields_spec)
+        dx = max(1e-9, (xmax - xmin) / 4.0)
+        dy = max(1e-9, (ymax - ymin) / 4.0)
+        per_tile_limit = max(50, math.ceil(safe_limit / 16) * 2)
+        copy_sql = f"""
+        COPY (
+            WITH _raw AS (
+                SELECT {select_cols}, geom AS geometry,
+                       FLOOR(((ST_XMin(geom) + ST_XMax(geom)) * 0.5 - {xmin}) / {dx}) AS _gx,
+                       FLOOR(((ST_YMin(geom) + ST_YMax(geom)) * 0.5 - {ymin}) / {dy}) AS _gy
+                FROM st_read('{raw_sql}')
+                WHERE ({norm_filter})
+            ),
+            _ranked AS (
+                SELECT * EXCLUDE (_gx, _gy),
+                       ROW_NUMBER() OVER (PARTITION BY _gx, _gy) AS _tile_rn
+                FROM _raw
+            )
+            SELECT * EXCLUDE (_tile_rn)
+            FROM _ranked
+            WHERE _tile_rn <= {per_tile_limit}
+            ORDER BY _tile_rn
+            LIMIT {safe_limit}
+        ) TO '{out_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
+        """
+    local_setup = ("SET geometry_always_xy=true;", "SET preserve_insertion_order=false;")
+    _execute_duckdb_nonblocking(local_setup, copy_sql)
+    return _count_gpkg_features(out_file)
+
+
+def _pmtiles_vectortranslate_to_gpkg(src_mvt, actual_lyr_name, field_idx, fields_spec, x3857_0, y3857_0, x3857_1, y3857_1, out_file, t_name="buildings", access_mode=None):
+    """Fast C++ GDAL VectorTranslate extraction from decoded /vsimem/ MVT tiles directly to EPSG:4326 GPKG."""
+    from osgeo import gdal
+
+    cols = []
+    for fname, ftype in fields_spec:
+        if fname == "name":
+            if "@name" in field_idx:
+                cols.append('"@name" AS name')
+            elif "name" in field_idx:
+                cols.append('"name"')
+            else:
+                cols.append("CAST(NULL AS CHARACTER(254)) AS name")
+        elif fname == "category":
+            if "@category" in field_idx:
+                cols.append('"@category" AS category')
+            elif "basic_category" in field_idx:
+                cols.append('"basic_category" AS category')
+            elif "category" in field_idx:
+                cols.append('"category"')
+            elif "taxonomy" in field_idx:
+                cols.append('"taxonomy" AS category')
+            else:
+                cols.append("CAST(NULL AS CHARACTER(64)) AS category")
+        elif ftype == "float":
+            cols.append(f'CAST("{fname}" AS FLOAT) AS {fname}' if fname in field_idx else f"CAST(NULL AS FLOAT) AS {fname}")
+        elif ftype == "int":
+            cols.append(f'CAST("{fname}" AS INTEGER) AS {fname}' if fname in field_idx else f"CAST(NULL AS INTEGER) AS {fname}")
+        else:
+            width = 128 if fname == "id" else 64
+            cols.append(f'"{fname}"' if fname in field_idx else f"CAST(NULL AS CHARACTER({width})) AS {fname}")
+
+    sql_stmt = f'SELECT {", ".join(cols)} FROM "{actual_lyr_name}"'
+    opts_kw = {
+        "format": "GPKG",
+        "spatFilter": [float(x3857_0), float(y3857_0), float(x3857_1), float(y3857_1)],
+        "dstSRS": "EPSG:4326",
+        "reproject": True,
+        "geometryType": ("POINT" if t_name == "places" else "PROMOTE_TO_MULTI"),
+        "layerName": "features",
+        "SQLStatement": sql_stmt,
+        "SQLDialect": "OGRSQL",
+    }
+    if access_mode and os.path.exists(out_file):
+        opts_kw["accessMode"] = access_mode
+    res = gdal.VectorTranslate(out_file, src_mvt, options=gdal.VectorTranslateOptions(**opts_kw))
+    if res is not None:
+        res = None
+    return _count_gpkg_features(out_file)
+
+
+def _fetch_overture_pmtiles_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax, release, filter_sql, safe_limit, out_file, fetch_all=True, page_size=1000):
+    """Fetch Overture vector tiles iteratively in batches via PMTiles byte-ranges and write/append into a GeoPackage."""
+    from osgeo import gdal, ogr, osr
+
+    url = f"https://tiles.overturemaps.org/{release}/{t_name}.pmtiles"
+    _report_progress("query_overture_maps", 10, f"Reading Overture {t_name} PMTiles index...")
+    hdr = _pmtiles_header_and_root(url)
+    target_z, tiles = _choose_pmtiles_tiles(xmin, ymin, xmax, ymax, hdr["min_zoom"], hdr["max_zoom"], t_name)
+    if target_z is None or not tiles:
+        raise RuntimeError(f"Bounding box spans too many z={hdr['max_zoom']} PMTiles; falling back to STAC Parquet.")
+
+    tile_ranges = []
+    for z, x, y in tiles:
+        if CANCEL_REQUESTED:
+            raise RuntimeError("Execution stopped by user.")
+        tr = _resolve_pmtiles_tile_range(url, hdr, z, x, y)
+        if tr is not None:
+            tile_ranges.append(tr)
+    if not tile_ranges:
+        raise ValueError(f"No Overture PMTiles data at z={target_z} for theme='{t_name}' in bbox {[xmin, ymin, xmax, ymax]}.")
+
+    fields_spec = _OVERTURE_THEME_SCHEMA.get(t_name, [("id", "str"), ("name", "str"), ("subtype", "str"), ("class", "str")])
+    x3857_0, y3857_0 = _lonlat_to_3857(xmin, ymin)
+    x3857_1, y3857_1 = _lonlat_to_3857(xmax, ymax)
+
+    # C++ GDAL VectorTranslate iterative tile-batch path for all themes (places, buildings, transportation, base, divisions)
+    if fetch_all or filter_sql or safe_limit >= 2500:
+        tile_batch_size = 4
+        batches = [tile_ranges[i:i + tile_batch_size] for i in range(0, len(tile_ranges), tile_batch_size)]
+        vt_target = (out_file[:-5] + "_raw.gpkg") if filter_sql else out_file
+        if os.path.exists(vt_target):
+            try:
+                os.remove(vt_target)
+            except Exception:
+                pass
+        vt_failed = False
+        try:
+            total_so_far = 0
+            for b_idx, batch in enumerate(batches, start=1):
+                if CANCEL_REQUESTED:
+                    raise RuntimeError("Execution stopped by user.")
+                pct = min(88, int(15 + 68 * (b_idx - 1) / max(1, len(batches))))
+                _report_progress(
+                    "query_overture_maps",
+                    pct,
+                    f"Fetching {t_name} tile batch {b_idx}/{len(batches)} ({len(batch)} tiles at z={target_z}, {total_so_far:,} features)...",
+                )
+                with ThreadPoolExecutor(max_workers=min(6, len(batch))) as pool:
+                    fetched_batch = list(pool.map(lambda tr: (tr[0], tr[1], tr[2], _fetch_pmtiles_tile_cached(url, *tr)), batch))
+
+                vsi_batch_base = f"/vsimem/ov_pmt_{t_name}_{int(time.time() * 1000)}_{threading.get_ident()}_b{b_idx}"
+                written_batch_paths = []
+                b_ds = None
+                try:
+                    for z, x, y, raw_bytes in fetched_batch:
+                        p = f"{vsi_batch_base}/{z}/{x}/{y}.pbf"
+                        gdal.FileFromMemBuffer(p, raw_bytes)
+                        written_batch_paths.append(p)
+                    src_mvt = f"MVT:{vsi_batch_base}/{target_z}"
+                    b_ds = ogr.Open(src_mvt)
+                    if b_ds is None:
+                        continue
+                    b_lyr = b_ds.GetLayerByName(t_type)
+                    if b_lyr is None:
+                        avail = [b_ds.GetLayer(i).GetName() for i in range(b_ds.GetLayerCount())]
+                        if t_type == "water" and "water" in avail:
+                            b_lyr = b_ds.GetLayerByName("water")
+                        elif not avail:
+                            continue
+                        elif len(batches) == 1:
+                            raise ValueError(f"PMTiles layer '{t_type}' not present in {t_name}.pmtiles (available: {avail})")
+                        else:
+                            continue
+                    actual_lyr_name = b_lyr.GetName()
+                    field_idx = _build_lyr_field_index(b_lyr)
+                    b_ds = None
+                    b_lyr = None
+                    access_mode = "append" if os.path.exists(vt_target) else None
+                    total_so_far = _pmtiles_vectortranslate_to_gpkg(
+                        src_mvt, actual_lyr_name, field_idx, fields_spec,
+                        x3857_0, y3857_0, x3857_1, y3857_1, vt_target,
+                        t_name=t_name, access_mode=access_mode,
+                    )
+                finally:
+                    b_ds = None
+                    for p in written_batch_paths:
+                        try:
+                            gdal.Unlink(p)
+                        except Exception:
+                            pass
+                    if hasattr(gdal, "RmdirRecursive"):
+                        try:
+                            gdal.RmdirRecursive(vsi_batch_base)
+                        except Exception:
+                            pass
+
+            cnt = _count_gpkg_features(vt_target)
+            if cnt == 0:
+                if os.path.exists(vt_target):
+                    try:
+                        os.remove(vt_target)
+                    except Exception:
+                        pass
+                raise ValueError(f"No Overture features found for theme='{t_name}', type='{t_type}' in bbox {[xmin, ymin, xmax, ymax]}.")
+
+            if not filter_sql:
+                if t_name == "places":
+                    cnt = _deduplicate_gpkg_points(vt_target)
+                if fetch_all or cnt <= safe_limit:
+                    _report_progress("query_overture_maps", 95, f"Loaded {cnt:,} {t_name} features")
+                    return cnt
+                if os.path.exists(vt_target):
+                    os.remove(vt_target)
+            else:
+                try:
+                    norm_filter = _normalize_pmtiles_filter_sql(filter_sql)
+                    filtered_cnt = _apply_local_duckdb_filter(
+                        vt_target, out_file, fields_spec, norm_filter,
+                        xmin, ymin, xmax, ymax, safe_limit, fetch_all=fetch_all, t_name=t_name,
+                    )
+                    if filtered_cnt == 0:
+                        raise ValueError(f"No Overture features matched filter_sql={filter_sql!r} in PMTiles.")
+                    _report_progress("query_overture_maps", 95, f"Loaded {filtered_cnt:,} filtered {t_name} features")
+                    return filtered_cnt
+                finally:
+                    if os.path.exists(vt_target):
+                        try:
+                            os.remove(vt_target)
+                        except Exception:
+                            pass
+        except ValueError:
+            raise
+        except Exception as vt_exc:
+            vt_failed = True
+            LOGGER.debug(f"GDAL VectorTranslate batched path skipped for {t_name}/{t_type} ({vt_exc}); falling back to OGR loop")
+            if os.path.exists(vt_target):
+                try:
+                    os.remove(vt_target)
+                except Exception:
+                    pass
+        if vt_failed and os.path.exists(vt_target):
+            try:
+                os.remove(vt_target)
+            except Exception:
+                pass
+
+    # Fallback OGR path (used for explicit small 4x4 balanced samples when fetch_all=False or if C++ fast path failed)
+    _report_progress("query_overture_maps", 25, f"Downloading {len(tile_ranges)} {t_name} PMTiles (z={target_z})...")
+    with ThreadPoolExecutor(max_workers=min(6, len(tile_ranges))) as pool:
+        fetched = list(pool.map(lambda tr: (tr[0], tr[1], tr[2], _fetch_pmtiles_tile_cached(url, *tr)), tile_ranges))
+
+    if CANCEL_REQUESTED:
+        raise RuntimeError("Execution stopped by user.")
+    _report_progress("query_overture_maps", 55, f"Decoding {t_name}/{t_type} vector tiles...")
+
+    vsi_base = f"/vsimem/ov_pmt_{t_name}_{int(time.time() * 1000)}_{threading.get_ident()}"
+    written_vsi_paths = []
+    ds = None
+    try:
+        for z, x, y, raw_bytes in fetched:
+            p = f"{vsi_base}/{z}/{x}/{y}.pbf"
+            gdal.FileFromMemBuffer(p, raw_bytes)
+            written_vsi_paths.append(p)
+
+        src_mvt = f"MVT:{vsi_base}/{target_z}"
+        ds = ogr.Open(src_mvt)
+        if ds is None:
+            raise RuntimeError(f"GDAL MVT driver failed to open {t_name} tiles")
+
+        lyr = ds.GetLayerByName(t_type)
+        if lyr is None:
+            avail = [ds.GetLayer(i).GetName() for i in range(ds.GetLayerCount())]
+            if t_type == "water" and "water" in avail:
+                lyr = ds.GetLayerByName("water")
+            elif avail:
+                raise ValueError(f"PMTiles layer '{t_type}' not present in {t_name}.pmtiles (available: {avail})")
+            else:
+                raise RuntimeError(f"No layers found in decoded {t_name} PMTiles")
+
+        actual_lyr_name = lyr.GetName()
+        field_idx = _build_lyr_field_index(lyr)
+        lyr.SetSpatialFilterRect(x3857_0, y3857_0, x3857_1, y3857_1)
+        id_col_idx = field_idx.get("id")
+        name_col_idx = field_idx.get("@name")
+        conf_col_idx = field_idx.get("confidence")
+
+        s_srs = osr.SpatialReference()
+        s_srs.ImportFromEPSG(3857)
+        t_srs = osr.SpatialReference()
+        t_srs.ImportFromEPSG(4326)
+        t_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        ct = osr.CoordinateTransformation(s_srs, t_srs)
+
+        selected_ids = None
+        if not fetch_all and not filter_sql and id_col_idx is not None:
+            # 4x4 grid balancing only when caller explicitly requests fetch_all=False
+            id_centers = {}
+            for feat in lyr:
+                if CANCEL_REQUESTED:
+                    raise RuntimeError("Execution stopped by user.")
+                geom = feat.GetGeometryRef()
+                if geom is None or geom.IsEmpty():
+                    continue
+                raw_id = feat.GetField(id_col_idx) if feat.IsFieldSetAndNotNull(id_col_idx) else None
+                fid = str(raw_id) if raw_id not in (None, "") else f"pmt_{feat.GetFID()}"
+                if fid not in id_centers:
+                    ex0, ex1, ey0, ey1 = geom.GetEnvelope()
+                    if ex1 >= x3857_0 and ex0 <= x3857_1 and ey1 >= y3857_0 and ey0 <= y3857_1:
+                        has_name = 1 if (name_col_idx is not None and feat.IsFieldSetAndNotNull(name_col_idx) and str(feat.GetField(name_col_idx) or "").strip()) else 0
+                        try:
+                            conf_val = float(feat.GetField(conf_col_idx)) if (conf_col_idx is not None and feat.IsFieldSetAndNotNull(conf_col_idx)) else 0.0
+                        except (TypeError, ValueError):
+                            conf_val = 0.0
+                        id_centers[fid] = (fid, None, (ex0 + ex1) * 0.5, (ey0 + ey1) * 0.5, (has_name, conf_val))
+            balanced = _balance_records_4x4(list(id_centers.values()), x3857_0, y3857_0, x3857_1, y3857_1, safe_limit)
+            selected_ids = {rec[0] for rec in balanced}
+            lyr.ResetReading()
+
+        by_id = {}
+        for feat in lyr:
+            if CANCEL_REQUESTED:
+                raise RuntimeError("Execution stopped by user.")
+            if selected_ids is not None:
+                raw_id = feat.GetField(id_col_idx) if feat.IsFieldSetAndNotNull(id_col_idx) else None
+                fid = str(raw_id) if raw_id not in (None, "") else f"pmt_{feat.GetFID()}"
+                if fid not in selected_ids:
+                    continue
+            else:
+                fid = None
+
+            geom = feat.GetGeometryRef()
+            if geom is None or geom.IsEmpty():
+                continue
+            attrs = _extract_overture_pmtiles_attrs(feat, t_name, feat.GetFID(), field_idx)
+            if fid is None:
+                fid = attrs["id"]
+            if fid not in by_id:
+                by_id[fid] = [attrs, [geom.Clone()]]
+            else:
+                by_id[fid][1].append(geom.Clone())
+
+        records = []
+        for attrs, parts in by_id.values():
+            if CANCEL_REQUESTED:
+                raise RuntimeError("Execution stopped by user.")
+            geom = parts[0]
+            for extra in parts[1:]:
+                try:
+                    merged = geom.Union(extra)
+                    if merged is not None and not merged.IsEmpty():
+                        geom = merged
+                except Exception:
+                    pass
+            if geom.Transform(ct) != 0:
+                continue
+            ex0, ex1, ey0, ey1 = geom.GetEnvelope()
+            if ex1 < xmin or ex0 > xmax or ey1 < ymin or ey0 > ymax:
+                continue
+            records.append((attrs, geom, (ex0 + ex1) * 0.5, (ey0 + ey1) * 0.5))
+    finally:
+        ds = None
+        for p in written_vsi_paths:
+            try:
+                gdal.Unlink(p)
+            except Exception:
+                pass
+        if hasattr(gdal, "RmdirRecursive"):
+            try:
+                gdal.RmdirRecursive(vsi_base)
+            except Exception:
+                pass
+
+    if not records:
+        raise ValueError(f"No Overture features found for theme='{t_name}', type='{t_type}' in bbox {[xmin, ymin, xmax, ymax]}.")
+
+    if not filter_sql:
+        if (not fetch_all) or len(records) > safe_limit:
+            records = _balance_records_4x4(records, xmin, ymin, xmax, ymax, safe_limit)
+        _report_progress("query_overture_maps", 85, f"Writing {len(records)} {t_name} features to GeoPackage...")
+        _write_pmtiles_records_to_gpkg(records, fields_spec, out_file)
+        _report_progress("query_overture_maps", 95, f"Loading {t_name} layer...")
+        return len(records)
+
+    raw_tmp = out_file[:-5] + "_raw.gpkg"
+    try:
+        _report_progress("query_overture_maps", 75, f"Filtering {len(records)} {t_name} features...")
+        _write_pmtiles_records_to_gpkg(records, fields_spec, raw_tmp)
+        norm_filter = _normalize_pmtiles_filter_sql(filter_sql)
+        filtered_cnt = _apply_local_duckdb_filter(
+            raw_tmp, out_file, fields_spec, norm_filter,
+            xmin, ymin, xmax, ymax, safe_limit, fetch_all=fetch_all, t_name=t_name,
+        )
+        if filtered_cnt == 0:
+            raise ValueError(f"No Overture features matched filter_sql={filter_sql!r} in PMTiles.")
+        _report_progress("query_overture_maps", 95, f"Loading {t_name} layer...")
+        return filtered_cnt
+    finally:
+        if os.path.exists(raw_tmp):
+            try:
+                os.remove(raw_tmp)
+            except Exception:
+                pass
+
+
+def _resolve_overture_stac_parquet_urls(theme, t_type, xmin, ymin, xmax, ymax, release):
+    """Resolve exact HTTPS GeoParquet partition URLs intersecting a WGS84 bbox via Overture STAC."""
+    col_key = (release, theme, t_type)
+    if col_key in _OVERTURE_STAC_COL_CACHE:
+        item_bboxes, item_hrefs = _OVERTURE_STAC_COL_CACHE[col_key]
+    else:
+        col_url = f"https://stac.overturemaps.org/{release}/{theme}/{t_type}/collection.json"
+        col = json.loads(_fetch_http_bytes(col_url, timeout=8).decode("utf-8"))
+        raw_bboxes = col.get("extent", {}).get("spatial", {}).get("bbox", [])
+        item_hrefs = [lnk["href"] for lnk in col.get("links", []) if lnk.get("rel") == "item" and lnk.get("href")]
+        item_bboxes = raw_bboxes[1:] if len(raw_bboxes) == len(item_hrefs) + 1 else raw_bboxes
+        _OVERTURE_STAC_COL_CACHE[col_key] = (item_bboxes, item_hrefs)
+
+    matching_hrefs = [
+        item_hrefs[i]
+        for i, b in enumerate(item_bboxes)
+        if i < len(item_hrefs) and len(b) >= 4 and b[2] >= xmin and b[0] <= xmax and b[3] >= ymin and b[1] <= ymax
+    ]
+    missing = [h for h in matching_hrefs if h not in _OVERTURE_STAC_ITEM_CACHE]
+    if missing:
+        def _fetch_item(href):
+            it = json.loads(_fetch_http_bytes(href, timeout=8).decode("utf-8"))
+            aws_href = it.get("assets", {}).get("aws", {}).get("href")
+            return href, aws_href
+
+        with ThreadPoolExecutor(max_workers=min(6, len(missing))) as pool:
+            for href, aws_href in pool.map(_fetch_item, missing):
+                if aws_href:
+                    _OVERTURE_STAC_ITEM_CACHE[href] = aws_href
+
+    urls = []
+    seen = set()
+    for href in matching_hrefs:
+        u = _OVERTURE_STAC_ITEM_CACHE.get(href)
+        if u and u not in seen:
+            seen.add(u)
+            urls.append(u)
+    return urls
+
+
+def _overture_select_clause(t_name):
+    if t_name == "places":
+        return "id, names.primary as name, taxonomy.primary as category, confidence, geometry"
+    if t_name == "buildings":
+        return "id, names.primary as name, height, num_floors, geometry"
+    if t_name == "transportation":
+        return "id, names.primary as name, class, subtype, subclass, geometry"
+    if t_name == "base":
+        return "id, names.primary as name, subtype, class, geometry"
+    if t_name == "divisions":
+        return "id, names.primary as name, subtype, class, admin_level, country, region, geometry"
+    return "id, names.primary as name, subtype, class, geometry"
+
+
+def _query_overture_stac_parquet_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax, release, filter_sql, safe_limit, out_file, fetch_all=True, page_size=2000):
+    """Paginated STAC-indexed GeoParquet fetch into an indexed GeoPackage (iterates until complete when fetch_all=True)."""
+    from osgeo import gdal
+
+    try:
+        import duckdb  # noqa: F401
+    except ImportError:
+        raise RuntimeError("duckdb is required for GeoParquet Overture queries. Install it in your Python environment with: pip install duckdb")
+
+    _report_progress("query_overture_maps", 15, f"Resolving STAC Parquet partitions for {t_name}/{t_type}...")
+    parquet_urls = []
+    try:
+        parquet_urls = _resolve_overture_stac_parquet_urls(t_name, t_type, xmin, ymin, xmax, ymax, release)
+    except Exception as exc:
+        LOGGER.warning(f"Overture STAC partition resolution failed ({exc}); falling back to S3 glob")
+
+    s3_glob = f"s3://overturemaps-us-west-2/release/{release}/theme={t_name}/type={t_type}/*"
+    if parquet_urls:
+        quoted = ", ".join("'" + u.replace("'", "''") + "'" for u in parquet_urls)
+        parquet_source = f"read_parquet([{quoted}])"
+        _report_progress("query_overture_maps", 35, f"Streaming {len(parquet_urls)} STAC-matched {t_name} Parquet file(s)...")
+    else:
+        parquet_source = f"read_parquet('{s3_glob}', hive_partitioning=1)"
+        _report_progress("query_overture_maps", 35, f"Streaming {t_name}/{t_type} from S3 Parquet...")
+
+    select_clause = _overture_select_clause(t_name)
+    where_clauses = [
+        f"bbox.xmax >= {xmin} AND bbox.xmin <= {xmax}",
+        f"bbox.ymax >= {ymin} AND bbox.ymin <= {ymax}",
+    ]
+    if filter_sql:
+        where_clauses.append(f"({filter_sql})")
+
+    out_file_sql = out_file.replace("\\", "/").replace("'", "''")
+    if not fetch_all:
+        dx = max(1e-9, (xmax - xmin) / 4.0)
+        dy = max(1e-9, (ymax - ymin) / 4.0)
+        per_tile_limit = max(50, math.ceil(safe_limit / 16) * 2)
+        copy_query = f"""
+        COPY (
+            WITH _raw AS (
+                SELECT {select_clause},
+                       FLOOR(((bbox.xmin + bbox.xmax) * 0.5 - {xmin}) / {dx}) AS _gx,
+                       FLOOR(((bbox.ymin + bbox.ymax) * 0.5 - {ymin}) / {dy}) AS _gy
+                FROM {parquet_source}
+                WHERE {' AND '.join(where_clauses)}
+            ),
+            _ranked AS (
+                SELECT * EXCLUDE (_gx, _gy),
+                       ROW_NUMBER() OVER (PARTITION BY _gx, _gy) AS _tile_rn
+                FROM _raw
+            )
+            SELECT * EXCLUDE (_tile_rn)
+            FROM _ranked
+            WHERE _tile_rn <= {per_tile_limit}
+            ORDER BY _tile_rn
+            LIMIT {safe_limit}
+        ) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
+        """
+        _execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, copy_query)
+        cnt = _count_gpkg_features(out_file)
+    else:
+        batch_sz = max(200, int(page_size or 2000))
+        total_cnt = 0
+        target_lyr_name = None
+        page_idx = 0
+        while total_cnt < safe_limit:
+            if CANCEL_REQUESTED:
+                raise RuntimeError("Execution stopped by user.")
+            page_idx += 1
+            offset = (page_idx - 1) * batch_sz
+            this_lim = min(batch_sz, safe_limit - total_cnt)
+            page_path = out_file if page_idx == 1 else f"{out_file[:-5]}_p{page_idx}.gpkg"
+            page_sql = page_path.replace("\\", "/").replace("'", "''")
+            copy_query = f"""
+            COPY (
+                SELECT {select_clause}
+                FROM {parquet_source}
+                WHERE {' AND '.join(where_clauses)}
+                ORDER BY id
+                LIMIT {this_lim} OFFSET {offset}
+            ) TO '{page_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
+            """
+            try:
+                _execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, copy_query)
+                page_cnt = _count_gpkg_features(page_path)
+                if page_idx == 1:
+                    if page_cnt == 0:
+                        break
+                    total_cnt = page_cnt
+                    target_lyr_name = _gpkg_first_layer_name(out_file) or "features"
+                else:
+                    if page_cnt > 0:
+                        vt_opts = gdal.VectorTranslateOptions(
+                            format="GPKG",
+                            accessMode="append",
+                            layerName=target_lyr_name or "features",
+                        )
+                        res = gdal.VectorTranslate(out_file, page_path, options=vt_opts)
+                        if res is not None:
+                            res = None
+                        total_cnt += page_cnt
+            finally:
+                if page_idx > 1 and os.path.exists(page_path):
+                    try:
+                        os.remove(page_path)
+                    except Exception:
+                        pass
+
+            _report_progress(
+                "query_overture_maps",
+                min(92, 35 + page_idx * 10),
+                f"Paginating {t_name} Parquet page {page_idx} ({total_cnt:,} features)...",
+            )
+            if page_cnt < this_lim or page_cnt == 0:
+                break
+        cnt = _count_gpkg_features(out_file) if os.path.exists(out_file) else 0
+
+    if cnt == 0:
+        if os.path.exists(out_file):
+            try:
+                os.remove(out_file)
+            except Exception:
+                pass
+        raise ValueError(f"No Overture features found for theme='{t_name}', type='{t_type}' in bbox {[xmin, ymin, xmax, ymax]}.")
+    _report_progress("query_overture_maps", 95, f"Loading {cnt} {t_name} features...")
+    return cnt
+
+
+def _rewrite_overture_s3_glob_in_sql(query):
+    """Replace slow full-S3 Overture read_parquet globs with STAC-pruned HTTPS partition URLs when bbox bounds exist."""
+    pattern = re.compile(
+        r"read_parquet\(\s*'s3://overturemaps-us-west-2/release/([^/]+)/theme=([^/]+)/type=([^/*']+)/\*'"
+        r"(?:\s*,\s*hive_partitioning\s*=\s*[^)]+)?\s*\)",
+        flags=re.IGNORECASE,
+    )
+    if not pattern.search(query):
+        return query
+
+    def _bound(col, ops):
+        flip = {">=": "<=", ">": "<", "<=": ">=", "<": ">"}
+        vals = []
+        for op in ops:
+            for m in re.finditer(rf"\b{col}\s*{op}\s*(-?\d+(?:\.\d+)?)", query, flags=re.IGNORECASE):
+                vals.append(float(m.group(1)))
+            rev_op = flip.get(op)
+            if rev_op:
+                for m in re.finditer(rf"(-?\d+(?:\.\d+)?)\s*{rev_op}\s*{col}\b", query, flags=re.IGNORECASE):
+                    vals.append(float(m.group(1)))
+        return vals
+
+    xmins = _bound(r"bbox\.xmax", [">=", ">"]) + _bound(r"bbox\.xmin", [">=", ">"])
+    xmaxs = _bound(r"bbox\.xmin", ["<=", "<"]) + _bound(r"bbox\.xmax", ["<=", "<"])
+    ymins = _bound(r"bbox\.ymax", [">=", ">"]) + _bound(r"bbox\.ymin", [">=", ">"])
+    ymaxs = _bound(r"bbox\.ymin", ["<=", "<"]) + _bound(r"bbox\.ymax", ["<=", "<"])
+    if not (xmins and xmaxs and ymins and ymaxs):
+        return query
+    xmin, xmax = min(xmins), max(xmaxs)
+    ymin, ymax = min(ymins), max(ymaxs)
+
+    def _repl(match):
+        release, theme, t_type = match.group(1), match.group(2), match.group(3)
+        try:
+            urls = _resolve_overture_stac_parquet_urls(theme, t_type, xmin, ymin, xmax, ymax, release)
+            if urls:
+                quoted = ", ".join("'" + u.replace("'", "''") + "'" for u in urls)
+                return f"read_parquet([{quoted}])"
+        except Exception as exc:
+            LOGGER.warning(f"STAC SQL rewrite skipped for {theme}/{t_type}: {exc}")
+        return match.group(0)
+
+    return pattern.sub(_repl, query)
+
+
+@tool("Query Overture Maps Foundation open data (buildings, places/POI, transportation/roads, water) via iterative tiled PMTiles and paginated STAC GeoParquet until complete, and load into QGIS.",
       {"theme": S("string", "'places' | 'buildings' | 'transportation' | 'base' | 'divisions' (default 'places')"),
        "type": S("string", "optional subtype: 'place', 'building', 'segment', 'water' (auto-selected if omitted)"),
        "bbox": S("array", "optional [xmin, ymin, xmax, ymax] in WGS84 (default: current map canvas extent)"),
        "filter_sql": S("string", "optional SQL condition, e.g. \"taxonomy.primary = 'restaurant'\" or \"names.primary ILIKE '%hotel%'\""),
-       "limit": S("integer", "max features to fetch, default 500"),
+       "limit": S("integer", "per-batch page size when fetch_all=true (iterates until full), or hard cap when fetch_all=false"),
+       "fetch_all": S("boolean", "iterate across all tiles/pages until 100% of features in bbox are fetched (default true)"),
        "output_name": S("string", "layer name in QGIS, default e.g. 'Overture_Places'"),
-       "tile_threshold": S("integer", "geometry count threshold above which query automatically splits into tiles (default 2000)")})
-def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, limit=500, output_name=None, layer_name=None, tile_threshold=2000):
+       "tile_threshold": S("integer", "tile-balancing threshold (default 2000)"),
+       "source": S("string", "optional backend: 'auto' (PMTiles -> STAC Parquet), 'pmtiles', or 'parquet' (default 'auto')")})
+def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, limit=None, output_name=None, layer_name=None, tile_threshold=2000, source="auto", fetch_all=True):
     if CANCEL_REQUESTED:
         raise RuntimeError("Execution stopped by user.")
-    try:
-        import duckdb  # noqa: F401
-    except ImportError:
-        raise RuntimeError("duckdb is required to query Overture Maps. Install it in your Python environment with: pip install duckdb")
+    if isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+        _record_study_bbox(bbox, "EPSG:4326")
 
     output_name = output_name or layer_name
     default_types = {
@@ -4688,91 +6918,43 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
     ymin = max(-85.0, min(85.0, min(raw_ymin, raw_ymax)))
     ymax = max(-85.0, min(85.0, max(raw_ymin, raw_ymax)))
 
-    # Select key attributes based on theme
-    if t_name == "places":
-        select_clause = "id, names.primary as name, taxonomy.primary as category, geometry"
-    elif t_name == "buildings":
-        select_clause = "id, names.primary as name, height, num_floors, geometry"
-    elif t_name == "transportation":
-        select_clause = "id, names.primary as name, class, subtype, subclass, geometry"
-    elif t_name == "base":
-        select_clause = "id, names.primary as name, subtype, class, geometry"
-    else:
-        select_clause = "id, subtype, geometry"
-
-    where_clauses = [
-        f"bbox.xmax >= {xmin} AND bbox.xmin <= {xmax}",
-        f"bbox.ymax >= {ymin} AND bbox.ymin <= {ymax}"
-    ]
-    if filter_sql:
-        where_clauses.append(f"({filter_sql})")
-
     _cleanup_old_temp_files()
-    safe_limit = max(1, min(int(limit or 500), 25000))
-    safe_threshold = max(200, min(int(tile_threshold or 2000), 25000))
+    fetch_all_flag = bool(fetch_all)
+    if fetch_all_flag:
+        page_size = max(100, min(int(limit), 10000)) if limit is not None else 2000
+        safe_limit = 250000
+    else:
+        safe_limit = min(max(1, int(limit or 500)), 250000)
+        page_size = safe_limit
+
     out_file = os.path.join(tempfile.gettempdir(), f"overture_{t_name}_{t_type}_{int(time.time() * 1000)}.gpkg")
     if os.path.exists(out_file):
         try:
             os.remove(out_file)
         except Exception:
             pass
-    s3_path = f"s3://overturemaps-us-west-2/release/2026-10-21.0/theme={t_name}/type={t_type}/*"
-    out_file_sql = out_file.replace("\\", "/").replace("'", "''")
+
+    source_mode = (source or "auto").strip().lower()
+    release = _get_overture_release()
 
     try:
-        _report_progress("query_overture_maps", 5, f"Counting {t_name}/{t_type} features...")
-        count_sql = (
-            f"SELECT COUNT(*) FROM read_parquet('{s3_path}', hive_partitioning=1) "
-            f"WHERE {' AND '.join(where_clauses)}"
-        )
-        total_count = int(_execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, count_sql, fetch_scalar=True) or 0)
-        if total_count == 0:
-            raise ValueError(f"No Overture features found for theme='{t_name}', type='{t_type}' in bbox {[xmin, ymin, xmax, ymax]}.")
-
-        if total_count <= safe_threshold:
-            _report_progress("query_overture_maps", 30, f"Downloading {min(total_count, safe_limit)} {t_name} features...")
-            copy_query = f"""
-            COPY (
-                SELECT {select_clause}
-                FROM read_parquet('{s3_path}', hive_partitioning=1)
-                WHERE {' AND '.join(where_clauses)}
-                LIMIT {safe_limit}
-            ) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
-            """
-            _execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, copy_query)
-            _report_progress("query_overture_maps", 95, f"Loading {t_name} layer...")
+        if source_mode == "parquet":
+            _query_overture_stac_parquet_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax, release, filter_sql, safe_limit, out_file, fetch_all=fetch_all_flag, page_size=page_size)
+        elif source_mode == "pmtiles":
+            _fetch_overture_pmtiles_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax, release, filter_sql, safe_limit, out_file, fetch_all=fetch_all_flag, page_size=page_size)
         else:
-            n_grid = min(4, max(2, math.ceil(math.sqrt(total_count / safe_threshold))))
-            _report_progress("query_overture_maps", 20, f"Fetching {total_count} {t_name} features in {n_grid}x{n_grid} tiles...")
-            dx = (xmax - xmin) / n_grid
-            dy = (ymax - ymin) / n_grid
-            per_tile_limit = max(100, math.ceil(safe_limit / (n_grid * n_grid)) * 2)
-            filter_extra = f" AND ({filter_sql})" if filter_sql else ""
-
-            tile_stmts = [
-                f"CREATE TEMP TABLE _st_merged AS SELECT {select_clause} FROM read_parquet('{s3_path}', hive_partitioning=1) LIMIT 0;"
-            ]
-            for ix in range(n_grid):
-                tx0 = xmin + ix * dx
-                tx1 = xmax if ix == n_grid - 1 else xmin + (ix + 1) * dx
-                for iy in range(n_grid):
-                    ty0 = ymin + iy * dy
-                    ty1 = ymax if iy == n_grid - 1 else ymin + (iy + 1) * dy
-                    tile_stmts.append(
-                        f"INSERT INTO _st_merged SELECT {select_clause} "
-                        f"FROM read_parquet('{s3_path}', hive_partitioning=1) "
-                        f"WHERE bbox.xmax >= {tx0} AND bbox.xmin <= {tx1} "
-                        f"AND bbox.ymax >= {ty0} AND bbox.ymin <= {ty1}{filter_extra} "
-                        f"LIMIT {per_tile_limit};"
-                    )
-            tile_stmts.append(
-                f"COPY ("
-                f"SELECT * EXCLUDE (_rn) FROM ("
-                f"SELECT *, ROW_NUMBER() OVER (PARTITION BY id) AS _rn FROM _st_merged"
-                f") WHERE _rn = 1 LIMIT {safe_limit}"
-                f") TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');"
-            )
-            _execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, "\n".join(tile_stmts))
+            try:
+                _fetch_overture_pmtiles_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax, release, filter_sql, safe_limit, out_file, fetch_all=fetch_all_flag, page_size=page_size)
+            except Exception as pmt_exc:
+                if "Execution stopped by user" in str(pmt_exc):
+                    raise
+                LOGGER.info(f"Overture PMTiles fallback to STAC Parquet ({t_name}/{t_type}): {pmt_exc}")
+                if os.path.exists(out_file):
+                    try:
+                        os.remove(out_file)
+                    except Exception:
+                        pass
+                _query_overture_stac_parquet_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax, release, filter_sql, safe_limit, out_file, fetch_all=fetch_all_flag, page_size=page_size)
     except ValueError:
         raise
     except Exception as e:
@@ -4783,19 +6965,24 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
                 pass
         if "Execution stopped by user" in str(e):
             raise
+        s3_hint = f"s3://overturemaps-us-west-2/release/{release}/theme={t_name}/type={t_type}/*"
         raise RuntimeError(
             f"Overture Maps query failed for theme='{t_name}', type='{t_type}'. Error: {e}. "
-            f"Tip: If a column or filter fails, adjust parameters or use `query_duckdb_spatial` for custom SQL against '{s3_path}'."
+            f"Tip: If a column or filter fails, adjust parameters or use `query_duckdb_spatial` against '{s3_hint}'."
         ) from e
 
     layer_label = output_name or f"Overture_{t_name.capitalize()}"
     return _load_exported_gpkg_layer(out_file, layer_label, err_prefix="Failed to load Overture data exported")
 
 
-@tool("Execute arbitrary spatial DuckDB queries on remote Parquet, S3, GeoParquet, or local tabular files, and load the result as a QGIS vector layer.",
+@tool("Execute arbitrary spatial DuckDB queries on remote Parquet, S3, GeoParquet, or local tabular files with automatic pagination until complete, and load the result as a QGIS vector layer.",
       {"query": S("string", "DuckDB SQL query returning geometry and attributes"),
-       "layer_name": S("string", "name of resulting layer in QGIS")})
-def query_duckdb_spatial(query, layer_name="DuckDB_Layer"):
+       "layer_name": S("string", "name of resulting layer in QGIS"),
+       "page_size": S("integer", "batch size per paginated iteration (default 2000)"),
+       "fetch_all": S("boolean", "iterate pages until all rows are fetched, treating small trailing LIMIT as page hint (default true)")})
+def query_duckdb_spatial(query, layer_name="DuckDB_Layer", page_size=2000, fetch_all=True):
+    from osgeo import gdal
+
     if CANCEL_REQUESTED:
         raise RuntimeError("Execution stopped by user.")
     try:
@@ -4809,10 +6996,94 @@ def query_duckdb_spatial(query, layer_name="DuckDB_Layer"):
             os.remove(out_file)
         except Exception:
             pass
+    rewritten_query = _rewrite_overture_s3_glob_in_sql(query)
+    base_query = re.sub(r";\s*$", "", rewritten_query.strip())
     out_file_sql = out_file.replace("\\", "/").replace("'", "''")
-    copy_query = f"COPY ({query}) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');"
+
     try:
-        _execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, copy_query)
+        if not fetch_all:
+            copy_query = f"COPY ({base_query}) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');"
+            _execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, copy_query)
+        else:
+            req_ps = max(1, min(int(page_size or 2000), 10000))
+            lim_m = re.search(r"\bLIMIT\s+(\d+)\s*$", base_query, flags=re.IGNORECASE)
+            has_offset = bool(re.search(r"\bOFFSET\s+\d+(?:\s+LIMIT\s+\d+)?\s*$", base_query, flags=re.IGNORECASE))
+            if lim_m and not has_offset:
+                raw_lim = int(lim_m.group(1))
+                base_query = base_query[:lim_m.start()].rstrip()
+                batch_sz = req_ps if req_ps != 2000 else max(200, min(raw_lim, 10000))
+            else:
+                batch_sz = req_ps
+
+            max_total = 250000
+            paged_setup = (
+                "SET s3_region='us-west-2';",
+                "SET geometry_always_xy=true;",
+                "SET memory_limit='512MB';",
+                "SET threads=4;",
+                "SET preserve_insertion_order=true;",
+            )
+            has_order = bool(re.search(r"\bORDER\s+BY\b[^)]*$", base_query, flags=re.IGNORECASE))
+            order_clause = "" if has_order else " ORDER BY ALL"
+            total_cnt = 0
+            target_lyr_name = None
+            page_idx = 0
+
+            while total_cnt < max_total:
+                if CANCEL_REQUESTED:
+                    raise RuntimeError("Execution stopped by user.")
+                page_idx += 1
+                offset = (page_idx - 1) * batch_sz
+                this_lim = min(batch_sz, max_total - total_cnt)
+                page_path = out_file if page_idx == 1 else f"{out_file[:-5]}_p{page_idx}.gpkg"
+                page_sql = page_path.replace("\\", "/").replace("'", "''")
+                copy_query = (
+                    f"COPY (SELECT * FROM ({base_query}) AS _q{order_clause} "
+                    f"LIMIT {this_lim} OFFSET {offset}) TO '{page_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');"
+                )
+                try:
+                    try:
+                        _execute_duckdb_nonblocking(paged_setup, copy_query)
+                    except Exception as ord_exc:
+                        if page_idx == 1 and order_clause and "Execution stopped by user" not in str(ord_exc):
+                            LOGGER.debug(f"DuckDB ORDER BY ALL skipped ({ord_exc}); retrying without ORDER BY ALL")
+                            order_clause = ""
+                            copy_query = (
+                                f"COPY (SELECT * FROM ({base_query}) AS _q "
+                                f"LIMIT {this_lim} OFFSET {offset}) TO '{page_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');"
+                            )
+                            _execute_duckdb_nonblocking(paged_setup, copy_query)
+                        else:
+                            raise
+                    page_cnt = _count_gpkg_features(page_path)
+                    if page_idx == 1:
+                        total_cnt = page_cnt
+                        target_lyr_name = _gpkg_first_layer_name(out_file) or "features"
+                    else:
+                        if page_cnt > 0:
+                            vt_opts = gdal.VectorTranslateOptions(
+                                format="GPKG",
+                                accessMode="append",
+                                layerName=target_lyr_name or "features",
+                            )
+                            res = gdal.VectorTranslate(out_file, page_path, options=vt_opts)
+                            if res is not None:
+                                res = None
+                            total_cnt += page_cnt
+                finally:
+                    if page_idx > 1 and os.path.exists(page_path):
+                        try:
+                            os.remove(page_path)
+                        except Exception:
+                            pass
+
+                _report_progress(
+                    "query_duckdb_spatial",
+                    min(94, 20 + page_idx * 10),
+                    f"Paginating DuckDB batch {page_idx} ({total_cnt:,} features)...",
+                )
+                if page_cnt < this_lim or page_cnt == 0:
+                    break
     except Exception as e:
         if os.path.exists(out_file):
             try:
@@ -4821,7 +7092,7 @@ def query_duckdb_spatial(query, layer_name="DuckDB_Layer"):
                 pass
         if "Execution stopped by user" in str(e):
             raise
-        raise RuntimeError(f"DuckDB spatial query failed. Query: {query}. Error: {e}") from e
+        raise RuntimeError(f"DuckDB spatial query failed. Query: {rewritten_query}. Error: {e}") from e
 
     return _load_exported_gpkg_layer(out_file, layer_name, err_prefix="Failed to load DuckDB spatial query output")
 

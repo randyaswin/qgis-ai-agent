@@ -207,7 +207,9 @@ def categorize_tool(name, args):
         primary = args.get("path") or args.get("query") or ""
     elif name == "query_overture_maps":
         category = "Overture"
-        primary = f"{args.get('theme', 'places')} ({args.get('filter_sql', '')[:25] or 'canvas'})"
+        flt = (args.get("filter_sql") or "").strip()[:25]
+        scope = flt or ("bbox" if args.get("bbox") else "canvas")
+        primary = f"{args.get('theme', 'places')} ({scope})"
     elif name in ("search_stac_items", "load_public_cog", "list_public_geodata_sources"):
         category = "STAC / COG"
         if name == "search_stac_items":
@@ -261,7 +263,7 @@ def format_in_args(args):
         elif isinstance(v, (int, float, bool)):
             parts.append(f"{k}={v}")
         elif isinstance(v, list):
-            parts.append(f"{k}={v[:3]!r}")
+            parts.append(f"{k}={v[:4]!r}" + ("..." if len(v) > 4 else ""))
         else:
             parts.append(f"{k}={str(v)[:30]!r}")
     return "  ".join(parts)
@@ -2886,7 +2888,12 @@ class AgentDock(QDockWidget):
             sys_text += f"\n\n# User custom instructions\n{self.custom_instructions.strip()}"
         live_ctx = self._get_live_context()
         sess_hist = active_sess.format_history_for_prompt() if (active_sess.turns_count > 0 and not cont) else None
-        full = prompts.build(sys_text, live_ctx, skills_txt, user, continuing=cont, session_history=sess_hist)
+        is_vague = bool(
+            not cont
+            and not is_after_clarification
+            and REGISTRY.is_vague_request(user, layer_names=live_layer_names)
+        )
+        full = prompts.build(sys_text, live_ctx, skills_txt, user, continuing=cont, session_history=sess_hist, is_vague=is_vague)
 
         # Explicit CLI Session ID tracking: never rely on global "last"
         cli_sess_id = active_sess.cli_session_id

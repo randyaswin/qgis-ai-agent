@@ -506,6 +506,13 @@ class Registry:
         words = text.split()
         low = text.lower()
 
+        # 0. Structured clarification replies (from clicking interactive chips or explicit key: value params) are ready to execute
+        if re.search(
+            r"\b(metode|sumber\s+data|gaya|layout|fokus|tema|komponen|klasifikasi|bobot|skala|method|data\s+source|style|focus|theme|deliverable|target|crs)\s*:",
+            low,
+        ):
+            return False
+
         # 1. Greetings, test, or generic conversational calls
         greetings = {"halo", "hello", "hi", "hey", "help", "bantuan", "tes", "test", "ping", "p"}
         if low in greetings or (len(words) <= 2 and words[0].lower() in greetings):
@@ -527,7 +534,7 @@ class Registry:
         if len(words) <= 3:
             return True
 
-        # 5. Generic patterns asking for a map without specifics
+        # 5. Generic patterns asking for a map without specifics (including simple "make city map <place>")
         generic_patterns = [
             r"^(make|create|generate|produce|build|draw|render)\s+(a\s+)?(map|layout|atlas)$",
             r"^(buat|buatkan|bikin|bikinkan|tolong buat|tolong buatkan)\s+(peta|layout|atlas)$",
@@ -547,10 +554,12 @@ class Registry:
             or bool(re.search(r"\.(?:tif|tiff|png|jpg|jpeg|webp|pdf|shp|gpkg|geojson|kml|csv|las|laz)\b", low))
         )
         has_project_context = bool(layer_names) or has_attached_file
+        if has_attached_file:
+            return False
 
         # 7. Check for named geographic location / boundary
         has_location = has_project_context or bool(re.search(
-            r"\b(jakarta|bandung|surabaya|semarang|yogyakarta|jogja|bali|sumatera|sumatra|jawa|java|kalimantan|sulawesi|papua|maluku|aceh|medan|palembang|makassar|ntt|ntb|"
+            r"\b(jakarta|bandung|surabaya|semarang|yogyakarta|jogja|malioboro|tugu|bali|sumatera|sumatra|jawa|java|kalimantan|sulawesi|papua|maluku|aceh|medan|palembang|makassar|ntt|ntb|"
             r"indonesia|malaysia|singapore|tokyo|japan|zurich|switzerland|swiss|usa|europe|asia|"
             r"bbox)\b|"
             r"[-+]?\d{1,3}\.\d+.*[-+]?\d{1,3}\.\d+",
@@ -560,20 +569,21 @@ class Registry:
         # 8. Check for specific GIS deliverable / data source / method keywords
         has_specific_theme = bool(re.search(
             r"\b(banjir|flood|genangan|dem|elevasi|elevation|kontur|contour|relief|hillshade|lereng|slope|curah hujan|rainfall|"
-            r"sentinel|landsat|citra|satellite|ndvi|nbr|lst|stac|cog|overture|osm|openstreetmap|"
+            r"sentinel|landsat|citra|satellite|ndvi|nbr|lst|stac|cog|overture|osm|openstreetmap|inarisk|bnpb|bpbd|demnas|bps|worldpop|gadm|hdx|"
             r"kepadatan|density|heatmap|penduduk|population|isochrone|jangkauan|buffer|overlay|network|ahp|"
             r"digitasi|digitiz|georeferen|gcp|grid|fishnet|klasifikasi|classification|lulc|zonasi|rtrw|rdtr|persil|parcel|"
             r"sempadan|kdb|klb|rth|twi|strahler|slr|cleanup|cleaning|topologi|topology|sliver|duplikat|duplicate|"
             r"orthomosaic|drone|uav|lidar|bathymetry|batimetri|watershed|das|kriging|idw|interpolasi|interpolation|"
             r"kesesuaian lahan|tutupan lahan|land use|landcover|fasilitas|rumah sakit|sekolah|poi|jalan|roads|sungai|river|"
-            r"gempa|tsunami|longsor|landslide|karhutla|wildfire|uhi|kekeringan|drought)\b",
+            r"gempa|tsunami|longsor|landslide|karhutla|wildfire|uhi|kekeringan|drought|"
+            r"bento|poster|planning_official|natgeo|infographic|cyberpunk|nautical|editorial_infographic|scientific_dark)\b",
             low
         ))
 
-        is_spatial_action = bool(re.search(r"\b(make|create|generate|build|buat|buatkan|bikin|bikinkan|petakan|tampilkan|hitung|analisis|modelkan|analyze|calculate|peta|map|digitasi|digitize|georeferen|klasifikasi|classify|interpretasi)\b", low))
+        is_spatial_action = bool(re.search(r"\b(make|create|generate|build|draw|design|buat|buatkan|bikin|bikinkan|petakan|tampilkan|hitung|analisis|modelkan|analyze|calculate|peta|map|digitasi|digitize|georeferen|klasifikasi|classify|interpretasi)\b", low))
 
-        # If it asks to create or analyze a map, but lacks either location/context or theme/method, it needs clarification!
-        if is_spatial_action and len(words) <= 8:
+        # Generic city/area/thematic map requests (up to ~20 words) that lack either location or any specific GIS method/source/theme MUST clarify first
+        if is_spatial_action and len(words) <= 20:
             if not has_location or not has_specific_theme:
                 return True
 

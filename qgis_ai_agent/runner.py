@@ -59,7 +59,7 @@ DEFAULT_ADAPTER_MODELS = {
         ("Gemini 4 Hydrogen (High)", "gemini-4-hydrogen-high"),
         ("Gemini 4 Hydrogen (Medium)", "gemini-4-hydrogen-medium"),
         ("Gemini 4 Hydrogen (Low)", "gemini-4-hydrogen-low"),
-        ("Orchestrator (Argon)", "gemini-pro-orchestrator-g1-pro"),
+        ("Agent Orchestration (Argon)", "gemini-pro-orchestrator-g1-pro"),
         ("Gemini 3.8 Flash (High)", "gemini-3.8-flash-high"),
         ("Gemini 3.8 Flash (Medium)", "gemini-3.8-flash-medium"),
         ("Gemini 3.8 Flash (Low)", "gemini-3.8-flash-low"),
@@ -250,6 +250,8 @@ def _discover_agy_models(bin_path, allow_subprocess=True):
                     if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$", m_id):
                         continue
                     m_label = parts[1].strip() if len(parts) > 1 else m_id
+                    if "orchestrator" in m_id.lower() and "agent orchestration" not in m_label.lower():
+                        m_label = f"Agent Orchestration — {m_label}"
                     if not any(m_id == x[1] for x in discovered):
                         discovered.append((m_label, m_id))
                 if discovered:
