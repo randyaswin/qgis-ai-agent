@@ -32,6 +32,7 @@ def _is_deleted(obj):
 class ToolServer(QObject):
     activity = pyqtSignal(str)
     tool_called = pyqtSignal(str, dict)
+    tool_progress = pyqtSignal(str, int, str)
     tool_completed = pyqtSignal(str, object)
     tool_failed = pyqtSignal(str, str)
 
@@ -42,6 +43,10 @@ class ToolServer(QObject):
         self.token = secrets.token_hex(16)
         self.buffers = {}
         self._reading_sockets = set()
+        self._busy = False
+        self._active_sock = None
+        self._disconnect_cancelled = False
+        tools._PROGRESS_CALLBACK = lambda name, pct, msg="": self.tool_progress.emit(str(name), int(pct), str(msg or ""))
 
     def start(self):
         if not self.server.listen(QHostAddress(QHostAddress.SpecialAddress.LocalHost), 0):
@@ -78,7 +83,19 @@ class ToolServer(QObject):
             s = self.server.nextPendingConnection()
             self.buffers[s] = b""
             s.readyRead.connect(lambda s=s: self._on_read(s))
-            s.disconnected.connect(lambda s=s: (self.buffers.pop(s, None), self._reading_sockets.discard(s), s.deleteLater()))
+            s.disconnected.connect(lambda s=s: self._on_disconnect(s))
+
+    def _on_disconnect(self, sock):
+        self.buffers.pop(sock, None)
+        self._reading_sockets.discard(sock)
+        if self._busy and sock is self._active_sock and not tools.CANCEL_REQUESTED:
+            tools.CANCEL_REQUESTED = True
+            self._disconnect_cancelled = True
+        if hasattr(sock, "deleteLater") and not _is_deleted(sock):
+            try:
+                sock.deleteLater()
+            except Exception:
+                pass
 
     def _on_read(self, sock):
         if _is_deleted(sock) or sock not in self.buffers or sock in self._reading_sockets:
@@ -98,15 +115,45 @@ class ToolServer(QObject):
                         pass
                 return
             self.buffers[sock] = cur + chunk
-            while sock in self.buffers and b"\n" in self.buffers[sock]:
-                line, self.buffers[sock] = self.buffers[sock].split(b"\n", 1)
-                if line.strip():
-                    resp_bytes = (json.dumps(self._handle(line)) + "\n").encode("utf-8")
+        finally:
+            self._reading_sockets.discard(sock)
+
+        if not self._busy:
+            self._drain_buffers()
+
+    def _drain_buffers(self):
+        if self._busy:
+            return
+        self._busy = True
+        try:
+            while True:
+                handled_any = False
+                for sock in list(self.buffers.keys()):
+                    buf = self.buffers.get(sock)
+                    if not buf or b"\n" not in buf:
+                        continue
+                    line, rest = buf.split(b"\n", 1)
+                    self.buffers[sock] = rest
+                    if not line.strip():
+                        handled_any = True
+                        continue
+                    handled_any = True
+                    self._active_sock = sock
+                    self._disconnect_cancelled = False
+                    try:
+                        resp_bytes = (json.dumps(self._handle(line)) + "\n").encode("utf-8")
+                    finally:
+                        self._active_sock = None
+                        if self._disconnect_cancelled:
+                            tools.CANCEL_REQUESTED = False
+                            self._disconnect_cancelled = False
                     if sock in self.buffers and not _is_deleted(sock) and sock.isValid():
                         sock.write(resp_bytes)
                         sock.flush()
+                if not handled_any:
+                    break
         finally:
-            self._reading_sockets.discard(sock)
+            self._busy = False
 
     def _handle(self, line):
         try:

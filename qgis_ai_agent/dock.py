@@ -470,7 +470,7 @@ def render_user_message_html(text, attachments=None, timestamp=""):
     )
 
 
-def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_success=True, is_running=False, img_base64=None, duration=None):
+def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_success=True, is_running=False, img_base64=None, duration=None, progress_pct=None, progress_msg=""):
     """Render a sleek vertical timeline tool node matching reference design."""
     t = theme.get_theme()
     is_python = (category == "PyQGIS" or name == "exec_pyqgis" or "python" in name.lower())
@@ -491,7 +491,22 @@ def render_tool_node_html(category, name, primary_arg, in_str, out_str, is_succe
 
     in_val = html.escape(in_str or "()")
     if is_running:
-        if is_python:
+        if progress_pct is not None:
+            pct = max(0, min(100, int(progress_pct)))
+            filled = pct // 10
+            bar = "█" * filled + "░" * (10 - filled)
+            p_label = html.escape(progress_msg or ("Running Python Script..." if is_python else "Executing MCP tool..."))
+            bg = t['tool_running_python_bg'] if is_python else t['tool_running_mcp_bg']
+            bd = t['tool_running_python_border'] if is_python else t['tool_running_mcp_border']
+            fg = t['tool_running_python_text'] if is_python else t['tool_running_mcp_text']
+            out_cell = (
+                f"<div style='background-color: {bg}; border: 1px solid {bd}; "
+                f"border-radius: 4px; padding: 4px 8px; color: {fg}; "
+                f"font-family: monospace; font-size: 10px; line-height: 1.45;'>"
+                f"⏳ <b>{pct}%</b> [{bar}] {p_label}"
+                f"</div>"
+            )
+        elif is_python:
             out_cell = (
                 f"<div style='background-color: {t['tool_running_python_bg']}; border: 1px solid {t['tool_running_python_border']}; "
                 f"border-radius: 4px; padding: 4px 8px; color: {t['tool_running_python_text']}; "
@@ -669,6 +684,7 @@ class AgentDock(QDockWidget):
         self.runner.output.connect(self._on_cli_output)
         self.runner.finished.connect(self._done)
         self.server.tool_called.connect(self._on_tool_called)
+        self.server.tool_progress.connect(self._on_tool_progress)
         self.server.tool_completed.connect(self._on_tool_completed)
         self.server.tool_failed.connect(self._on_tool_failed)
 
@@ -1935,10 +1951,16 @@ class AgentDock(QDockWidget):
                 return getattr(self, "_thinking_probe_val", "")
 
             now_wall = time.time()
+            turn_start = getattr(self, "start_time", 0) or (now_wall - 60.0)
+            min_mtime = max(turn_start - 2.0, now_wall - 400.0)
+
+            proj_workspace = self.session_manager.get_workspace_dir(active_sess.id)
+            cli_id = getattr(self, "_active_cli_conv_id", None) or active_sess.detect_and_store_cli_session_id(proj_workspace, active_sess.cli)
+
             cached_info = getattr(self, "_thinking_file_cache", None)
             if cached_info and cached_info[0] == cache_key:
                 cpath = cached_info[1]
-                if os.path.exists(cpath) and (now_wall - os.path.getmtime(cpath) < 400):
+                if os.path.exists(cpath) and os.path.getmtime(cpath) >= min_mtime:
                     th = _extract_thinking_from_jsonl(cpath)
                     self._thinking_probe_key = cache_key
                     self._thinking_probe_at = now_mono
@@ -1946,36 +1968,34 @@ class AgentDock(QDockWidget):
                     if th or (now_mono - getattr(self, "_thinking_scan_at", 0.0)) < 15.0:
                         return th
 
-            proj_workspace = self.session_manager.get_workspace_dir(active_sess.id)
-            cli_id = getattr(self, "_active_cli_conv_id", None) or active_sess.detect_and_store_cli_session_id(proj_workspace, active_sess.cli)
             self._thinking_scan_at = now_mono
 
-            # 1. Antigravity CLI transcript (cross-platform discovery, tail read only)
+            # 1. Antigravity CLI transcript (strictly scoped to cli_id when known, or modified after turn_start)
             candidate_files = []
             candidate_brain_dirs = []
             if cli_id:
                 for parent_dir in paths.get_candidate_cli_dirs("agy"):
                     candidate_brain_dirs.append(os.path.join(parent_dir, "brain", cli_id))
-
-            for parent_dir in paths.get_candidate_cli_dirs("agy"):
-                b_parent = os.path.join(parent_dir, "brain")
-                if os.path.isdir(b_parent):
-                    try:
-                        subdirs = sorted(
-                            [e.path for e in os.scandir(b_parent) if e.is_dir()],
-                            key=lambda p: os.path.getmtime(p),
-                            reverse=True,
-                        )
-                    except OSError:
-                        subdirs = []
-                    for sd in subdirs[:4]:
-                        if sd not in candidate_brain_dirs:
-                            candidate_brain_dirs.append(sd)
+            else:
+                for parent_dir in paths.get_candidate_cli_dirs("agy"):
+                    b_parent = os.path.join(parent_dir, "brain")
+                    if os.path.isdir(b_parent):
+                        try:
+                            subdirs = sorted(
+                                [e.path for e in os.scandir(b_parent) if e.is_dir()],
+                                key=lambda p: os.path.getmtime(p),
+                                reverse=True,
+                            )
+                        except OSError:
+                            subdirs = []
+                        for sd in subdirs[:4]:
+                            if sd not in candidate_brain_dirs:
+                                candidate_brain_dirs.append(sd)
 
             for b_dir in candidate_brain_dirs:
                 for tname in ("transcript.jsonl", "transcript_full.jsonl"):
                     tp = os.path.join(b_dir, ".system_generated", "logs", tname)
-                    if os.path.exists(tp) and (now_wall - os.path.getmtime(tp) < 400):
+                    if os.path.exists(tp) and os.path.getmtime(tp) >= min_mtime:
                         candidate_files.append(tp)
 
             # 2. Claude Code projects transcript (bounded scandir instead of recursive glob)
@@ -1989,23 +2009,26 @@ class AgentDock(QDockWidget):
                     sp = os.path.join(proj_base, slug)
                     if os.path.isdir(sp):
                         claude_dirs_to_scan.append(sp)
-                try:
-                    recent_dirs = sorted(
-                        [e.path for e in os.scandir(proj_base) if e.is_dir()],
-                        key=lambda p: os.path.getmtime(p),
-                        reverse=True,
-                    )
-                    for rd in recent_dirs[:6]:
-                        if rd not in claude_dirs_to_scan:
-                            claude_dirs_to_scan.append(rd)
-                except OSError:
-                    pass
+                if not cli_id and not claude_dirs_to_scan:
+                    try:
+                        recent_dirs = sorted(
+                            [e.path for e in os.scandir(proj_base) if e.is_dir()],
+                            key=lambda p: os.path.getmtime(p),
+                            reverse=True,
+                        )
+                        for rd in recent_dirs[:4]:
+                            if rd not in claude_dirs_to_scan:
+                                claude_dirs_to_scan.append(rd)
+                    except OSError:
+                        pass
 
             for sp in claude_dirs_to_scan:
                 try:
                     for entry in os.scandir(sp):
                         if entry.is_file() and entry.name.endswith(".jsonl"):
-                            if now_wall - entry.stat().st_mtime < 400:
+                            if cli_id and cli_id not in entry.name:
+                                continue
+                            if entry.stat().st_mtime >= min_mtime:
                                 candidate_files.append(entry.path)
                 except OSError:
                     pass
@@ -2420,6 +2443,26 @@ class AgentDock(QDockWidget):
 
         self._repaint_log()
 
+    def _on_tool_progress(self, name, pct, msg=""):
+        if not self._active_tool_pos or self._active_running_tool != name:
+            return
+        cat = self._last_tool_call.get("category", "QGIS")
+        prim = self._last_tool_call.get("primary", "")
+        in_str = self._last_tool_call.get("in_str", "")
+        prog_html = render_tool_node_html(
+            cat, name, prim, in_str, "", is_success=True, is_running=True,
+            progress_pct=pct, progress_msg=msg
+        )
+        start_pos, end_pos = self._active_tool_pos
+        c = self.log.textCursor()
+        c.setPosition(start_pos)
+        c.setPosition(end_pos, QTextCursor.MoveMode.KeepAnchor)
+        c.removeSelectedText()
+        c.insertHtml(prog_html)
+        c.insertBlock()
+        self._active_tool_pos = (start_pos, c.position())
+        self._repaint_log()
+
     def _on_tool_completed(self, name, result):
         clean_summary = format_out_result(name, result)
         cat = self._last_tool_call.get("category", "QGIS")
@@ -2729,12 +2772,16 @@ class AgentDock(QDockWidget):
         outdir = self.outdir.text().strip() or paths.get_default_output_dir()
         os.makedirs(outdir, exist_ok=True)
         active_sess = self.session_manager.get_active_session()
-        cont = self.cont.isChecked() and (not self.first_turn or active_sess.turns_count > 0)
+        self._running_session_id = active_sess.id
+        cont = self.cont.isChecked() and (not self.first_turn or active_sess.turns_count > 0 or bool(active_sess.cli_session_id))
         self.start_time = time.time()
         self.is_agent_streaming = False
         self._current_assistant_text = ""
         self._has_mcp_call_in_turn = False
         self._last_finalized_thinking_html = None
+        self._thinking_file_cache = None
+        self._thinking_probe_key = None
+        self._thinking_probe_val = ""
         self._cli_line_buffer = ""
         self._active_cli_conv_id = None
         self._active_internal_tools = {}
@@ -2970,8 +3017,14 @@ class AgentDock(QDockWidget):
         status_color = "#10b981" if code == 0 else "#ef4444"
         now_str = time.strftime("%H:%M:%S")
 
-        # Record assistant response and persist sessions
-        active_sess = self.session_manager.get_active_session()
+        # Record assistant response and persist to the exact session that started this turn
+        running_sid = getattr(self, "_running_session_id", None)
+        self._running_session_id = None
+        active_sess = (
+            self.session_manager.sessions.get(running_sid)
+            if running_sid
+            else None
+        ) or self.session_manager.get_active_session()
 
         # Detect and store the exact CLI conversation ID
         try:

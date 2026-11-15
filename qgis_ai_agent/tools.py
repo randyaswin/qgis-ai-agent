@@ -15,13 +15,15 @@ import logging
 import math
 import os
 import random
+import re
 import tempfile
+import threading
 import time
 import traceback
 from . import paths
 
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import QSize, QBuffer, QIODevice, Qt
+from qgis.PyQt.QtCore import QCoreApplication, QSize, QBuffer, QIODevice, Qt
 from qgis.PyQt.QtGui import QColor, QFont, QImage
 from qgis.core import (
     Qgis, QgsProject, QgsVectorLayer, QgsRasterLayer, QgsCoordinateReferenceSystem,
@@ -75,6 +77,17 @@ LOGGER = _PluginLogger()
 TOOLS = {}
 ALLOW_PYTHON = {"value": True}
 CANCEL_REQUESTED = False
+_PROGRESS_CALLBACK = None
+
+
+def _report_progress(tool_name, pct, msg=""):
+    cb = _PROGRESS_CALLBACK
+    if cb is not None:
+        try:
+            clamped = max(0, min(100, int(pct)))
+            cb(tool_name, clamped, msg)
+        except Exception:
+            pass
 
 
 def tool(description, schema=None):
@@ -1792,9 +1805,19 @@ def describe_algorithm(algorithm):
 class _CancelableFeedback(QgsProcessingFeedback):
     """Processing feedback that honours user stop requests promptly."""
 
+    def __init__(self, tool_name="run_processing", label=""):
+        super().__init__()
+        self._tool_name = tool_name
+        self._label = label
+        self._last_pct = -1
+
     def setProgress(self, progress):
         if CANCEL_REQUESTED:
             self.cancel()
+        pct = int(progress or 0)
+        if pct != self._last_pct and (pct == 0 or pct >= 100 or abs(pct - self._last_pct) >= 5):
+            self._last_pct = pct
+            _report_progress(self._tool_name, pct, self._label)
         super().setProgress(progress)
 
 
@@ -1812,7 +1835,8 @@ def run_processing(algorithm, params, load=True, output_name=None):
     a = QgsApplication.processingRegistry().algorithmById(algorithm)
     if a and "OUTPUT" in [o.name() for o in a.outputDefinitions()]:
         params.setdefault("OUTPUT", "TEMPORARY_OUTPUT")
-    feedback = _CancelableFeedback()
+    feedback = _CancelableFeedback(tool_name="run_processing", label=f"Processing {algorithm}...")
+    _report_progress("run_processing", 0, f"Starting {algorithm}...")
     before = set(QgsProject.instance().mapLayers())
     res = processing.runAndLoadResults(algorithm, params, feedback=feedback) if load else processing.run(algorithm, params, feedback=feedback)
     _sanitize_canvas_extent()
@@ -4220,12 +4244,18 @@ def load_skill(name, reference=None):
 
 
 # ---------------------------------------------------------------- public geodata (COG, STAC, Overture, DuckDB)
-@tool("List curated 100% free, keyless public geospatial data sources: Overture Maps (buildings, places, roads), STAC APIs (Earth Search Sentinel-2/Landsat), Copernicus DEM GLO-30 COGs, ESA WorldCover, and WorldPop.")
+@tool("List curated 100% free, keyless public geospatial data sources: Overture Maps, STAC APIs (Earth Search, Planetary Computer, USGS, NASA), COGs (Copernicus DEM, Sentinel-2, ESA WorldCover, WorldPop), OSM Overpass/Nominatim, geoBoundaries, Natural Earth, USGS Earthquakes, NASA EONET, and XYZ basemaps.")
 def list_public_geodata_sources():
     return {
         "overture_maps": {
-            "description": "Global open map features from Overture Maps Foundation (Meta, Microsoft, Amazon, TomTom) queried directly over S3 parquet with zero API keys.",
-            "themes": ["places", "buildings", "transportation", "base", "divisions"],
+            "description": "Global open map features from Overture Maps Foundation (Meta, Microsoft, Amazon, TomTom) queried directly over S3 parquet with zero API keys (auto-tiled when count > tile_threshold).",
+            "themes": {
+                "places": ["place"],
+                "buildings": ["building"],
+                "transportation": ["segment", "connector"],
+                "base": ["water", "land", "land_use", "land_cover", "infrastructure", "bathymetry"],
+                "divisions": ["division", "division_area", "division_boundary"],
+            },
             "tool": "query_overture_maps"
         },
         "stac_apis": [
@@ -4233,12 +4263,25 @@ def list_public_geodata_sources():
                 "name": "Earth Search by Element84",
                 "url": "https://earth-search.aws.element84.com/v1",
                 "auth": "None (100% Free Public)",
-                "collections": ["sentinel-2-l2a", "cop-dem-glo-30", "cop-dem-glo-90", "landsat-c2-l2", "naip"]
+                "collections": ["sentinel-2-l2a", "sentinel-2-c1-l2a", "sentinel-1-grd", "cop-dem-glo-30", "cop-dem-glo-90", "landsat-c2-l2", "naip"]
             },
             {
                 "name": "Microsoft Planetary Computer",
                 "url": "https://planetarycomputer.microsoft.com/api/stac/v1",
-                "auth": "Public open search (no key required for metadata & open assets)"
+                "auth": "Public open search (no key required for metadata & open assets)",
+                "collections": ["sentinel-2-l2a", "landsat-c2-l2", "cop-dem-glo-30", "esa-worldcover", "nasadem", "alos-dem", "io-lulc-annual-v02", "modis-13Q1-061"]
+            },
+            {
+                "name": "USGS LandsatLook STAC",
+                "url": "https://landsatlook.usgs.gov/stac-server",
+                "auth": "None (Public USGS catalog)",
+                "collections": ["landsat-c2l2-sr", "landsat-c2l2-st"]
+            },
+            {
+                "name": "NASA CMR-STAC (LPCLOUD)",
+                "url": "https://cmr.earthdata.nasa.gov/stac/LPCLOUD",
+                "auth": "Public search (Harmonized Landsat Sentinel-2)",
+                "collections": ["HLSL30.v2.0", "HLSS30.v2.0"]
             }
         ],
         "public_cogs": {
@@ -4256,7 +4299,139 @@ def list_public_geodata_sources():
                 "name": "ESA WorldCover 10m",
                 "description": "Global 10-meter land cover map based on Sentinel-1 and Sentinel-2.",
                 "s3_path": "s3://esa-worldcover/v200/2021/map/"
+            },
+            "nasadem": {
+                "name": "NASA DEM 30m",
+                "description": "Reprocessed SRTM 30m global elevation model.",
+                "stac_collection": "nasadem"
+            },
+            "io_lulc_annual": {
+                "name": "Impact Observatory / Esri 10m Annual LULC",
+                "description": "Global 10m annual land use / land cover time series.",
+                "stac_collection": "io-lulc-annual-v02"
+            },
+            "worldpop_1km": {
+                "name": "WorldPop Global Population 1km",
+                "description": "UN-adjusted global population density raster (1km COG/GeoTIFF).",
+                "url": "https://data.worldpop.org/GIS/Population/Global_2000_2020_1km_UNadj/2020/0_Mosaicked/ppp_2020_1km_Aggregated.tif"
             }
+        },
+        "vector_and_boundaries": {
+            "osm_overpass": {
+                "name": "OpenStreetMap Overpass API",
+                "url": "https://overpass-api.de/api/interpreter",
+                "description": "Live OSM vector features (roads, POIs, buildings, waterways, admin boundaries) via Overpass QL."
+            },
+            "osm_nominatim": {
+                "name": "OpenStreetMap Nominatim Geocoding",
+                "url": "https://nominatim.openstreetmap.org/search?format=json&q={query}",
+                "description": "Free geocoding and bounding boxes for cities, districts, and landmarks."
+            },
+            "geoboundaries": {
+                "name": "geoBoundaries Open Administrative Boundaries",
+                "url": "https://www.geoboundaries.org/api/current/gbOpen/{ISO3}/{ADM0|ADM1|ADM2|ADM3}/",
+                "description": "Global open administrative boundaries (GeoJSON) from country to district/sub-district."
+            },
+            "natural_earth": {
+                "name": "Natural Earth Vector (GeoJSON)",
+                "url": "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/",
+                "description": "Global coastlines, countries, rivers, lakes, and populated places at 10m/50m/110m scales."
+            }
+        },
+        "hazards_and_environment": {
+            "usgs_earthquakes": {
+                "name": "USGS Earthquake Catalog (GeoJSON)",
+                "url": "https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson",
+                "description": "Real-time and historical global earthquake events."
+            },
+            "nasa_eonet": {
+                "name": "NASA EONET Natural Events (GeoJSON)",
+                "url": "https://eonet.gsfc.nasa.gov/api/v3/events/geojson",
+                "description": "Real-time natural hazards (wildfires, volcanoes, severe storms, floods)."
+            },
+            "open_meteo_elevation": {
+                "name": "Open-Meteo Elevation & Weather API",
+                "url": "https://api.open-meteo.com/v1/elevation",
+                "description": "Free keyless point elevation and weather/climate forecasts."
+            }
+        },
+        "hydrology_and_water": {
+            "jrc_global_surface_water": {
+                "name": "JRC Global Surface Water 30m",
+                "url": "https://global-surface-water.appspot.com/",
+                "stac_collection": "jrc-gsw",
+                "description": "Global 30m surface water occurrence, seasonality, and change."
+            },
+            "hydrosheds": {
+                "name": "HydroSHEDS / HydroBASINS / HydroRIVERS",
+                "url": "https://www.hydrosheds.org/products",
+                "description": "Global watershed boundaries, river networks, and flow accumulation."
+            }
+        },
+        "soil_climate_and_terrain": {
+            "isric_soilgrids": {
+                "name": "ISRIC SoilGrids 2.0 (250m COG)",
+                "url": "https://files.isric.org/soilgrids/latest/data/",
+                "description": "Global 250m soil organic carbon, pH, clay/sand/silt, nitrogen, and bulk density."
+            },
+            "openlandmap": {
+                "name": "OpenLandMap Global Environmental COGs",
+                "url": "https://s3.openlandmap.org/",
+                "description": "Global 250m–1km soil, terrain, and biome Cloud-Optimized GeoTIFFs."
+            },
+            "chirps_rainfall": {
+                "name": "CHIRPS v2.0 Global Precipitation",
+                "url": "https://data.chc.ucsb.edu/products/CHIRPS-2.0/",
+                "description": "Quasi-global daily, monthly, and annual rainfall GeoTIFF/COG datasets."
+            },
+            "worldclim": {
+                "name": "WorldClim v2.1 Bioclimatic Variables",
+                "url": "https://www.worldclim.org/data/worldclim21.html",
+                "description": "Global historical and future bioclimatic rasters (19 vars, temp, precip)."
+            },
+            "gebco_bathymetry": {
+                "name": "GEBCO Global Bathymetry & Elevation",
+                "url": "https://www.gebco.net/data_and_products/gridded_bathymetry_data/",
+                "description": "Global ocean bathymetry and land topography grid."
+            }
+        },
+        "forests_and_biodiversity": {
+            "hansen_gfc": {
+                "name": "Hansen Global Forest Change 30m",
+                "url": "https://storage.googleapis.com/earthenginepartners-hansen/GFC-2023-v1.11/",
+                "description": "Global 30m tree canopy cover, annual forest loss, and gain."
+            },
+            "gbif_occurrences": {
+                "name": "GBIF Global Biodiversity Occurrence API",
+                "url": "https://api.gbif.org/v1/occurrence/search",
+                "description": "Global species occurrence records (keyless REST API)."
+            },
+            "protected_planet_wdpa": {
+                "name": "Protected Planet (WDPA)",
+                "url": "https://www.protectedplanet.net/",
+                "description": "World Database on Protected Areas."
+            }
+        },
+        "urban_and_nighttime": {
+            "ghsl": {
+                "name": "Copernicus Global Human Settlement Layer (GHSL)",
+                "url": "https://human-settlement.emergency.copernicus.eu/download.php",
+                "description": "Global built-up surface, population grid, and urban centre boundaries."
+            },
+            "ms_global_buildings": {
+                "name": "Microsoft Global ML Building Footprints",
+                "url": "https://minedbuildings.z5.web.core.windows.net/global-buildings/dataset-links.csv",
+                "description": "Global AI-derived building footprints (also queried via Overture buildings)."
+            },
+            "viirs_nighttime_lights": {
+                "name": "VIIRS Black Marble / Nighttime Lights",
+                "url": "https://eogdata.mines.edu/products/vnl/",
+                "description": "Global annual and monthly nighttime radiance rasters."
+            }
+        },
+        "basemaps_xyz": {
+            "tool": "add_basemap",
+            "presets": ["osm", "carto_light", "carto_dark", "esri_imagery", "esri_topo", "opentopomap"]
         }
     }
 
@@ -4336,27 +4511,153 @@ def load_public_cog(url, name=None):
     return _layer_info(lyr)
 
 
+_DUCKDB_SESSION_SQL = (
+    "SET s3_region='us-west-2';",
+    "SET geometry_always_xy=true;",
+    "SET memory_limit='512MB';",
+    "SET threads=4;",
+    "SET preserve_insertion_order=false;",
+)
+
+
+def _execute_duckdb_nonblocking(setup_sql_list, copy_query, fetch_scalar=False):
+    """Execute DuckDB SQL on a worker thread while keeping Qt events responsive and cancellable."""
+    try:
+        import duckdb
+    except ImportError:
+        raise RuntimeError("duckdb is required for DuckDB spatial queries. Install it in your Python environment with: pip install duckdb")
+
+    err_holder = [None]
+    res_holder = [None]
+    con_holder = [None]
+    con_lock = threading.Lock()
+    interrupted = [False]
+
+    def _worker():
+        con = None
+        try:
+            con = duckdb.connect()
+            with con_lock:
+                con_holder[0] = con
+            if CANCEL_REQUESTED:
+                return
+            home_dir_sql = paths.get_home_dir().replace("\\", "/").replace("'", "''")
+            con.execute(f"SET home_directory='{home_dir_sql}';")
+            try:
+                con.execute("LOAD spatial; LOAD httpfs;")
+            except Exception:
+                con.execute("INSTALL spatial; LOAD spatial; INSTALL httpfs; LOAD httpfs;")
+            for sql in (setup_sql_list or ()):
+                if CANCEL_REQUESTED:
+                    return
+                con.execute(sql)
+            if CANCEL_REQUESTED:
+                return
+            if fetch_scalar:
+                row = con.execute(copy_query).fetchone()
+                res_holder[0] = row[0] if row else 0
+            else:
+                con.execute(copy_query)
+        except Exception as exc:
+            err_holder[0] = exc
+        finally:
+            with con_lock:
+                active = con_holder[0]
+                con_holder[0] = None
+            if active is not None:
+                try:
+                    active.close()
+                except Exception:
+                    pass
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+    while worker.is_alive():
+        if CANCEL_REQUESTED and not interrupted[0]:
+            interrupted[0] = True
+            with con_lock:
+                active_con = con_holder[0]
+                if active_con is not None and hasattr(active_con, "interrupt"):
+                    try:
+                        active_con.interrupt()
+                    except Exception:
+                        pass
+        try:
+            QCoreApplication.processEvents()
+        except Exception:
+            pass
+        worker.join(timeout=0.03)
+
+    if CANCEL_REQUESTED or interrupted[0]:
+        raise RuntimeError("Execution stopped by user.")
+    if err_holder[0] is not None:
+        raise err_holder[0]
+    return res_holder[0]
+
+
+def _load_exported_gpkg_layer(out_file, layer_label, err_prefix="Failed to load exported data"):
+    """Load an exported GeoPackage vector layer into QGIS and update canvas extent safely."""
+    lyr = QgsVectorLayer(out_file, layer_label, "ogr")
+    if not lyr.isValid():
+        raise ValueError(f"{err_prefix} from {out_file}")
+    p = QgsProject.instance()
+    is_first = len([l for l in p.mapLayers().values() if l.providerType() != "wms"]) == 0
+    p.addMapLayer(lyr)
+    if is_first and _is_valid_extent(lyr.extent()):
+        safe_ext = _safe_transform_extent(lyr.extent(), lyr.crs(), p.crs(), p)
+        if safe_ext:
+            c = _canvas()
+            if c:
+                safe_ext.scale(1.05)
+                c.setExtent(safe_ext)
+                c.refresh()
+    else:
+        _sanitize_canvas_extent()
+    return _layer_info(lyr)
+
+
 @tool("Query Overture Maps Foundation open data (buildings, places/POI, transportation/roads, water) directly from S3 parquet using DuckDB and load it into QGIS.",
       {"theme": S("string", "'places' | 'buildings' | 'transportation' | 'base' | 'divisions' (default 'places')"),
        "type": S("string", "optional subtype: 'place', 'building', 'segment', 'water' (auto-selected if omitted)"),
        "bbox": S("array", "optional [xmin, ymin, xmax, ymax] in WGS84 (default: current map canvas extent)"),
        "filter_sql": S("string", "optional SQL condition, e.g. \"taxonomy.primary = 'restaurant'\" or \"names.primary ILIKE '%hotel%'\""),
        "limit": S("integer", "max features to fetch, default 500"),
-       "output_name": S("string", "layer name in QGIS, default e.g. 'Overture_Places'")})
-def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, limit=500, output_name=None):
+       "output_name": S("string", "layer name in QGIS, default e.g. 'Overture_Places'"),
+       "tile_threshold": S("integer", "geometry count threshold above which query automatically splits into tiles (default 2000)")})
+def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, limit=500, output_name=None, layer_name=None, tile_threshold=2000):
     if CANCEL_REQUESTED:
         raise RuntimeError("Execution stopped by user.")
     try:
-        import duckdb
+        import duckdb  # noqa: F401
     except ImportError:
         raise RuntimeError("duckdb is required to query Overture Maps. Install it in your Python environment with: pip install duckdb")
-    import time as _time
+
+    output_name = output_name or layer_name
     default_types = {
         "places": "place", "buildings": "building", "transportation": "segment",
         "base": "water", "divisions": "division"
     }
-    t_name = theme.lower()
-    t_type = (type or default_types.get(t_name, t_name)).lower()
+    t_name = (theme or "places").strip().lower()
+    req_type = type.strip().lower() if isinstance(type, str) and type.strip() else None
+    if t_name in ("water", "land", "land_use", "land_cover", "infrastructure", "bathymetry"):
+        t_type = req_type or t_name
+        t_name = "base"
+    elif t_name in ("roads", "road", "segment", "connector", "segments", "connectors"):
+        t_type = req_type or ("connector" if "connect" in t_name else "segment")
+        t_name = "transportation"
+    elif t_name in ("poi", "pois", "place"):
+        t_type = req_type or "place"
+        t_name = "places"
+    elif t_name in ("building",):
+        t_type = req_type or "building"
+        t_name = "buildings"
+    else:
+        t_type = req_type or default_types.get(t_name, t_name)
+
+    if filter_sql and t_name == "places":
+        filter_sql = re.sub(r"\bcategories\.primary\b", "taxonomy.primary", filter_sql, flags=re.IGNORECASE)
+        filter_sql = re.sub(r"\bcategories\.alternate\b", "taxonomy.alternates", filter_sql, flags=re.IGNORECASE)
+        filter_sql = re.sub(r"\bcategories\.", "taxonomy.", filter_sql, flags=re.IGNORECASE)
 
     if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
         p = QgsProject.instance()
@@ -4400,128 +4701,129 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
         select_clause = "id, subtype, geometry"
 
     where_clauses = [
-        f"bbox.xmin >= {xmin} AND bbox.xmax <= {xmax}",
-        f"bbox.ymin >= {ymin} AND bbox.ymax <= {ymax}"
+        f"bbox.xmax >= {xmin} AND bbox.xmin <= {xmax}",
+        f"bbox.ymax >= {ymin} AND bbox.ymin <= {ymax}"
     ]
     if filter_sql:
         where_clauses.append(f"({filter_sql})")
 
     _cleanup_old_temp_files()
     safe_limit = max(1, min(int(limit or 500), 25000))
-    out_file = os.path.join(tempfile.gettempdir(), f"overture_{t_name}_{int(_time.time())}.gpkg")
+    safe_threshold = max(200, min(int(tile_threshold or 2000), 25000))
+    out_file = os.path.join(tempfile.gettempdir(), f"overture_{t_name}_{t_type}_{int(time.time() * 1000)}.gpkg")
     if os.path.exists(out_file):
         try:
             os.remove(out_file)
         except Exception:
             pass
     s3_path = f"s3://overturemaps-us-west-2/release/2026-10-21.0/theme={t_name}/type={t_type}/*"
-
-    home_dir_sql = paths.get_home_dir().replace("\\", "/").replace("'", "''")
     out_file_sql = out_file.replace("\\", "/").replace("'", "''")
-    con = duckdb.connect()
-    try:
-        con.execute(f"SET home_directory='{home_dir_sql}';")
-        con.execute("INSTALL spatial; LOAD spatial; INSTALL httpfs; LOAD httpfs;")
-        con.execute("SET s3_region='us-west-2';")
-        con.execute("SET geometry_always_xy=true;")
-        con.execute("SET memory_limit='512MB';")
-        con.execute("SET threads=2;")
-        con.execute("SET preserve_insertion_order=false;")
 
-        copy_query = f"""
-        COPY (
-            SELECT {select_clause}
-            FROM read_parquet('{s3_path}', hive_partitioning=1)
-            WHERE {' AND '.join(where_clauses)}
-            LIMIT {safe_limit}
-        ) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
-        """
-        con.execute(copy_query)
+    try:
+        _report_progress("query_overture_maps", 5, f"Counting {t_name}/{t_type} features...")
+        count_sql = (
+            f"SELECT COUNT(*) FROM read_parquet('{s3_path}', hive_partitioning=1) "
+            f"WHERE {' AND '.join(where_clauses)}"
+        )
+        total_count = int(_execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, count_sql, fetch_scalar=True) or 0)
+        if total_count == 0:
+            raise ValueError(f"No Overture features found for theme='{t_name}', type='{t_type}' in bbox {[xmin, ymin, xmax, ymax]}.")
+
+        if total_count <= safe_threshold:
+            _report_progress("query_overture_maps", 30, f"Downloading {min(total_count, safe_limit)} {t_name} features...")
+            copy_query = f"""
+            COPY (
+                SELECT {select_clause}
+                FROM read_parquet('{s3_path}', hive_partitioning=1)
+                WHERE {' AND '.join(where_clauses)}
+                LIMIT {safe_limit}
+            ) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
+            """
+            _execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, copy_query)
+            _report_progress("query_overture_maps", 95, f"Loading {t_name} layer...")
+        else:
+            n_grid = min(4, max(2, math.ceil(math.sqrt(total_count / safe_threshold))))
+            _report_progress("query_overture_maps", 20, f"Fetching {total_count} {t_name} features in {n_grid}x{n_grid} tiles...")
+            dx = (xmax - xmin) / n_grid
+            dy = (ymax - ymin) / n_grid
+            per_tile_limit = max(100, math.ceil(safe_limit / (n_grid * n_grid)) * 2)
+            filter_extra = f" AND ({filter_sql})" if filter_sql else ""
+
+            tile_stmts = [
+                f"CREATE TEMP TABLE _st_merged AS SELECT {select_clause} FROM read_parquet('{s3_path}', hive_partitioning=1) LIMIT 0;"
+            ]
+            for ix in range(n_grid):
+                tx0 = xmin + ix * dx
+                tx1 = xmax if ix == n_grid - 1 else xmin + (ix + 1) * dx
+                for iy in range(n_grid):
+                    ty0 = ymin + iy * dy
+                    ty1 = ymax if iy == n_grid - 1 else ymin + (iy + 1) * dy
+                    tile_stmts.append(
+                        f"INSERT INTO _st_merged SELECT {select_clause} "
+                        f"FROM read_parquet('{s3_path}', hive_partitioning=1) "
+                        f"WHERE bbox.xmax >= {tx0} AND bbox.xmin <= {tx1} "
+                        f"AND bbox.ymax >= {ty0} AND bbox.ymin <= {ty1}{filter_extra} "
+                        f"LIMIT {per_tile_limit};"
+                    )
+            tile_stmts.append(
+                f"COPY ("
+                f"SELECT * EXCLUDE (_rn) FROM ("
+                f"SELECT *, ROW_NUMBER() OVER (PARTITION BY id) AS _rn FROM _st_merged"
+                f") WHERE _rn = 1 LIMIT {safe_limit}"
+                f") TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');"
+            )
+            _execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, "\n".join(tile_stmts))
+    except ValueError:
+        raise
     except Exception as e:
+        if os.path.exists(out_file):
+            try:
+                os.remove(out_file)
+            except Exception:
+                pass
+        if "Execution stopped by user" in str(e):
+            raise
         raise RuntimeError(
             f"Overture Maps query failed for theme='{t_name}', type='{t_type}'. Error: {e}. "
             f"Tip: If a column or filter fails, adjust parameters or use `query_duckdb_spatial` for custom SQL against '{s3_path}'."
         ) from e
-    finally:
-        try:
-            con.close()
-        except Exception:
-            pass
 
     layer_label = output_name or f"Overture_{t_name.capitalize()}"
-    lyr = QgsVectorLayer(out_file, layer_label, "ogr")
-    if not lyr.isValid():
-        raise ValueError(f"Failed to load Overture data exported to {out_file}")
-    p = QgsProject.instance()
-    is_first = len([l for l in p.mapLayers().values() if l.providerType() != "wms"]) == 0
-    p.addMapLayer(lyr)
-    if is_first and _is_valid_extent(lyr.extent()):
-        safe_ext = _safe_transform_extent(lyr.extent(), lyr.crs(), p.crs(), p)
-        if safe_ext:
-            c = _canvas()
-            if c:
-                safe_ext.scale(1.05)
-                c.setExtent(safe_ext)
-                c.refresh()
-    else:
-        _sanitize_canvas_extent()
-    return _layer_info(lyr)
+    return _load_exported_gpkg_layer(out_file, layer_label, err_prefix="Failed to load Overture data exported")
 
 
 @tool("Execute arbitrary spatial DuckDB queries on remote Parquet, S3, GeoParquet, or local tabular files, and load the result as a QGIS vector layer.",
       {"query": S("string", "DuckDB SQL query returning geometry and attributes"),
        "layer_name": S("string", "name of resulting layer in QGIS")})
 def query_duckdb_spatial(query, layer_name="DuckDB_Layer"):
+    if CANCEL_REQUESTED:
+        raise RuntimeError("Execution stopped by user.")
     try:
-        import duckdb
+        import duckdb  # noqa: F401
     except ImportError:
         raise RuntimeError("duckdb is required for DuckDB spatial queries. Install it in your Python environment with: pip install duckdb")
     _cleanup_old_temp_files()
-    out_file = os.path.join(tempfile.gettempdir(), f"duckdb_result_{int(time.time())}.gpkg")
+    out_file = os.path.join(tempfile.gettempdir(), f"duckdb_result_{int(time.time() * 1000)}.gpkg")
     if os.path.exists(out_file):
         try:
             os.remove(out_file)
         except Exception:
             pass
-    home_dir_sql = paths.get_home_dir().replace("\\", "/").replace("'", "''")
     out_file_sql = out_file.replace("\\", "/").replace("'", "''")
-    con = duckdb.connect()
+    copy_query = f"COPY ({query}) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');"
     try:
-        con.execute(f"SET home_directory='{home_dir_sql}';")
-        con.execute("INSTALL spatial; LOAD spatial; INSTALL httpfs; LOAD httpfs;")
-        con.execute("SET s3_region='us-west-2';")
-        con.execute("SET geometry_always_xy=true;")
-        con.execute("SET memory_limit='512MB';")
-        con.execute("SET threads=2;")
-        con.execute("SET preserve_insertion_order=false;")
-
-        copy_query = f"COPY ({query}) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');"
-        con.execute(copy_query)
+        _execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, copy_query)
     except Exception as e:
+        if os.path.exists(out_file):
+            try:
+                os.remove(out_file)
+            except Exception:
+                pass
+        if "Execution stopped by user" in str(e):
+            raise
         raise RuntimeError(f"DuckDB spatial query failed. Query: {query}. Error: {e}") from e
-    finally:
-        try:
-            con.close()
-        except Exception:
-            pass
 
-    lyr = QgsVectorLayer(out_file, layer_name, "ogr")
-    if not lyr.isValid():
-        raise ValueError(f"Failed to load DuckDB spatial query output from {out_file}")
-    p = QgsProject.instance()
-    is_first = len([l for l in p.mapLayers().values() if l.providerType() != "wms"]) == 0
-    p.addMapLayer(lyr)
-    if is_first and _is_valid_extent(lyr.extent()):
-        safe_ext = _safe_transform_extent(lyr.extent(), lyr.crs(), p.crs(), p)
-        if safe_ext:
-            c = _canvas()
-            if c:
-                safe_ext.scale(1.05)
-                c.setExtent(safe_ext)
-                c.refresh()
-    else:
-        _sanitize_canvas_extent()
-    return _layer_info(lyr)
+    return _load_exported_gpkg_layer(out_file, layer_name, err_prefix="Failed to load DuckDB spatial query output")
 
 
 # ---------------------------------------------------------------- escape hatch
@@ -4579,6 +4881,12 @@ def call(name, args):
         for alias in ("layer", "layer_id", "name"):
             if alias in clean_args:
                 clean_args["layer_name"] = clean_args.pop(alias)
+                break
+
+    if "output_name" in params and "output_name" not in clean_args and "layer" not in params:
+        for alias in ("layer_name", "layer", "name"):
+            if alias in clean_args:
+                clean_args["output_name"] = clean_args.pop(alias)
                 break
 
     # Common aliases: layout / layout_name / name

@@ -898,38 +898,8 @@ def available():
 
 def get_process_descendants(root_pid, protected_pids=None):
     """Recursively collect all child/descendant PIDs of root_pid."""
-    if protected_pids is None:
-        protected_pids = set()
-    descendants = set()
-    to_visit = [root_pid]
-    while to_visit:
-        curr = to_visit.pop(0)
-        found = set()
-        for child_file in glob.glob(f"/proc/{curr}/task/*/children"):
-            try:
-                with open(child_file, "r") as f:
-                    for c in f.read().split():
-                        if c.isdigit():
-                            found.add(int(c))
-            except Exception:
-                pass
-        try:
-            out = subprocess.check_output(
-                ["pgrep", "-P", str(curr)],
-                stderr=subprocess.DEVNULL,
-                text=True,
-                **paths.get_subprocess_kwargs(),
-            )
-            for c in out.split():
-                if c.isdigit():
-                    found.add(int(c))
-        except Exception:
-            pass
-        for c in found:
-            if c not in descendants and c not in protected_pids:
-                descendants.add(c)
-                to_visit.append(c)
-    return list(descendants)
+    from . import guard
+    return guard._get_process_tree(root_pid, protected_pids)
 
 
 def kill_entire_tree(root_pids, protected_pids=None):
@@ -1067,6 +1037,7 @@ class CliRunner(QObject):
         # Create unique PID tracking file for this invocation
         self._current_pid_file = os.path.join(tempfile.gettempdir(), f"qgis_ai_{uuid.uuid4().hex[:12]}.pid")
         env.insert("QGIS_AI_PID_FILE", self._current_pid_file)
+        env.insert("QGIS_AI_PARENT_PID", str(os.getpid()))
 
         # Cross-platform binary discovery (Linux, macOS Homebrew, Windows npm/AppData/Cargo)
         valid_paths = paths.get_extra_bin_paths()

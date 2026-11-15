@@ -7,10 +7,15 @@ Register once in any AI CLI, e.g.:
 Pure stdlib, no QGIS imports. Reads ~/.qgis_ai_agent/endpoint.json on each call,
 so it keeps working across QGIS restarts.
 """
+import ctypes
 import json
 import os
+import signal
 import socket
+import subprocess
 import sys
+import threading
+import time
 
 try:
     from . import paths
@@ -29,6 +34,149 @@ except Exception:
         else:
             ENDPOINT_FILE = os.path.join(_home, ".qgis_ai_agent", "endpoint.json")
 _counter = [0]
+_ACTIVE_QGIS_PID = [None]
+_ABORT_LOCK = threading.Lock()
+
+
+def _is_pid_alive(pid):
+    """Cross-platform check whether process PID is alive and not a zombie."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+
+    if sys.platform == "win32":
+        try:
+            kernel32 = ctypes.windll.kernel32
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            STILL_ACTIVE = 259
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            if handle:
+                try:
+                    exit_code = ctypes.c_uint32()
+                    if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                        return exit_code.value == STILL_ACTIVE
+                finally:
+                    kernel32.CloseHandle(handle)
+            else:
+                if kernel32.GetLastError() == 87:  # ERROR_INVALID_PARAMETER
+                    return False
+        except Exception:
+            pass
+        try:
+            os.kill(pid, 0)
+            return True
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+
+    if os.path.isdir("/proc"):
+        stat_path = f"/proc/{pid}/stat"
+        try:
+            with open(stat_path, "r", encoding="utf-8", errors="replace") as f:
+                data = f.read()
+            rparen = data.rfind(")")
+            if rparen != -1 and len(data) > rparen + 2:
+                state = data[rparen + 2]
+                return state != "Z"
+            return True
+        except FileNotFoundError:
+            return False
+        except PermissionError:
+            pass
+        except OSError:
+            pass
+
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _cleanup_stale_endpoint(dead_pid=None):
+    """Remove ENDPOINT_FILE if it points to a dead QGIS process (or any when dead_pid is None)."""
+    try:
+        if not os.path.exists(ENDPOINT_FILE):
+            return
+        if dead_pid is not None:
+            with open(ENDPOINT_FILE, encoding="utf-8") as f:
+                ep = json.load(f)
+            if ep.get("pid") != dead_pid:
+                return
+        os.remove(ENDPOINT_FILE)
+    except Exception:
+        pass
+
+
+def _abort_on_dead_qgis(dead_pid=None):
+    """Terminate CLI/MCP transport cleanly without replying when QGIS dies unexpectedly."""
+    with _ABORT_LOCK:
+        _cleanup_stale_endpoint(dead_pid)
+
+        has_qgis_session = bool(os.environ.get("QGIS_AI_PID_FILE") or os.environ.get("QGIS_AI_PARENT_PID"))
+        if has_qgis_session:
+            sig_kill = getattr(signal, "SIGKILL", signal.SIGTERM)
+            self_pid = os.getpid()
+            protected = {self_pid}
+            if dead_pid:
+                try:
+                    protected.add(int(dead_pid))
+                except (TypeError, ValueError):
+                    pass
+
+            target_pids = []
+            pid_file = os.environ.get("QGIS_AI_PID_FILE")
+            if pid_file and os.path.isfile(pid_file):
+                try:
+                    with open(pid_file, "r", encoding="utf-8") as f:
+                        raw = f.read().strip()
+                    if raw.isdigit():
+                        cli_pid = int(raw)
+                        if cli_pid > 1 and cli_pid not in protected:
+                            target_pids.append(cli_pid)
+                except Exception:
+                    pass
+
+            try:
+                ppid = os.getppid()
+                if ppid > 1 and ppid not in protected and ppid not in target_pids:
+                    target_pids.append(ppid)
+            except Exception:
+                pass
+
+            if sys.platform == "win32":
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                for tp in target_pids:
+                    try:
+                        subprocess.call(
+                            ["taskkill", "/F", "/T", "/PID", str(tp)],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            creationflags=creationflags,
+                        )
+                    except Exception:
+                        pass
+            else:
+                for tp in target_pids:
+                    try:
+                        if hasattr(os, "getpgid") and hasattr(os, "killpg"):
+                            pg = os.getpgid(tp)
+                            if pg > 1 and pg not in protected:
+                                os.killpg(pg, sig_kill)
+                    except Exception:
+                        pass
+                    try:
+                        os.kill(tp, sig_kill)
+                    except Exception:
+                        pass
+
+        os._exit(1)
 
 
 def qgis_rpc(method, params=None):
@@ -37,6 +185,17 @@ def qgis_rpc(method, params=None):
             ep = json.load(f)
     except FileNotFoundError:
         raise RuntimeError("QGIS Copilot plugin is not running. Open QGIS and enable the plugin.")
+
+    ep_pid = ep.get("pid")
+    if ep_pid and not _is_pid_alive(ep_pid):
+        _cleanup_stale_endpoint(ep_pid)
+        if _ACTIVE_QGIS_PID[0] == ep_pid or os.environ.get("QGIS_AI_PARENT_PID"):
+            _abort_on_dead_qgis(ep_pid)
+        raise RuntimeError("QGIS Copilot plugin is not running (cleaned up stale endpoint from previous session). Open QGIS and enable the plugin.")
+
+    if ep_pid:
+        _ACTIVE_QGIS_PID[0] = ep_pid
+
     _counter[0] += 1
     req = {"token": ep["token"], "id": _counter[0], "method": method, "params": params or {}}
     timeout_sec = float(os.environ.get("QGIS_AI_TIMEOUT", "300"))
@@ -49,11 +208,17 @@ def qgis_rpc(method, params=None):
                 if not chunk:
                     break
                 buf += chunk
-    except ConnectionRefusedError:
-        raise RuntimeError("QGIS Copilot plugin port is not responding. Ensure QGIS is running and the plugin is active.")
     except socket.timeout:
+        if ep_pid and not _is_pid_alive(ep_pid):
+            _abort_on_dead_qgis(ep_pid)
         raise RuntimeError(f"QGIS operation timed out after {int(timeout_sec)}s.")
+    except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError, OSError):
+        if ep_pid and not _is_pid_alive(ep_pid):
+            _abort_on_dead_qgis(ep_pid)
+        raise RuntimeError("QGIS Copilot plugin port is not responding. Ensure QGIS is running and the plugin is active.")
     if not buf:
+        if ep_pid and not _is_pid_alive(ep_pid):
+            _abort_on_dead_qgis(ep_pid)
         raise RuntimeError("QGIS Copilot plugin closed connection without response.")
     resp = json.loads(buf.split(b"\n", 1)[0], parse_constant=lambda c: None)
     if "error" in resp:
@@ -75,6 +240,20 @@ def send(msg):
     sys.stdout.flush()
 
 
+def _qgis_watchdog():
+    env_pid = None
+    raw_parent = os.environ.get("QGIS_AI_PARENT_PID")
+    if raw_parent and raw_parent.strip().isdigit():
+        p = int(raw_parent.strip())
+        if p > 0:
+            env_pid = p
+    while True:
+        qpid = _ACTIVE_QGIS_PID[0] or env_pid
+        if qpid and not _is_pid_alive(qpid):
+            _abort_on_dead_qgis(qpid)
+        time.sleep(0.2)
+
+
 def main():
     for stream in (sys.stdin, sys.stdout):
         if hasattr(stream, "reconfigure"):
@@ -82,6 +261,7 @@ def main():
                 stream.reconfigure(encoding="utf-8", errors="replace")
             except Exception:
                 pass
+    threading.Thread(target=_qgis_watchdog, daemon=True).start()
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -97,7 +277,7 @@ def main():
             if method == "initialize":
                 res = {"protocolVersion": msg.get("params", {}).get("protocolVersion", "2025-06-18"),
                        "capabilities": {"tools": {}},
-                       "serverInfo": {"name": "qgis-ai-agent", "version": "1.1.1"}}
+                       "serverInfo": {"name": "qgis-ai-agent", "version": "1.1.2"}}
             elif method == "ping":
                 res = {}
             elif method == "tools/list":

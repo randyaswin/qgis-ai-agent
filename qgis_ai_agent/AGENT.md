@@ -99,6 +99,7 @@ Workflow:
    - Access 100% free, keyless public geodata on demand (never require API keys):
      * Discover public sources: `list_public_geodata_sources()`.
      * Query Overture Maps Foundation (buildings, places/POI, roads, water) directly from S3 parquet via DuckDB: `query_overture_maps(theme=..., bbox=..., filter_sql=...)`.
+       - **Tight Local BBox**: When the user asks for a specific neighborhood, corridor, or landmarks (e.g., *"center Yogyakarta around Malioboro and Tugu"*), **never** use a whole-city bounding box. Pass a tight `bbox` tightly enclosing those named landmarks (+ ~500m–1km buffer). `query_overture_maps` automatically counts features first and switches to tile-by-tile fetching when count exceeds `tile_threshold` (default 2000).
      * Search public STAC catalogs (Earth Search Sentinel-2, Copernicus DEM 30m): `search_stac_items(collections=..., bbox=...)`.
      * Stream Cloud-Optimized GeoTIFFs (COGs) on the fly via GDAL /vsicurl/: `load_public_cog(url=...)`.
      * Execute arbitrary spatial DuckDB queries on remote Parquet/S3: `query_duckdb_spatial(query=...)`.

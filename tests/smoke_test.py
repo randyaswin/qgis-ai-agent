@@ -368,6 +368,83 @@ assert any(m.startswith("gemini-4-") for m in cached_ids), f"Expected cached gem
 agy_argv = runner.ADAPTERS["agy (Antigravity CLI)"]["run"]("test prompt", False, True, model="gemini-4-argon-high", effort="xhigh")
 assert "--model" in agy_argv and "gemini-4-argon-high" in agy_argv and "--effort" in agy_argv and "xhigh" in agy_argv, agy_argv
 
+# 7. Dead-QGIS PID checks, fast /proc tree discovery, stale endpoint cleanup, and Overture normalization
+import time as _t
+from qgis_ai_agent import guard, mcp_bridge
+
+assert mcp_bridge._is_pid_alive(os.getpid()) is True
+assert mcp_bridge._is_pid_alive(99999999) is False
+assert guard._is_pid_alive(os.getpid()) is True
+assert guard._is_pid_alive(99999999) is False
+
+_t0 = _t.monotonic()
+_tree = guard._get_process_tree(os.getpid(), {os.getpid()})
+_elapsed = _t.monotonic() - _t0
+assert isinstance(_tree, list) and _elapsed < 0.25, f"_get_process_tree took {_elapsed:.3f}s"
+
+_orig_ep_file = mcp_bridge.ENDPOINT_FILE
+_tmp_ep = os.path.join(out, "stale_endpoint.json")
+try:
+    with open(_tmp_ep, "w", encoding="utf-8") as _ef:
+        json.dump({"port": 12345, "token": "abc", "pid": 99999999}, _ef)
+    mcp_bridge.ENDPOINT_FILE = _tmp_ep
+    try:
+        mcp_bridge.qgis_rpc("list_tools")
+        raise AssertionError("Expected RuntimeError on stale endpoint PID")
+    except RuntimeError as _exc:
+        assert "stale endpoint" in str(_exc).lower(), _exc
+    assert not os.path.exists(_tmp_ep), "Expected stale endpoint file to be removed"
+finally:
+    mcp_bridge.ENDPOINT_FILE = _orig_ep_file
+
+# Verify query_overture_maps aliases & schema normalization + disconnect cancel handling
+_captured_sql = []
+_orig_duck_exec = tools._execute_duckdb_nonblocking
+try:
+    import duckdb as _duck_check  # noqa: F401
+    def _fake_duck_exec(setup_sql, copy_sql, fetch_scalar=False):
+        if fetch_scalar:
+            return 5000
+        _captured_sql.append(copy_sql)
+        raise RuntimeError("Execution stopped by user.")
+    tools._execute_duckdb_nonblocking = _fake_duck_exec
+    try:
+        T("query_overture_maps", {
+            "theme": "water",
+            "bbox": [110.335, -7.835, 110.405, -7.765],
+            "layer_name": "yogyakarta_water",
+        })
+    except RuntimeError:
+        pass
+    try:
+        T("query_overture_maps", {
+            "theme": "places",
+            "bbox": [110.335, -7.835, 110.405, -7.765],
+            "filter_sql": "categories.primary = 'museum'",
+            "layer_name": "yogyakarta_landmarks",
+        })
+    except RuntimeError:
+        pass
+    assert len(_captured_sql) == 2, _captured_sql
+    assert "theme=base/type=water/" in _captured_sql[0], _captured_sql[0]
+    assert "taxonomy.primary = 'museum'" in _captured_sql[1], _captured_sql[1]
+    assert "categories.primary" not in _captured_sql[1], _captured_sql[1]
+except ImportError:
+    pass
+finally:
+    tools._execute_duckdb_nonblocking = _orig_duck_exec
+
+srv3 = ToolServer()
+srv3._busy = True
+srv3._active_sock = "fake_sock"
+srv3.buffers["fake_sock"] = b"partial"
+tools.CANCEL_REQUESTED = False
+srv3._on_disconnect("fake_sock")
+assert tools.CANCEL_REQUESTED is True and srv3._disconnect_cancelled is True
+tools.CANCEL_REQUESTED = False
+srv3._busy = False
+srv3._active_sock = None
+
 print("tools count check:", len(tools.TOOLS))
 assert len(tools.TOOLS) == 70, f"Expected 70 tools, got {len(tools.TOOLS)}"
 

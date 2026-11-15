@@ -209,39 +209,45 @@ class Session:
         if self.cli_session_id:
             return self.cli_session_id
 
+        cli_lower = (cli_name or self.cli or "").lower()
         norm_ws = os.path.normcase(os.path.realpath(workspace_dir))
         raw_ws = os.path.normcase(os.path.abspath(workspace_dir))
         slugs = paths.get_workspace_project_slugs(workspace_dir)
 
         # 1. agy (Antigravity CLI) - Cross-platform search paths (Linux, macOS, Windows)
-        candidate_cache_files = []
-        for d in paths.get_candidate_cli_dirs("agy"):
-            candidate_cache_files.append(os.path.join(d, "cache", "last_conversations.json"))
-        for cache_file in candidate_cache_files:
-            if cache_file and os.path.exists(cache_file):
-                try:
-                    with open(cache_file, "r", encoding="utf-8") as f:
-                        d = json.load(f)
-                    for k, v in d.items():
-                        norm_k = os.path.normcase(os.path.realpath(k))
-                        if norm_k in (norm_ws, raw_ws):
-                            self.cli_session_id = str(v)
-                            return self.cli_session_id
-                except Exception:
-                    pass
+        if not cli_lower or "agy" in cli_lower or "antigravity" in cli_lower:
+            candidate_cache_files = []
+            for d in paths.get_candidate_cli_dirs("agy"):
+                candidate_cache_files.append(os.path.join(d, "cache", "last_conversations.json"))
+            for cache_file in candidate_cache_files:
+                if cache_file and os.path.exists(cache_file):
+                    try:
+                        with open(cache_file, "r", encoding="utf-8") as f:
+                            d = json.load(f)
+                        for k, v in d.items():
+                            norm_k_real = os.path.normcase(os.path.realpath(k))
+                            norm_k_abs = os.path.normcase(os.path.abspath(k))
+                            if norm_k_real in (norm_ws, raw_ws) or norm_k_abs in (norm_ws, raw_ws):
+                                self.cli_session_id = str(v)
+                                return self.cli_session_id
+                    except Exception:
+                        pass
 
-        # 2. Claude Code session detection (Linux, macOS, Windows)
-        candidate_claude_dirs = []
-        for d in paths.get_candidate_cli_dirs("claude"):
-            candidate_claude_dirs.append(os.path.join(d, "sessions"))
-            candidate_claude_dirs.append(d)
-        for claude_dir in candidate_claude_dirs:
-            if claude_dir and os.path.exists(claude_dir):
+        # 2. Claude Code session detection (strictly scoped to workspace project slugs)
+        if not cli_lower or "claude" in cli_lower:
+            candidate_proj_dirs = []
+            for d in paths.get_candidate_cli_dirs("claude"):
+                proj_base = os.path.join(d, "projects")
+                for slug in slugs:
+                    sp = os.path.join(proj_base, slug)
+                    if os.path.isdir(sp):
+                        candidate_proj_dirs.append(sp)
+            for proj_dir in candidate_proj_dirs:
                 try:
                     recent = sorted(
-                        [os.path.join(claude_dir, f) for f in os.listdir(claude_dir)],
+                        [e.path for e in os.scandir(proj_dir) if e.is_file() and e.name.endswith(".jsonl")],
                         key=lambda p: os.path.getmtime(p),
-                        reverse=True
+                        reverse=True,
                     )
                     if recent and (time.time() - os.path.getmtime(recent[0]) < 240):
                         cid = os.path.splitext(os.path.basename(recent[0]))[0]
@@ -251,21 +257,22 @@ class Session:
                     pass
 
         # 3. OpenCode session detection (Linux, macOS, Windows)
-        for d in paths.get_candidate_cli_dirs("opencode"):
-            sess_dir = os.path.join(d, "sessions")
-            if os.path.exists(sess_dir):
-                try:
-                    recent = sorted(
-                        [os.path.join(sess_dir, f) for f in os.listdir(sess_dir)],
-                        key=lambda p: os.path.getmtime(p),
-                        reverse=True
-                    )
-                    if recent and (time.time() - os.path.getmtime(recent[0]) < 240):
-                        cid = os.path.splitext(os.path.basename(recent[0]))[0]
-                        self.cli_session_id = str(cid)
-                        return self.cli_session_id
-                except Exception:
-                    pass
+        if not cli_lower or "opencode" in cli_lower:
+            for d in paths.get_candidate_cli_dirs("opencode"):
+                sess_dir = os.path.join(d, "sessions")
+                if os.path.isdir(sess_dir):
+                    try:
+                        recent = sorted(
+                            [e.path for e in os.scandir(sess_dir) if e.is_file() and e.name.endswith((".json", ".jsonl"))],
+                            key=lambda p: os.path.getmtime(p),
+                            reverse=True,
+                        )
+                        if recent and (time.time() - os.path.getmtime(recent[0]) < 240):
+                            cid = os.path.splitext(os.path.basename(recent[0]))[0]
+                            self.cli_session_id = str(cid)
+                            return self.cli_session_id
+                    except Exception:
+                        pass
 
         return self.cli_session_id
 
