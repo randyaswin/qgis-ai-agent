@@ -48,7 +48,7 @@ jobs:
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: qgis-ai-agent-v${{ steps.package.outputs.version }}
+          name: qgis-copilot-v${{ steps.package.outputs.version }}
           path: dist/
           retention-days: 30
 

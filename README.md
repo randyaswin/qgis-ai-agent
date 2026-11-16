@@ -2,7 +2,7 @@
 
 [![QGIS Version](https://img.shields.io/badge/QGIS-3.34+-589632.svg?logo=qgis&logoColor=white)](https://qgis.org/)
 [![License: GPL v3+](https://img.shields.io/badge/License-GPL_v3+-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.html)
-[![Version](https://img.shields.io/badge/version-1.1.1-orange.svg)](https://github.com/randyaswin/qgis-ai-agent/releases)
+[![Version](https://img.shields.io/badge/version-1.1.6-orange.svg)](https://github.com/randyaswin/qgis-copilot/releases)
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![Protocol: MCP](https://img.shields.io/badge/Protocol-MCP-8A2BE2.svg)](https://modelcontextprotocol.io/)
 
@@ -87,7 +87,7 @@ Layouts adapt to your domain theme. The agent never forces generic templates on 
 ## 🚀 Installation
 
 ### Option A: Install via QGIS Plugin Manager (Recommended)
-1. Download the latest `qgis_copilot-<version>.zip` from [Releases](https://github.com/randyaswin/qgis-ai-agent/releases).
+1. Download the latest `qgis_copilot-<version>.zip` from [Releases](https://github.com/randyaswin/qgis-copilot/releases).
 2. In QGIS, navigate to **Plugins** ➔ **Manage and Install Plugins...**
 3. Select **Install from ZIP**, choose the downloaded zip file, and click **Install Plugin**.
 4. Activate the plugin: check **QGIS Copilot** in the plugin list.
@@ -97,18 +97,18 @@ Clone this repository directly into your QGIS 3 Python plugins directory (symlin
 
 * **Linux**:
   ```bash
-  git clone https://github.com/randyaswin/qgis-ai-agent.git /tmp/qgis-ai-agent
-  ln -s /tmp/qgis-ai-agent/qgis_copilot ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/qgis_copilot
+  git clone https://github.com/randyaswin/qgis-copilot.git /tmp/qgis-copilot
+  ln -s /tmp/qgis-copilot/qgis_copilot ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/qgis_copilot
   ```
 * **macOS**:
   ```bash
-  git clone https://github.com/randyaswin/qgis-ai-agent.git /tmp/qgis-ai-agent
-  ln -s /tmp/qgis-ai-agent/qgis_copilot ~/Library/Application\ Support/QGIS/QGIS3/profiles/default/python/plugins/qgis_copilot
+  git clone https://github.com/randyaswin/qgis-copilot.git /tmp/qgis-copilot
+  ln -s /tmp/qgis-copilot/qgis_copilot ~/Library/Application\ Support/QGIS/QGIS3/profiles/default/python/plugins/qgis_copilot
   ```
 * **Windows (PowerShell)**:
   ```powershell
-  git clone https://github.com/randyaswin/qgis-ai-agent.git "$env:TEMP\qgis-ai-agent"
-  Copy-Item -Recurse "$env:TEMP\qgis-ai-agent\qgis_copilot" "$env:APPDATA\QGIS\QGIS3\profiles\default\python\plugins\qgis_copilot"
+  git clone https://github.com/randyaswin/qgis-copilot.git "$env:TEMP\qgis-copilot"
+  Copy-Item -Recurse "$env:TEMP\qgis-copilot\qgis_copilot" "$env:APPDATA\QGIS\QGIS3\profiles\default\python\plugins\qgis_copilot"
   ```
 
 Restart QGIS and enable **QGIS Copilot** in the Plugins menu.
@@ -190,7 +190,7 @@ See the [LICENSE](LICENSE) file for the full license text.
 
 * **Author:** M. Randy Aswin
 * **Email:** [mrandyaswin@gmail.com](mailto:mrandyaswin@gmail.com)
-* **Bug Tracker & Issues:** [https://github.com/randyaswin/qgis-ai-agent/issues](https://github.com/randyaswin/qgis-ai-agent/issues)
-* **Repository:** [https://github.com/randyaswin/qgis-ai-agent](https://github.com/randyaswin/qgis-ai-agent)
+* **Bug Tracker & Issues:** [https://github.com/randyaswin/qgis-copilot/issues](https://github.com/randyaswin/qgis-copilot/issues)
+* **Repository:** [https://github.com/randyaswin/qgis-copilot](https://github.com/randyaswin/qgis-copilot)
 
 Contributions, pull requests, and bug reports are warmly welcome!
