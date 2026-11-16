@@ -213,6 +213,7 @@ assert gres["rmse_pixels"] < 0.01, f"Expected near-zero Helmert 2-GCP residual, 
 # Verify skills registry, keywords_id, vague request, and disabled persistence
 reg = skills.REGISTRY
 assert "raster-interpretation-and-grid-labeling" in reg.skills, "Missing raster-interpretation-and-grid-labeling skill"
+assert "layout-data-preparation" in reg.skills, "Missing layout-data-preparation skill"
 assert "raster-interpretation-and-grid-labeling" in reg.extra.get("keywords", {}), "Missing keywords_id entry for raster-interpretation-and-grid-labeling"
 assert not reg.is_vague_request("klasifikasi grid tutupan lahan dari citra ini", layer_names=["synth_georef"]), "Prompt with loaded layers should not be vague"
 assert not reg.is_vague_request("digitasi batas zonasi dari file scan_peta.png"), "Prompt with image attachment should not be vague"
@@ -649,12 +650,65 @@ assert abs(_p_ext_ar - _p_frm_ar) / _p_frm_ar < 0.05, f"Poster extent aspect {_p
 for _lay_nm in ("Malioboro_Bento_Test", "Malioboro_Antique_Test", "Malioboro_Poster_Test"):
     _snap_qa = T("snapshot_layout", {"name": _lay_nm, "dpi": 72})
     assert "qa" in _snap_qa and _snap_qa["qa"]["map_area_pct"] >= 45.0, (_lay_nm, _snap_qa.get("qa"))
+    assert _snap_qa["qa"]["map_blank_pct"] is not None and _snap_qa["qa"]["map_blank_pct"] < 98.5, (_lay_nm, _snap_qa["qa"])
     assert not _snap_qa["qa"]["out_of_bounds_items"], (_lay_nm, _snap_qa["qa"])
     assert not _snap_qa["qa"]["overlapping_items"], (_lay_nm, _snap_qa["qa"])
+
+# Verify retro_poster with gradient vignette masking & DMS footer + freeform add_layout_map WGS84 bbox auto-transform in UTM
+_ret_res = T("create_styled_layout", {
+    "name": "Malioboro_Retro_Test",
+    "style_theme": "retro_poster",
+    "orientation": "portrait",
+    "title": "Y O G Y A K A R T A",
+    "subtitle": "MALIOBORO HERITAGE",
+    "credits": "Overture Maps",
+})
+assert _ret_res["vignette"] is True, _ret_res
+_ret_qa = T("snapshot_layout", {"name": "Malioboro_Retro_Test", "dpi": 72})
+assert _ret_qa["qa"]["map_blank_pct"] < 98.5 and not _ret_qa["qa"]["qa_warnings"], _ret_qa["qa"]
+
+T("set_project_crs", {"crs": "EPSG:32749"})
+T("create_blank_layout", {"name": "Freeform_UTM_Test", "page_size": "A4", "orientation": "portrait"})
+_ff_mp = T("add_layout_map", {
+    "layout": "Freeform_UTM_Test",
+    "x": 10, "y": 10, "width": 190, "height": 240,
+    "bbox": [110.358, -7.806, 110.373, -7.783],
+    "cover": True,
+})
+assert _ff_mp["extent"][0] > 100000, f"WGS84 bbox was not transformed to EPSG:32749: {_ff_mp}"
+_ff_qa = T("snapshot_layout", {"name": "Freeform_UTM_Test", "dpi": 72})
+assert _ff_qa["qa"]["map_blank_pct"] < 98.5, f"Freeform UTM map rendered blank: {_ff_qa['qa']}"
+T("set_project_crs", {"crs": "EPSG:4326"})
+
+# Verify all 5 new global layout themes (figure_ground, blueprint_technical, small_multiples, transit_schematic, editorial_vertical)
+for _th_nm, _ori in (
+    ("figure_ground", "portrait"),
+    ("blueprint_technical", "landscape"),
+    ("small_multiples", "landscape"),
+    ("transit_schematic", "landscape"),
+    ("editorial_vertical", "portrait"),
+):
+    _ln = f"Theme_{_th_nm}_Test"
+    _th_res = T("create_styled_layout", {
+        "name": _ln,
+        "style_theme": _th_nm,
+        "orientation": _ori,
+        "title": _th_nm.upper(),
+        "subtitle": "Malioboro Verification",
+        "credits": "Overture Maps",
+        "panel_titles": ["2010", "2015", "2020", "2025"],
+    })
+    assert _th_res["theme"] == _th_nm, _th_res
+    _th_qa = T("snapshot_layout", {"name": _ln, "dpi": 72})
+    assert _th_qa["qa"]["map_blank_pct"] < 98.5, (_th_nm, _th_qa["qa"])
+    assert not _th_qa["qa"]["out_of_bounds_items"], (_th_nm, _th_qa["qa"])
+    assert not _th_qa["qa"]["overlapping_items"], (_th_nm, _th_qa["qa"])
 
 # Verify update_layer(name=...) alias, style_categorized(column=...) alias, and outlier-extent exclusion
 _tmp_out = T("create_vector_layer", {"layer_name": "giant_outlier_river", "geometry_type": "Polygon", "fields": [{"name": "tag", "type": "string"}]})
 T("digitize_features", {"layer": "giant_outlier_river", "features": [{"geometry": [[110.20, -7.95], [110.50, -7.95], [110.50, -7.65], [110.20, -7.65], [110.20, -7.95]], "attributes": {"tag": "river"}}]})
+_upd_pos = T("update_layer", {"layer": "giant_outlier_river", "position": 0})
+assert _upd_pos["name"] == "giant_outlier_river", _upd_pos
 _upd_nm = T("update_layer", {"layer": "giant_outlier_river", "name": "Giant_River_Renamed"})
 assert _upd_nm["name"] == "Giant_River_Renamed", _upd_nm
 _col_cat = T("style_categorized", {"layer": "Giant_River_Renamed", "column": "tag"})

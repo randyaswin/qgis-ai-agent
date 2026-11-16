@@ -2701,7 +2701,7 @@ def snapshot_canvas(width=1000, height=700):
     return {"__image__": base64.b64encode(bytes(buf.data())).decode(), "mime": "image/png"}
 
 
-def _audit_layout_quality(lay):
+def _audit_layout_quality(lay, preview_b64=None):
     """Compute objective geometry & composition diagnostics for a print layout so the agent can iterate."""
     from qgis.core import (
         QgsLayoutItemMap, QgsLayoutItemLegend, QgsLayoutItemLabel,
@@ -2731,6 +2731,8 @@ def _audit_layout_quality(lay):
                 maps.append((it, x, y, w, h))
             continue
         if not isinstance(it, (QgsLayoutItemLabel, QgsLayoutItemLegend, QgsLayoutItemScaleBar, QgsLayoutItemPicture)):
+            continue
+        if isinstance(it, QgsLayoutItemPicture) and "qgis_vignette_" in str(it.picturePath() or ""):
             continue
         pos = it.pos()
         rect = it.rect()
@@ -2792,9 +2794,49 @@ def _audit_layout_quality(lay):
     if leg_count > 10:
         warnings.append(f"Legend has {leg_count} layers; consider pruning or multi-column layout.")
 
+    # Pixel-level blank/empty map detection on the rendered layout image
+    map_blank_pct = None
+    if preview_b64 and maps:
+        try:
+            qimg = QImage.fromData(base64.b64decode(preview_b64), "PNG")
+            if not qimg.isNull() and W > 0 and H > 0:
+                sx = qimg.width() / W
+                sy = qimg.height() / H
+                worst_blank = 0.0
+                for _, mx, my, mw, mh in maps:
+                    x1 = max(1, int((mx + mw * 0.05) * sx))
+                    x2 = min(qimg.width() - 2, int((mx + mw * 0.95) * sx))
+                    y1 = max(1, int((my + mh * 0.05) * sy))
+                    y2 = min(qimg.height() - 2, int((my + mh * 0.95) * sy))
+                    if x2 <= x1 or y2 <= y1:
+                        continue
+                    c0 = qimg.pixelColor(x1, y1)
+                    r0, g0, b0 = c0.red(), c0.green(), c0.blue()
+                    total = 0
+                    same = 0
+                    step_x = max(1, (x2 - x1) // 20)
+                    step_y = max(1, (y2 - y1) // 20)
+                    for px in range(x1, x2 + 1, step_x):
+                        for py in range(y1, y2 + 1, step_y):
+                            total += 1
+                            c = qimg.pixelColor(px, py)
+                            if abs(c.red() - r0) <= 6 and abs(c.green() - g0) <= 6 and abs(c.blue() - b0) <= 6:
+                                same += 1
+                    if total > 0:
+                        worst_blank = max(worst_blank, round(same / total * 100.0, 1))
+                map_blank_pct = worst_blank
+                if map_blank_pct >= 98.5:
+                    warnings.append(
+                        f"CRITICAL: Map frame rendered BLANK/EMPTY ({map_blank_pct}% uniform background)! "
+                        "Check map extent/CRS, layer visibility, or overlapping shapes and iterate before finishing."
+                    )
+        except Exception:
+            pass
+
     return {
         "page_mm": [round(W, 1), round(H, 1)],
         "map_area_pct": map_area_pct,
+        "map_blank_pct": map_blank_pct,
         "item_counts": {
             "maps": len(maps),
             "legends": len(legends),
@@ -2826,7 +2868,7 @@ def snapshot_layout(name=None, dpi=120, layout=None, layout_name=None, **kwargs)
         raise ValueError(f"No print layout found. Available layouts: {[l.name() for l in mgr.printLayouts()]}")
 
     raw_b64 = _export_layout_preview_b64(lay, dpi=dpi)
-    qa = _audit_layout_quality(lay)
+    qa = _audit_layout_quality(lay, preview_b64=raw_b64)
     return {
         "__image__": raw_b64,
         "mime": "image/png",
@@ -3591,9 +3633,77 @@ def add_layout_callout_box(layout=None, x=0, y=0, width=50, height=15, title="",
     return {"callout_added": True, "badge": badge, "title": title}
 
 
-@tool("Create a publication-grade themed print layout matching specific cartographic genres: 'poster_minimalist' (modern city art poster like Tokyo), 'antique_historical' (sepia engraving with grid like Plan of Rome), 'landscape_masterplan' (architectural watercolor site plan), 'scientific_dark' (dark-mode thematic atlas with continuous colorbar like Cambridge climate risk), 'editorial_infographic' (multi-frame magazine atlas with hero+inset+KPI stats like African soils), 'infographic_disaster' (situational alert dashboard), 'bento_dashboard' (modern modular bento grid cards with KPI chips and auto-legend), 'planning_official' (formal Kop Peta with right-side metadata block, zoning legend, inset, and neatline), 'dual_comparison' (side-by-side synchronized temporal or scenario comparison), 'corridor_trail' (linear route/river corridor with profile/waypoint strip), 'cyberpunk_hud' (dark sci-fi neon HUD with monospace telemetry), 'nautical_bathymetric' (marine hydrographic chart with nautical ticks and compass rose), 'natgeo' (classic National Geographic parchment, double neatline, serif typography), 'statistical_thematic' (clean choropleth with distribution cards), or 'relief_topographic'. Defaults to A4.",
+def _build_vignette_svg(w_mm, h_mm, bg_hex="#f5efe0"):
+    """Create a smooth 4-edge + radial gradient vignette SVG mask that fades map edges into bg_hex."""
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w_mm:.2f} {h_mm:.2f}" '
+        f'width="{w_mm:.2f}mm" height="{h_mm:.2f}mm" preserveAspectRatio="none">'
+        f'<defs>'
+        f'<linearGradient id="vTop" x1="0" y1="0" x2="0" y2="1">'
+        f'<stop offset="0%" stop-color="{bg_hex}" stop-opacity="0.96"/>'
+        f'<stop offset="14%" stop-color="{bg_hex}" stop-opacity="0"/>'
+        f'</linearGradient>'
+        f'<linearGradient id="vBot" x1="0" y1="1" x2="0" y2="0">'
+        f'<stop offset="0%" stop-color="{bg_hex}" stop-opacity="0.96"/>'
+        f'<stop offset="14%" stop-color="{bg_hex}" stop-opacity="0"/>'
+        f'</linearGradient>'
+        f'<linearGradient id="vLeft" x1="0" y1="0" x2="1" y2="0">'
+        f'<stop offset="0%" stop-color="{bg_hex}" stop-opacity="0.96"/>'
+        f'<stop offset="14%" stop-color="{bg_hex}" stop-opacity="0"/>'
+        f'</linearGradient>'
+        f'<linearGradient id="vRight" x1="1" y1="0" x2="0" y2="0">'
+        f'<stop offset="0%" stop-color="{bg_hex}" stop-opacity="0.96"/>'
+        f'<stop offset="14%" stop-color="{bg_hex}" stop-opacity="0"/>'
+        f'</linearGradient>'
+        f'<radialGradient id="vRad" cx="50%" cy="50%" r="68%">'
+        f'<stop offset="52%" stop-color="{bg_hex}" stop-opacity="0"/>'
+        f'<stop offset="100%" stop-color="{bg_hex}" stop-opacity="0.62"/>'
+        f'</radialGradient>'
+        f'</defs>'
+        f'<rect width="100%" height="100%" fill="url(#vRad)"/>'
+        f'<rect width="100%" height="100%" fill="url(#vTop)"/>'
+        f'<rect width="100%" height="100%" fill="url(#vBot)"/>'
+        f'<rect width="100%" height="100%" fill="url(#vLeft)"/>'
+        f'<rect width="100%" height="100%" fill="url(#vRight)"/>'
+        f'</svg>'
+    )
+    svg_path = os.path.join(tempfile.gettempdir(), f"qgis_vignette_{os.getpid()}_{int(time.time() * 1000)}.svg")
+    with open(svg_path, "w", encoding="utf-8") as fh:
+        fh.write(svg)
+    return svg_path
+
+
+def _format_dms_center(ext, src_crs, p):
+    """Format map center coordinates in DMS (e.g., 7° 47' 38\" S · 110° 21' 56\" E) in WGS84."""
+    if ext is None or not _is_valid_extent(ext):
+        return ""
+    try:
+        wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+        tr = _safe_transform_extent(ext, src_crs, wgs84, p) if (src_crs.isValid() and src_crs != wgs84) else ext
+        if tr is None or not _is_valid_extent(tr):
+            return ""
+        lon = tr.center().x()
+        lat = tr.center().y()
+        def _dms(val, pos, neg):
+            hemi = pos if val >= 0 else neg
+            av = abs(val)
+            d = int(av)
+            m_f = (av - d) * 60.0
+            m = int(m_f)
+            s = int(round((m_f - m) * 60.0))
+            if s == 60:
+                s = 0; m += 1
+            if m == 60:
+                m = 0; d += 1
+            return f"{d}&deg; {m:02d}&prime; {s:02d}&Prime; {hemi}"
+        return f"{_dms(lat, 'N', 'S')} &middot; {_dms(lon, 'E', 'W')}"
+    except Exception:
+        return ""
+
+
+@tool("Create a publication-grade themed print layout matching specific cartographic genres: 'retro_poster', 'poster_minimalist', 'figure_ground', 'blueprint_technical', 'small_multiples', 'transit_schematic', 'editorial_vertical', 'antique_historical', 'landscape_masterplan', 'scientific_dark', 'editorial_infographic', 'infographic_disaster', 'bento_dashboard', 'planning_official', 'dual_comparison', 'corridor_trail', 'cyberpunk_hud', 'nautical_bathymetric', 'natgeo', 'statistical_thematic', or 'relief_topographic'. Defaults to A4.",
       {"name": S("string", "layout name"),
-       "style_theme": S("string", "poster_minimalist | antique_historical | landscape_masterplan | scientific_dark | editorial_infographic | infographic_disaster | bento_dashboard | planning_official | dual_comparison | corridor_trail | cyberpunk_hud | nautical_bathymetric | natgeo | statistical_thematic | relief_topographic | modern_clean"),
+       "style_theme": S("string", "retro_poster | poster_minimalist | figure_ground | blueprint_technical | small_multiples | transit_schematic | editorial_vertical | antique_historical | landscape_masterplan | scientific_dark | editorial_infographic | infographic_disaster | bento_dashboard | planning_official | dual_comparison | corridor_trail | cyberpunk_hud | nautical_bathymetric | natgeo | statistical_thematic | relief_topographic | modern_clean"),
        "title": S("string", "main map title"),
        "subtitle": S("string", "subtitle or administrative region"),
        "credits": S("string", "mandatory real data source attribution"),
@@ -3643,6 +3753,12 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
     is_statistical = th in ("statistical_thematic", "choropleth", "demographic", "socio_economic", "thematic")
     is_relief = th in ("relief_topographic", "relief", "swiss", "topographic")
     is_poster = th in ("poster", "poster_minimalist", "city_poster", "minimalist_poster", "art_poster", "minimalist")
+    is_retro = th in ("retro", "retro_poster", "retro_minimalist", "vintage_poster", "vintage_minimalist")
+    is_figure_ground = th in ("figure_ground", "nolli", "nolli_plan", "schwarzplan", "urban_morphology")
+    is_blueprint = th in ("blueprint", "blueprint_technical", "cad_blueprint", "engineering_blueprint", "technical_blueprint")
+    is_small_multiples = th in ("small_multiples", "multi_panel", "grid_comparison", "time_series_grid", "quad_comparison")
+    is_transit = th in ("transit", "transit_schematic", "mobility", "isochrone", "accessibility", "public_transport")
+    is_editorial_vertical = th in ("editorial_vertical", "vertical_report", "news_brief", "mobile_editorial", "ft_editorial", "nyt_editorial")
     is_scientific_dark = th in ("scientific_dark", "climate_risk", "dark_atlas", "scientific", "dark_mode", "dark")
     is_editorial = th in ("editorial", "magazine", "editorial_infographic", "infographic_magazine", "story")
     is_antique = th in ("antique", "antique_historical", "historical", "vintage", "old_map", "engraving")
@@ -4430,6 +4546,73 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
 
     # =========================================================================
+    # THEME 5A: RETRO / VINTAGE MINIMALIST CITY ART POSTER (Parchment + Gradient Vignette)
+    # =========================================================================
+    if is_retro:
+        bg_hex = "#f5efe0"
+        ink_hex = "#2c241b"
+        _add_layout_card_shape(lay, 0, 0, W, H, fill=bg_hex, stroke="transparent", stroke_w=0, radius_mm=0)
+        m = 7.5
+        # Thin double neatline around outer mat
+        outer_mat = QgsLayoutItemShape(lay)
+        outer_mat.setShapeType(QgsLayoutItemShape.Shape.Rectangle)
+        outer_mat.setSymbol(QgsFillSymbol.createSimple({"color": "transparent", "outline_color": ink_hex, "outline_width": "0.45"}))
+        lay.addLayoutItem(outer_mat)
+        outer_mat.attemptMove(QgsLayoutPoint(m - 2.2, m - 2.2, mm))
+        outer_mat.attemptResize(QgsLayoutSize(W - 2 * m + 4.4, H - 2 * m + 4.4, mm))
+
+        title_block_h = 26.0
+        map_w = W - 2 * m
+        map_h = H - 2 * m - title_block_h - 1.5
+
+        mp = QgsLayoutItemMap(lay)
+        mp.setRect(0, 0, 10, 10)
+        lay.addLayoutItem(mp)
+        mp.setCrs(p.crs())
+        mp.setBackgroundEnabled(True)
+        mp.setBackgroundColor(QColor(bg_hex))
+        mp.attemptMove(QgsLayoutPoint(m, m, mm))
+        mp.attemptResize(QgsLayoutSize(map_w, map_h, mm))
+        main_ext = _setup_extent(mp, extent_layer, cover=True)
+        mp.setFrameEnabled(True)
+        mp.setFrameStrokeColor(QColor(ink_hex))
+        mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.25, mm))
+
+        # Smooth 4-edge + radial gradient vignette mask over map frame
+        if kwargs.get("vignette", True):
+            vig_svg = _build_vignette_svg(map_w, map_h, bg_hex=bg_hex)
+            vig = QgsLayoutItemPicture(lay)
+            vig.setPicturePath(vig_svg)
+            vig.setResizeMode(QgsLayoutItemPicture.ResizeMode.Stretch)
+            lay.addLayoutItem(vig)
+            vig.attemptMove(QgsLayoutPoint(m, m, mm))
+            vig.attemptResize(QgsLayoutSize(map_w, map_h, mm))
+
+        # Clean Retro Footer Typography Block (tracked uppercase + DMS coords + 1-line credits)
+        lbl_ret = QgsLayoutItemLabel(lay)
+        lbl_ret.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        city_title = title or "CITY MAP"
+        region_sub = subtitle or "HISTORIC URBAN FABRIC"
+        dms_txt = _format_dms_center(main_ext, p.crs(), p)
+        crs_code = p.crs().authid() if p.crs().isValid() else ""
+        cred_parts = [pt for pt in [credits, crs_code] if pt]
+        cred_line = " &middot; ".join(_html.escape(pt) for pt in cred_parts)
+        lbl_ret.setText(
+            f"<div style='text-align:center; font-family:Georgia, \"Times New Roman\", serif; padding-top:2px;'>"
+            f"<div style='font-size:17pt; font-weight:bold; color:{ink_hex}; letter-spacing:4px; text-transform:uppercase;'>{_html.escape(city_title)}</div>"
+            f"<div style='font-size:8pt; font-weight:bold; color:#5c4d3c; letter-spacing:2.5px; text-transform:uppercase; margin-top:2px;'>{_html.escape(region_sub)}</div>"
+            + (f"<div style='font-size:6.8pt; color:#6b5c4b; letter-spacing:1.2px; margin-top:2px;'>{dms_txt}</div>" if dms_txt else "")
+            + (f"<div style='font-size:5.8pt; color:#8a7b68; margin-top:2px;'>{cred_line}</div>" if cred_line else "")
+            + f"</div>"
+        )
+        lay.addLayoutItem(lbl_ret)
+        lbl_ret.attemptMove(QgsLayoutPoint(m, m + map_h + 2.0, mm))
+        lbl_ret.attemptResize(QgsLayoutSize(map_w, title_block_h, mm))
+
+        _register_layout(mgr, lay)
+        return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale(), "vignette": bool(kwargs.get("vignette", True))}
+
+    # =========================================================================
     # THEME 5: MINIMALIST CITY ART POSTER (Full-Bleed, Modern Floating Typography)
     # =========================================================================
     if is_poster:
@@ -4460,6 +4643,15 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         mp.setFrameStrokeColor(QColor("#0f172a"))
         mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.4, mm))
 
+        if kwargs.get("vignette"):
+            vig_svg = _build_vignette_svg(map_w, map_h, bg_hex="#fafaf9")
+            vig = QgsLayoutItemPicture(lay)
+            vig.setPicturePath(vig_svg)
+            vig.setResizeMode(QgsLayoutItemPicture.ResizeMode.Stretch)
+            lay.addLayoutItem(vig)
+            vig.attemptMove(QgsLayoutPoint(m, m, mm))
+            vig.attemptResize(QgsLayoutSize(map_w, map_h, mm))
+
         if kwargs.get("scalebar"):
             _create_clean_scalebar(mp, style="Line Ticks Down", position="bottom-left", pad=5.0,
                                    color="#0f172a", background="rgba(250,250,249,0.8)", frame_color=None)
@@ -4488,6 +4680,424 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
         lay.addLayoutItem(lbl_art)
         lbl_art.attemptMove(QgsLayoutPoint(m, m + map_h + 3.0, mm))
         lbl_art.attemptResize(QgsLayoutSize(map_w, title_block_h, mm))
+
+        _register_layout(mgr, lay)
+        return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
+
+    # =========================================================================
+    # THEME 5B: FIGURE-GROUND / NOLLI PLAN (Architectural Urban Morphology)
+    # =========================================================================
+    if is_figure_ground:
+        _add_layout_card_shape(lay, 0, 0, W, H, fill="#ffffff", stroke="transparent", stroke_w=0, radius_mm=0)
+        m = 10.0
+        footer_h = 20.0
+        map_w = W - 2 * m
+        map_h = H - 2 * m - footer_h - 2.0
+
+        mp = QgsLayoutItemMap(lay)
+        mp.setRect(0, 0, 10, 10)
+        lay.addLayoutItem(mp)
+        mp.setCrs(p.crs())
+        mp.setBackgroundEnabled(True)
+        mp.setBackgroundColor(QColor("#ffffff"))
+        mp.attemptMove(QgsLayoutPoint(m, m, mm))
+        mp.attemptResize(QgsLayoutSize(map_w, map_h, mm))
+        main_ext = _setup_extent(mp, extent_layer, cover=True)
+        mp.setFrameEnabled(True)
+        mp.setFrameStrokeColor(QColor("#111111"))
+        mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.35, mm))
+
+        if kwargs.get("scalebar", True):
+            _create_clean_scalebar(mp, style="Line Ticks Down", position="bottom-left", pad=5.0,
+                                   font_size=6.5, color="#111111", background="rgba(255,255,255,0.88)", frame_color=None)
+        if kwargs.get("north_arrow", True):
+            na = QgsLayoutItemPicture(lay)
+            na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
+            na.setLinkedMap(mp)
+            lay.addLayoutItem(na)
+            na.attemptResize(QgsLayoutSize(7.5, 10.5, mm))
+            na.attemptMove(QgsLayoutPoint(m + map_w - 11.5, m + 4.0, mm))
+
+        lbl_fg_l = QgsLayoutItemLabel(lay)
+        lbl_fg_l.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        fg_title = title or "FIGURE-GROUND PLAN"
+        fg_sub = subtitle or "Urban Solid & Void Morphology"
+        lbl_fg_l.setText(
+            f"<div style='font-family:Helvetica Neue, Arial, sans-serif;'>"
+            f"<div style='font-size:13.5pt; font-weight:bold; letter-spacing:2.5px; color:#111111; text-transform:uppercase;'>{_html.escape(fg_title)}</div>"
+            f"<div style='font-size:7.5pt; color:#52525b; margin-top:2px;'>{_html.escape(fg_sub)}</div>"
+            f"</div>"
+        )
+        lay.addLayoutItem(lbl_fg_l)
+        lbl_fg_l.attemptMove(QgsLayoutPoint(m, m + map_h + 3.0, mm))
+        lbl_fg_l.attemptResize(QgsLayoutSize(map_w * 0.60, footer_h, mm))
+
+        lbl_fg_r = QgsLayoutItemLabel(lay)
+        lbl_fg_r.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        scale_num = max(1, int(round(mp.scale())))
+        cred_fg = _html.escape(credits) if credits else "Vector Building Footprints"
+        lbl_fg_r.setText(
+            f"<div style='text-align:right; font-family:Helvetica Neue, Arial, sans-serif;'>"
+            f"<div style='font-size:9pt; font-weight:bold; color:#111111;'>SCALE 1 : {scale_num:,}</div>"
+            f"<div style='font-size:6.2pt; color:#71717a; margin-top:2px;'>{kpis['crs_authid']} &bull; {cred_fg}</div>"
+            f"</div>"
+        )
+        lay.addLayoutItem(lbl_fg_r)
+        lbl_fg_r.attemptMove(QgsLayoutPoint(m + map_w * 0.62, m + map_h + 3.5, mm))
+        lbl_fg_r.attemptResize(QgsLayoutSize(map_w * 0.38, footer_h, mm))
+
+        _register_layout(mgr, lay)
+        return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
+
+    # =========================================================================
+    # THEME 5C: ARCHITECTURAL & ENGINEERING BLUEPRINT (Prussian Blue CAD Sheet)
+    # =========================================================================
+    if is_blueprint:
+        bp_bg = "#0b2545"
+        bp_map_bg = "#0d2c54"
+        bp_line = "#e0f2fe"
+        bp_cyan = "#38bdf8"
+        _add_layout_card_shape(lay, 0, 0, W, H, fill=bp_bg, stroke="transparent", stroke_w=0, radius_mm=0)
+        m = 8.0
+        outer_bp = QgsLayoutItemShape(lay)
+        outer_bp.setShapeType(QgsLayoutItemShape.Shape.Rectangle)
+        outer_bp.setSymbol(QgsFillSymbol.createSimple({"color": "transparent", "outline_color": bp_line, "outline_width": "0.5"}))
+        lay.addLayoutItem(outer_bp)
+        outer_bp.attemptMove(QgsLayoutPoint(m - 2.5, m - 2.5, mm))
+        outer_bp.attemptResize(QgsLayoutSize(W - 2 * m + 5.0, H - 2 * m + 5.0, mm))
+
+        map_w = W - 2 * m
+        map_h = H - 2 * m
+        mp = QgsLayoutItemMap(lay)
+        mp.setRect(0, 0, 10, 10)
+        lay.addLayoutItem(mp)
+        mp.setCrs(p.crs())
+        mp.setBackgroundEnabled(True)
+        mp.setBackgroundColor(QColor(bp_map_bg))
+        mp.attemptMove(QgsLayoutPoint(m, m, mm))
+        mp.attemptResize(QgsLayoutSize(map_w, map_h, mm))
+        main_ext = _setup_extent(mp, extent_layer, cover=True)
+        mp.setFrameEnabled(True)
+        mp.setFrameStrokeColor(QColor(bp_cyan))
+        mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.3, mm))
+        _apply_grid(mp, main_ext, line_color="#1d4ed8", text_color="#bae6fd", font_family="Consolas")
+
+        if kwargs.get("legend", False):
+            leg = QgsLayoutItemLegend(lay)
+            leg.setLinkedMap(mp)
+            lay.addLayoutItem(leg)
+            _configure_clean_legend(leg, mp, lay, title="LAYERS / CAD", font_family="Consolas", title_pt=8.0, group_pt=7.0, item_pt=6.5, max_items_per_layer=6)
+            leg.setFontColor(QColor(bp_line))
+            leg.setBackgroundColor(QColor(11, 37, 69, 230))
+            leg.setFrameEnabled(True)
+            leg.setFrameStrokeColor(QColor(bp_cyan))
+            leg.setFrameStrokeWidth(QgsLayoutMeasurement(0.25, mm))
+            leg.attemptMove(QgsLayoutPoint(m + 4.5, m + 4.5, mm))
+            leg.attemptResize(QgsLayoutSize(min(46.0, map_w * 0.28), min(52.0, map_h * 0.28), mm))
+
+        na = QgsLayoutItemPicture(lay)
+        na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
+        na.setLinkedMap(mp)
+        lay.addLayoutItem(na)
+        na.attemptResize(QgsLayoutSize(9.0, 12.0, mm))
+        na.attemptMove(QgsLayoutPoint(m + map_w - 13.5, m + 4.5, mm))
+
+        _create_clean_scalebar(mp, style="Line Ticks Down", position="bottom-left", pad=5.5,
+                               font_family="Consolas", font_size=6.5, color=bp_line, background=bp_bg, frame_color=bp_cyan)
+
+        tb_w = min(78.0, map_w * 0.42)
+        tb_h = 26.0
+        _add_layout_card_shape(lay, W - m - tb_w - 4.0, H - m - tb_h - 4.0, tb_w, tb_h, fill=bp_bg, stroke=bp_cyan, stroke_w=0.35, radius_mm=0.0)
+        lbl_tb = QgsLayoutItemLabel(lay)
+        lbl_tb.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        bp_title = title or "TECHNICAL SITE PLAN"
+        bp_sub = subtitle or "CAD / Infrastructure Blueprint"
+        bp_cred = _html.escape(credits) if credits else "Engineering Survey"
+        lbl_tb.setText(
+            f"<div style='font-family:Consolas, \"Courier New\", monospace; color:{bp_line};'>"
+            f"<div style='font-size:5.8pt; color:{bp_cyan}; letter-spacing:1px;'>DWG NO: CAD-01 &bull; {kpis['crs_authid']}</div>"
+            f"<div style='font-size:10.5pt; font-weight:bold; text-transform:uppercase; margin-top:2px;'>{_html.escape(bp_title)}</div>"
+            f"<div style='font-size:7pt; color:#bae6fd; margin-top:1px;'>{_html.escape(bp_sub)}</div>"
+            f"<div style='font-size:5.5pt; color:#7dd3fc; margin-top:2px;'>SCALE 1:{int(round(mp.scale())):,} &bull; {bp_cred}</div>"
+            f"</div>"
+        )
+        lay.addLayoutItem(lbl_tb)
+        lbl_tb.attemptMove(QgsLayoutPoint(W - m - tb_w - 2.0, H - m - tb_h - 2.0, mm))
+        lbl_tb.attemptResize(QgsLayoutSize(tb_w - 4.0, tb_h - 4.0, mm))
+
+        _register_layout(mgr, lay)
+        return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
+
+    # =========================================================================
+    # THEME 5D: SMALL MULTIPLES (2x2 Synchronized Grid for Time-Series / Scenarios)
+    # =========================================================================
+    if is_small_multiples:
+        _add_layout_card_shape(lay, 0, 0, W, H, fill="#f8fafc", stroke="transparent", stroke_w=0, radius_mm=0)
+        m = 8.0
+        hdr_h = 16.0
+        ftr_h = 26.0
+        gap = 4.0
+        grid_w = W - 2 * m
+        grid_h = H - 2 * m - hdr_h - ftr_h - 4.0
+        pw = (grid_w - gap) / 2.0
+        ph = (grid_h - gap) / 2.0
+
+        lbl_sm_hdr = QgsLayoutItemLabel(lay)
+        lbl_sm_hdr.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        sm_title = title or "MULTI-SCENARIO SPATIAL COMPARISON"
+        sm_sub = subtitle or "Synchronized Extent & Scale Small Multiples"
+        lbl_sm_hdr.setText(
+            f"<div style='font-family:Helvetica Neue, Arial, sans-serif;'>"
+            f"<div style='font-size:14pt; font-weight:bold; color:#0f172a;'>{_html.escape(sm_title)}</div>"
+            f"<div style='font-size:8pt; color:#475569; margin-top:1px;'>{_html.escape(sm_sub)}</div>"
+            f"</div>"
+        )
+        lay.addLayoutItem(lbl_sm_hdr)
+        lbl_sm_hdr.attemptMove(QgsLayoutPoint(m, m, mm))
+        lbl_sm_hdr.attemptResize(QgsLayoutSize(grid_w, hdr_h, mm))
+
+        panel_titles = kwargs.get("panel_titles") or ["Panel A", "Panel B", "Panel C", "Panel D"]
+        panel_layers = kwargs.get("panel_layers")
+        panels = []
+        main_ext = None
+        top_y = m + hdr_h + 2.0
+        for idx in range(4):
+            col_i = idx % 2
+            row_i = idx // 2
+            px = m + col_i * (pw + gap)
+            py = top_y + row_i * (ph + gap)
+            pmp = QgsLayoutItemMap(lay)
+            pmp.setRect(0, 0, 10, 10)
+            lay.addLayoutItem(pmp)
+            pmp.setCrs(p.crs())
+            pmp.setBackgroundEnabled(True)
+            pmp.setBackgroundColor(QColor("#ffffff"))
+            pmp.attemptMove(QgsLayoutPoint(px, py, mm))
+            pmp.attemptResize(QgsLayoutSize(pw, ph, mm))
+            if main_ext is None:
+                main_ext = _setup_extent(pmp, extent_layer, cover=True)
+            else:
+                pmp.setExtent(main_ext)
+            if isinstance(panel_layers, (list, tuple)) and idx < len(panel_layers) and panel_layers[idx]:
+                try:
+                    pmp.setLayers([_layer(ln) for ln in panel_layers[idx]])
+                    pmp.setKeepLayerSet(True)
+                except Exception:
+                    pass
+            pmp.setFrameEnabled(True)
+            pmp.setFrameStrokeColor(QColor("#94a3b8"))
+            pmp.setFrameStrokeWidth(QgsLayoutMeasurement(0.25, mm))
+            panels.append(pmp)
+
+            ptxt = str(panel_titles[idx]) if idx < len(panel_titles) else f"Panel {idx + 1}"
+            plbl = QgsLayoutItemLabel(lay)
+            plbl.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+            plbl.setText(
+                f"<div style='font-family:Arial, sans-serif; background:#0f172a; color:#ffffff; "
+                f"font-size:7pt; font-weight:bold; padding:2px 6px;'>{_html.escape(ptxt)}</div>"
+            )
+            lay.addLayoutItem(plbl)
+            plbl.attemptMove(QgsLayoutPoint(px + 2.0, py + 2.0, mm))
+            plbl.attemptResize(QgsLayoutSize(min(38.0, pw * 0.48), 6.5, mm))
+
+        ftr_y = top_y + grid_h + 2.5
+        leg = QgsLayoutItemLegend(lay)
+        leg.setLinkedMap(panels[0])
+        lay.addLayoutItem(leg)
+        _configure_clean_legend(leg, panels[0], lay, title="", title_pt=7.0, group_pt=6.8, item_pt=6.2, max_items_per_layer=3)
+        leg.setColumnCount(4)
+        leg.setResizeToContents(False)
+        leg.setBackgroundEnabled(False)
+        leg.setFrameEnabled(False)
+        leg.attemptMove(QgsLayoutPoint(m, ftr_y, mm))
+        leg.attemptResize(QgsLayoutSize(grid_w * 0.62, ftr_h - 2.0, mm))
+
+        _create_clean_scalebar(panels[3], style="Line Ticks Down", position="bottom-right", pad=3.5,
+                               font_size=6.0, color="#0f172a", background="rgba(255,255,255,0.88)", frame_color=None)
+
+        lbl_sm_cred = QgsLayoutItemLabel(lay)
+        lbl_sm_cred.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        sm_cred = _html.escape(credits) if credits else "Multi-Temporal Spatial Dataset"
+        lbl_sm_cred.setText(
+            f"<div style='text-align:right; font-family:Arial, sans-serif; font-size:6.2pt; color:#475569; line-height:1.3;'>"
+            f"<div><b>CRS:</b> {kpis['crs_authid']} &bull; <b>Scale:</b> 1:{int(round(panels[0].scale())):,}</div>"
+            f"<div>{sm_cred}</div>"
+            f"</div>"
+        )
+        lay.addLayoutItem(lbl_sm_cred)
+        lbl_sm_cred.attemptMove(QgsLayoutPoint(m + grid_w * 0.64, ftr_y + 2.0, mm))
+        lbl_sm_cred.attemptResize(QgsLayoutSize(grid_w * 0.36, ftr_h - 2.0, mm))
+
+        _register_layout(mgr, lay)
+        return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": panels[0].scale(), "panels": 4}
+
+    # =========================================================================
+    # THEME 5E: TRANSIT SCHEMATIC & ACCESSIBILITY / ISOCHRONE MAP
+    # =========================================================================
+    if is_transit:
+        _add_layout_card_shape(lay, 0, 0, W, H, fill="#f8fafc", stroke="transparent", stroke_w=0, radius_mm=0)
+        m = 7.5
+        hdr_h = 15.0
+        _add_layout_card_shape(lay, m, m, W - 2 * m, hdr_h, fill="#0f172a", stroke="transparent", stroke_w=0, radius_mm=1.0)
+        _add_layout_card_shape(lay, m, m + hdr_h - 1.5, W - 2 * m, 1.5, fill="#0284c7", stroke="transparent", stroke_w=0, radius_mm=0.0)
+        lbl_tr_h = QgsLayoutItemLabel(lay)
+        lbl_tr_h.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        tr_title = title or "TRANSIT & ACCESSIBILITY NETWORK"
+        tr_sub = subtitle or "Corridors, Stations & Service Coverage"
+        lbl_tr_h.setText(
+            f"<div style='font-family:Helvetica Neue, Arial, sans-serif; color:#ffffff;'>"
+            f"<div style='font-size:13pt; font-weight:bold; letter-spacing:0.5px;'>{_html.escape(tr_title)}</div>"
+            f"<div style='font-size:7.5pt; color:#bae6fd;'>{_html.escape(tr_sub)}</div>"
+            f"</div>"
+        )
+        lay.addLayoutItem(lbl_tr_h)
+        lbl_tr_h.attemptMove(QgsLayoutPoint(m + 4.0, m + 1.5, mm))
+        lbl_tr_h.attemptResize(QgsLayoutSize(W - 2 * m - 8.0, hdr_h - 3.0, mm))
+
+        body_y = m + hdr_h + 3.0
+        body_h = H - body_y - m
+        gap = 3.5
+        is_port = H > W
+        if is_port:
+            map_x, map_y, map_w, map_h = m, body_y, W - 2 * m, body_h * 0.64
+            pan_x, pan_y, pan_w, pan_h = m, body_y + map_h + gap, W - 2 * m, body_h - map_h - gap
+        else:
+            map_w = (W - 2 * m - gap) * 0.66
+            map_h = body_h
+            map_x, map_y = m, body_y
+            pan_x, pan_y, pan_w, pan_h = m + map_w + gap, body_y, (W - 2 * m - gap) - map_w, body_h
+
+        mp = QgsLayoutItemMap(lay)
+        mp.setRect(0, 0, 10, 10)
+        lay.addLayoutItem(mp)
+        mp.setCrs(p.crs())
+        mp.setBackgroundEnabled(True)
+        mp.setBackgroundColor(QColor("#ffffff"))
+        mp.attemptMove(QgsLayoutPoint(map_x, map_y, mm))
+        mp.attemptResize(QgsLayoutSize(map_w, map_h, mm))
+        main_ext = _setup_extent(mp, extent_layer)
+        mp.setFrameEnabled(True)
+        mp.setFrameStrokeColor(QColor("#cbd5e1"))
+        mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.3, mm))
+
+        _create_clean_scalebar(mp, style="Stepped Line", position="bottom-left", pad=4.5,
+                               color="#0f172a", background="#ffffff", frame_color="#cbd5e1")
+        na = QgsLayoutItemPicture(lay)
+        na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
+        na.setLinkedMap(mp)
+        lay.addLayoutItem(na)
+        na.attemptResize(QgsLayoutSize(8.0, 11.0, mm))
+        na.attemptMove(QgsLayoutPoint(map_x + map_w - 11.5, map_y + 3.5, mm))
+
+        kpi_h = min(22.0, pan_h * 0.30)
+        _add_layout_card_shape(lay, pan_x, pan_y, pan_w, kpi_h, fill="#ffffff", stroke="#cbd5e1", stroke_w=0.25, radius_mm=1.0)
+        lbl_tkpi = QgsLayoutItemLabel(lay)
+        lbl_tkpi.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        lbl_tkpi.setText(
+            f"<div style='font-family:Arial, sans-serif;'>"
+            f"<div style='font-size:6.2pt; font-weight:bold; color:#0284c7; text-transform:uppercase;'>{_html.escape(kpis['kpi1_label'])} &bull; {_html.escape(kpis['kpi2_label'])}</div>"
+            f"<div style='font-size:11pt; font-weight:bold; color:#0f172a; margin-top:1px;'>{_html.escape(kpis['kpi1_value'])} &middot; {_html.escape(kpis['kpi2_value'])}</div>"
+            f"<div style='font-size:6pt; color:#64748b;'>{kpis['kpi1_sub']}</div>"
+            f"</div>"
+        )
+        lay.addLayoutItem(lbl_tkpi)
+        lbl_tkpi.attemptMove(QgsLayoutPoint(pan_x + 3.0, pan_y + 2.0, mm))
+        lbl_tkpi.attemptResize(QgsLayoutSize(pan_w - 6.0, kpi_h - 4.0, mm))
+
+        cred_h = 12.0
+        leg_y = pan_y + kpi_h + 2.5
+        leg_h = max(25.0, pan_h - kpi_h - cred_h - 5.0)
+        leg = QgsLayoutItemLegend(lay)
+        leg.setLinkedMap(mp)
+        lay.addLayoutItem(leg)
+        _configure_clean_legend(leg, mp, lay, title="NETWORK & CATCHMENT", title_pt=8.5, group_pt=7.5, item_pt=7.0, max_items_per_layer=8)
+        leg.setBackgroundColor(QColor("#ffffff"))
+        leg.setFrameEnabled(True)
+        leg.setFrameStrokeColor(QColor("#cbd5e1"))
+        leg.setFrameStrokeWidth(QgsLayoutMeasurement(0.25, mm))
+        leg.attemptMove(QgsLayoutPoint(pan_x, leg_y, mm))
+        leg.attemptResize(QgsLayoutSize(pan_w, leg_h, mm))
+
+        lbl_tcred = QgsLayoutItemLabel(lay)
+        lbl_tcred.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        tr_cred = _html.escape(credits) if credits else "OpenStreetMap / Overture Transit Network"
+        lbl_tcred.setText(
+            f"<div style='font-family:Arial, sans-serif; font-size:6pt; color:#64748b; line-height:1.25;'>"
+            f"<b>Sources:</b> {tr_cred} &bull; {kpis['crs_authid']}</div>"
+        )
+        lay.addLayoutItem(lbl_tcred)
+        lbl_tcred.attemptMove(QgsLayoutPoint(pan_x, pan_y + pan_h - cred_h, mm))
+        lbl_tcred.attemptResize(QgsLayoutSize(pan_w, cred_h, mm))
+
+        _register_layout(mgr, lay)
+        return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
+
+    # =========================================================================
+    # THEME 5F: EDITORIAL VERTICAL (FT / NYT Modern Vertical Data Journalism)
+    # =========================================================================
+    if is_editorial_vertical:
+        bg_ed = "#fffaf5"
+        _add_layout_card_shape(lay, 0, 0, W, H, fill=bg_ed, stroke="transparent", stroke_w=0, radius_mm=0)
+        m = 9.0
+        _add_layout_card_shape(lay, m, m, W - 2 * m, 1.2, fill="#991b1b", stroke="transparent", stroke_w=0, radius_mm=0)
+        hdr_h = 24.0
+        lbl_ev = QgsLayoutItemLabel(lay)
+        lbl_ev.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        ev_title = title or "SPATIAL BRIEFING"
+        ev_sub = subtitle or "Focused cartographic analysis of key geographic patterns"
+        lbl_ev.setText(
+            f"<div style='font-family:Georgia, \"Times New Roman\", serif;'>"
+            f"<div style='font-size:16pt; font-weight:bold; color:#111827; line-height:1.15;'>{_html.escape(ev_title)}</div>"
+            f"<div style='font-family:Helvetica Neue, Arial, sans-serif; font-size:8.5pt; color:#4b5563; margin-top:3px;'>{_html.escape(ev_sub)}</div>"
+            f"</div>"
+        )
+        lay.addLayoutItem(lbl_ev)
+        lbl_ev.attemptMove(QgsLayoutPoint(m, m + 3.0, mm))
+        lbl_ev.attemptResize(QgsLayoutSize(W - 2 * m, hdr_h, mm))
+
+        ftr_h = 8.0
+        map_y = m + hdr_h + 4.0
+        map_w = W - 2 * m
+        map_h = H - map_y - m - ftr_h - 2.0
+
+        mp = QgsLayoutItemMap(lay)
+        mp.setRect(0, 0, 10, 10)
+        lay.addLayoutItem(mp)
+        mp.setCrs(p.crs())
+        mp.setBackgroundEnabled(True)
+        mp.setBackgroundColor(QColor("#f8f4ee"))
+        mp.attemptMove(QgsLayoutPoint(m, map_y, mm))
+        mp.attemptResize(QgsLayoutSize(map_w, map_h, mm))
+        main_ext = _setup_extent(mp, extent_layer, cover=True)
+        mp.setFrameEnabled(True)
+        mp.setFrameStrokeColor(QColor("#d6d3d1"))
+        mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.25, mm))
+
+        if kwargs.get("legend", True):
+            leg = QgsLayoutItemLegend(lay)
+            leg.setLinkedMap(mp)
+            lay.addLayoutItem(leg)
+            _configure_clean_legend(leg, mp, lay, title="KEY", font_family="Arial", title_pt=8.0, group_pt=7.0, item_pt=6.8, max_items_per_layer=6)
+            leg.setBackgroundColor(QColor(255, 250, 245, 232))
+            leg.setFrameEnabled(True)
+            leg.setFrameStrokeColor(QColor("#d6d3d1"))
+            leg.setFrameStrokeWidth(QgsLayoutMeasurement(0.2, mm))
+            leg.attemptMove(QgsLayoutPoint(m + map_w - min(48.0, map_w * 0.30) - 3.5, map_y + 3.5, mm))
+            leg.attemptResize(QgsLayoutSize(min(48.0, map_w * 0.30), min(52.0, map_h * 0.28), mm))
+
+        _create_clean_scalebar(mp, style="Line Ticks Down", position="bottom-left", pad=4.5,
+                               font_size=6.5, color="#111827", background="rgba(255,250,245,0.88)", frame_color=None)
+
+        lbl_ev_f = QgsLayoutItemLabel(lay)
+        lbl_ev_f.setMode(QgsLayoutItemLabel.Mode.ModeHtml)
+        ev_cred = _html.escape(credits) if credits else "Verified Geospatial Sources"
+        lbl_ev_f.setText(
+            f"<div style='font-family:Helvetica Neue, Arial, sans-serif; font-size:6.5pt; color:#6b7280;'>"
+            f"Sources: {ev_cred} &bull; {kpis['crs_authid']}</div>"
+        )
+        lay.addLayoutItem(lbl_ev_f)
+        lbl_ev_f.attemptMove(QgsLayoutPoint(m, H - m - ftr_h, mm))
+        lbl_ev_f.attemptResize(QgsLayoutSize(map_w, ftr_h, mm))
 
         _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
@@ -7171,11 +7781,29 @@ def call(name, args):
             if alias in clean_args:
                 clean_args["layout_name"] = clean_args.pop(alias)
                 break
-    elif "name" in params and "name" not in clean_args:
-        for alias in ("layout", "layout_name", "layer", "layer_name"):
+    elif "name" in params and "name" not in clean_args and "layer" not in params and "layer_name" not in params:
+        for alias in ("layout", "layout_name"):
             if alias in clean_args:
                 clean_args["name"] = clean_args.pop(alias)
                 break
+
+    # Common styling & labeling aliases
+    if "field" in params and "field" not in clean_args and "column" in clean_args:
+        clean_args["field"] = clean_args.pop("column")
+    if "outline_color" in params and "outline_color" not in clean_args and "stroke_color" in clean_args:
+        clean_args["outline_color"] = clean_args.pop("stroke_color")
+    if "width" in params and "width" not in clean_args and "stroke_width" in clean_args:
+        clean_args["width"] = clean_args.pop("stroke_width")
+    if "font" in params and "font" not in clean_args and "font_family" in clean_args:
+        clean_args["font"] = clean_args.pop("font_family")
+    if "size" in params and "size" not in clean_args and "font_size" in clean_args:
+        clean_args["size"] = clean_args.pop("font_size")
+    if "palette" in clean_args:
+        pal = clean_args.pop("palette")
+        if isinstance(pal, dict) and "color_map" in params and "color_map" not in clean_args:
+            clean_args["color_map"] = pal
+        elif isinstance(pal, str) and "ramp" in params and "ramp" not in clean_args:
+            clean_args["ramp"] = pal
 
     # If function does not accept **kwargs, drop extra unexpected keys to avoid TypeError
     if not has_var_keyword:

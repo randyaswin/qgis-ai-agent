@@ -114,6 +114,9 @@ def _extent(extent_layer=None, bbox=None, bbox_crs=None, margin=0.05):
         b = QgsRectangle(*[float(v) for v in bbox])
         if bbox_crs:
             ext = _safe_transform_extent(b, QgsCoordinateReferenceSystem(bbox_crs), p.crs(), p)
+        elif p.crs().isValid() and not p.crs().isGeographic() and abs(b.xMinimum()) <= 180.0 and abs(b.xMaximum()) <= 180.0 and abs(b.yMinimum()) <= 90.0 and abs(b.yMaximum()) <= 90.0:
+            # Auto-transform WGS84 lon/lat bbox into projected project CRS so map never renders blank at (110m, -7m)
+            ext = _safe_transform_extent(b, QgsCoordinateReferenceSystem("EPSG:4326"), p.crs(), p)
         else:
             ext = b if _is_valid_extent(b) else None
     elif extent_layer:
@@ -225,13 +228,25 @@ def create_blank_layout(name="Map", page_size="A4", orientation="landscape", wid
        "rotation": S("number", "map rotation degrees")})
 def add_layout_map(layout=None, x=0, y=0, width=100, height=100, item_id=None, extent_layer=None, bbox=None, bbox_crs=None, scale=None,
                    margin=0.05, layers=None, overview_of=None, overview_color="#c62828", frame_color="#333333",
-                   frame_width=0.3, background=None, grid=False, grid_interval=None, rotation=None, **kwargs):
+                   frame_width=0.3, background=None, grid=False, grid_interval=None, rotation=None, cover=False, **kwargs):
     lay = _lay(layout or kwargs.get("layout_name") or kwargs.get("name"))
     mp = QgsLayoutItemMap(lay)
     mp.setRect(0, 0, 10, 10)
+    mp.setCrs(QgsProject.instance().crs())
     _place(lay, mp, x, y, width, height, item_id)
-    ext = _extent(extent_layer, bbox, bbox_crs, margin)
-    mp.zoomToExtent(ext)
+    ext = _extent(extent_layer, bbox, bbox_crs, 0.0 if cover else margin)
+    if cover and _is_valid_extent(ext) and float(width) > 0 and float(height) > 0:
+        f_ar = float(width) / float(height)
+        e_ar = ext.width() / max(ext.height(), 1e-12)
+        cx, cy = ext.center().x(), ext.center().y()
+        if e_ar < f_ar:
+            nw, nh = ext.width(), ext.width() / f_ar
+        else:
+            nh, nw = ext.height(), ext.height() * f_ar
+        ext = QgsRectangle(cx - nw * 0.5, cy - nh * 0.5, cx + nw * 0.5, cy + nh * 0.5)
+        mp.setExtent(ext)
+    else:
+        mp.zoomToExtent(ext)
     if scale:
         mp.setScale(float(scale))
     if layers:

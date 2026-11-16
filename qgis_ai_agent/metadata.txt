@@ -4,7 +4,7 @@ qgisMinimumVersion=3.34
 qgisMaximumVersion=4.99
 description=Autonomous AI cartography and spatial analysis copilot driven via Model Context Protocol (MCP) and AI CLIs.
 about=Connects QGIS to autonomous AI agents (Google Antigravity agy, Claude Code, Gemini CLI, OpenAI Codex) via the Model Context Protocol (MCP). Features 70 deep QGIS tools (STAC, COG streaming, Overture Maps DuckDB spatial SQL, 440+ Processing algorithms, cartographic styling, sampling grid classification, GCP Helmert georeferencing, and 5 distinct layout archetypes: Official Planning, Disaster Infographic, NatGeo, Statistical Thematic, and Relief Topographic) paired with 61 GIS domain skills.
-version=1.1.3
+version=1.1.4
 author=M. Randy Aswin
 email=mrandyaswin@gmail.com
 homepage=https://github.com/randyaswin/qgis-ai-agent
@@ -16,7 +16,11 @@ experimental=False
 deprecated=False
 has_processing_provider=False
 icon=icon.svg
-changelog=1.1.3:
+changelog=1.1.4:
+    - Added 5 new popular map layout themes in create_styled_layout: figure_ground, blueprint_technical, small_multiples, transit_schematic, and editorial_vertical.
+    - Enhanced poster_minimalist / retro_poster with optional soft gradient vignette masking, plus fixed extent/cover-fit framing and small_multiples 4-column legend sizing.
+    - Added new layout-data-preparation skill covering full bbox data fetching, network/isochrone/temporal processing, and theme-specific symbology recipes.
+1.1.3:
     - Complete iterative tiled & paginated data fetching across all sources (Overture PMTiles & STAC Parquet including places, DuckDB spatial SQL, STAC item search, ArcGIS FeatureServer/MapServer REST, and OGC WFS).
     - Universal edge-to-edge map framing (cover-fit + explicit/active study bbox lock + outlier-extent filtering) across create_styled_layout and create_layout, plus complete antique_historical parchment/legend/cartouche/north-arrow/scalebar and poster_minimalist layouts.
     - Objective layout QA diagnostics in snapshot_layout, universal 5-axis deep layout reasoning & multi-iteration critique loop in AGENT.md, Agent Orchestration model label in agy selector, and update_layer(name=...) / style_categorized(column=...) aliases.

@@ -129,9 +129,9 @@ Workflow:
    - Call `snapshot_canvas` to inspect the rendered map canvas (symbology, halos, layer order, figure-ground contrast).
    - MANDATORY MULTI-ITERATION LAYOUT INSPECTION (`snapshot_layout`):
      * Treat the first `snapshot_layout(name=...)` call as a **draft inspection**, NEVER as an automatic pass.
-     * Inspect BOTH the rendered layout image AND the returned `qa` diagnostics (`qa_warnings`, `out_of_bounds_items`, `overlapping_items`, `map_area_pct`, `legend_layers_count`).
+     * Inspect BOTH the rendered layout image AND the returned `qa` diagnostics (`qa_warnings`, `map_blank_pct`, `out_of_bounds_items`, `overlapping_items`, `map_area_pct`, `legend_layers_count`).
      * Critically evaluate every visual detail:
-       1. Hero Map Presence & Framing: The map must be the primary visual hero (typically 55–90% of page area depending on style). Ensure the study area fills the map face cleanly without floating cutouts, cropped landmarks, or awkward empty margins.
+       1. Non-Blank Hero Map & Framing: `map_blank_pct` MUST be well below `98%` and features must be clearly visible inside the map frame! If the map renders blank/white or only partially filled, IMMEDIATELY fix the map extent/CRS (`update_layout_item` / `create_styled_layout` with `bbox=...`) and re-run `snapshot_layout`. Ensure the study area fills 55–90% of the page cleanly without floating cutouts or cropped landmarks.
        2. Zero Collisions & Bounds Safety: `out_of_bounds_items` and `overlapping_items` MUST be empty. No legend, scalebar, north arrow, grid coordinate, or cartouche may collide or clip off the page.
        3. Legend Bounds & Pruning: The legend MUST fit entirely inside its container. NEVER include background basemaps, hillshades, or raw single-band rasters ('Band 1 0-255') in the legend. Use `columns=2` or `3` when layers exceed 4 items.
        4. Typography, Hierarchy & Credits: Check title/subtitle/label readability, label density/collisions on the map itself, scale bar proportions, and concise 1–2 line source credits.
@@ -156,6 +156,12 @@ Workflow:
      * `editorial_infographic`: Journalistic magazine atlas (e.g. African soils / NatGeo). Editorial headline banner, lead paragraph, primary hero map, secondary inset overview map, floating bold KPI chips (`US$ 4 billion`), multi-column compact legend.
      * `dual_comparison`: Synchronized side-by-side temporal or scenario comparison (Before vs After, 2010 vs 2026, Baseline vs Hazard). Dual locked viewports, temporal phase badges, shared bottom legend & scale bar.
      * `corridor_trail`: Linear infrastructure and route guide (rivers, hiking trails, highways, pipelines). Panoramic map along top 65%, bottom route profile strip with milestone step chips (km 0, km 25, km 50).
+     * `retro_poster`: Vintage minimalist city art poster on warm cream parchment (`#f5efe0`), thin double neatline, full-bleed map with smooth 4-edge + radial gradient vignette masking (`vignette=True`), tracked serif footer, DMS coordinates, and 1-line credits.
+     * `figure_ground`: Architectural Nolli Plan / Schwarzplan. Pure black solid buildings on white ground (`#ffffff`), crisp frame, numeric scale ratio, zero clutter (load skill `layout-data-preparation`).
+     * `blueprint_technical`: Architectural & engineering CAD blueprint. Deep Prussian blue (`#0b2545`), white/cyan linework, drafting grid, engineering title block.
+     * `small_multiples`: Synchronized 2x2 grid for 4-period time-series or multi-scenario comparison (`panel_titles`, `panel_layers`), shared legend & scale bar.
+     * `transit_schematic`: Transit, mobility & isochrone accessibility map with network hero, station catchment summary, and corridor legend.
+     * `editorial_vertical`: Modern vertical data journalism briefing (FT/NYT style). Bold headline + lead deck, clean portrait hero map, compact floating key, and 1-line source footer.
      * `antique_historical`: Historical & archival engraved plan (e.g. Plan of Rome). Sepia parchment background (`#f4ecd8`), ornamental double neatline, quadrant coordinate folding grid, corner cartouche in negative space, antique scale bar.
      * `cyberpunk_hud`: Dark sci-fi geospatial HUD. Obsidian dark (`#090a0f`), glowing neon cyan (`#00f0ff`) and magenta (`#ff007f`) accents, monospace telemetry readouts, radar grid.
      * `nautical_bathymetric`: Admiralty / NOAA marine chart. Pale parchment land (`#fbf5dc`), bathymetric depth soundings, nautical neatline, 360-degree compass rose, official hydrographic cartouche.
