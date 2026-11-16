@@ -18,6 +18,7 @@ import json
 import logging
 import math
 import os
+import uuid
 import random
 import re
 import struct
@@ -288,6 +289,15 @@ def _refresh():
         c.refreshAllLayers()
 
 
+def _project_scratch_file(prefix="scratch", ext=".gpkg"):
+    """Return a unique persistent file path inside the active project's scratch/ directory."""
+    pfile = QgsProject.instance().fileName() or None
+    sdir = paths.get_scratch_dir(pfile)
+    os.makedirs(sdir, exist_ok=True)
+    clean = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in str(prefix or "scratch")).strip("_") or "scratch"
+    return os.path.join(sdir, f"{clean}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}{ext}")
+
+
 # ---------------------------------------------------------------- project
 @tool("Snapshot of the whole session: project CRS, layers (fields, geometry, renderer), canvas extent, layouts. Call this first and after every change.")
 def get_project_state():
@@ -295,8 +305,13 @@ def get_project_state():
     order = [n.layerId() for n in p.layerTreeRoot().findLayers()]
     c = _canvas()
     ext = c.extent() if c else None
+    pfile = p.fileName() or ""
+    pdir = paths.resolve_project_dir(pfile or None)
     state = {
-        "project_file": p.fileName(),
+        "project_file": pfile,
+        "project_dir": pdir,
+        "scratch_dir": paths.get_scratch_dir(pfile or None),
+        "ai_dir": paths.get_ai_project_dir(pfile or None),
         "crs": p.crs().authid(),
         "layers_top_to_bottom": [_layer_info(p.mapLayer(i)) for i in order if p.mapLayer(i)],
         "canvas_extent": [round(ext.xMinimum(), 4), round(ext.yMinimum(), 4), round(ext.xMaximum(), 4), round(ext.yMaximum(), 4)] if _is_valid_extent(ext) else None,
@@ -377,16 +392,40 @@ def _study_bbox_rect(p, explicit_bbox=None):
     return rect if _is_valid_extent(rect) else None
 
 
-@tool("Clear the project and start fresh.", {"crs": S("string", "e.g. EPSG:4326 or EPSG:32748")})
-def new_project(crs="EPSG:4326"):
+@tool("Clear the project and start fresh inside a new dedicated project directory under the configured output directory (with scratch/, ai/, and autosave .qgz).",
+      {"crs": S("string", "e.g. EPSG:4326 or EPSG:32748"),
+       "name": S("string", "optional project folder/file name"),
+       "output_dir": S("string", "optional parent output directory; defaults to configured Output Folder")})
+def new_project(crs="EPSG:4326", name=None, output_dir=None):
     global _ACTIVE_STUDY_BBOX
     _ACTIVE_STUDY_BBOX = None
+
+    base_out = os.path.normpath(os.path.abspath(os.path.expanduser(output_dir))) if output_dir else paths.get_configured_output_dir()
+    os.makedirs(base_out, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    if name:
+        clean_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in str(name)).strip("_") or "project"
+        folder_name = f"{clean_name}_{ts}" if os.path.exists(os.path.join(base_out, clean_name)) else clean_name
+    else:
+        clean_name = f"project_{ts}"
+        folder_name = f"{clean_name}_{uuid.uuid4().hex[:4]}"
+
+    proj_dir = os.path.join(base_out, folder_name)
+    os.makedirs(os.path.join(proj_dir, "scratch"), exist_ok=True)
+    os.makedirs(os.path.join(proj_dir, "ai"), exist_ok=True)
+    paths.set_active_project_dir(proj_dir)
+
     p = QgsProject.instance()
     with _canvas_freeze_guard():
         p.clear()
         c = QgsCoordinateReferenceSystem(crs)
         if c.isValid():
             p.setCrs(c)
+        if name:
+            p.setTitle(clean_name)
+        p.setPresetHomePath(proj_dir)
+        qgz_path = os.path.join(proj_dir, f"{folder_name}.qgz")
+        p.write(qgz_path)
         _sanitize_canvas_extent(target_crs=c)
     return get_project_state()
 
@@ -404,19 +443,24 @@ def set_project_crs(crs):
     return {"crs": c.authid()}
 
 
-@tool("Save project to .qgz/.qgs. If path is omitted, saves to the current file or auto-saves to output directory.",
-      {"path": S("string", "optional absolute path; defaults to current project file or ~/qgis-ai-maps/<title>.qgz")})
+@tool("Save project to .qgz/.qgs. If path is omitted, saves to the current file or auto-saves inside the active project directory.",
+      {"path": S("string", "optional path; defaults to current project file or active project directory")})
 def save_project(path=None):
     p = QgsProject.instance()
     if not path:
         path = p.fileName()
     if not path:
-        out_dir = paths.get_default_output_dir()
+        out_dir = paths.get_active_project_dir() or paths.get_configured_output_dir()
         os.makedirs(out_dir, exist_ok=True)
         title = p.title() or "QGIS_Project"
         clean_title = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in title).strip("_") or "QGIS_Project"
         path = os.path.join(out_dir, f"{clean_title}.qgz")
+    elif not os.path.isabs(path):
+        base_dir = paths.resolve_project_dir(p.fileName() or None) or paths.get_configured_output_dir()
+        path = os.path.join(base_dir, path)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     ok = p.write(path)
+    paths.set_active_project_dir(os.path.dirname(os.path.abspath(path)))
     try:
         from .sessions import record_autosave_info
         record_autosave_info(path)
@@ -431,6 +475,7 @@ def open_project(path):
         raise FileNotFoundError(f"Project file not found: {path}")
     with _canvas_freeze_guard():
         QgsProject.instance().read(path)
+    paths.set_active_project_dir(os.path.dirname(os.path.abspath(path)))
     return get_project_state()
 
 
@@ -534,7 +579,7 @@ def _fetch_paginated_remote_vector_to_gpkg(path, provider="ogr", bbox=None, page
     batch_sz = max(50, min(int(page_size or 1000), 10000))
     max_total = 250000
     _cleanup_old_temp_files()
-    out_file = os.path.join(tempfile.gettempdir(), f"remote_vec_{int(time.time() * 1000)}.gpkg")
+    out_file = _project_scratch_file("remote_vec", ".gpkg")
     valid_bbox = isinstance(bbox, (list, tuple)) and len(bbox) == 4
     total_cnt = 0
     layer_tbl = "features"
@@ -1344,6 +1389,7 @@ def create_sampling_grid(layer_name="Sampling_Grid", extent_layer=None, bbox=Non
 
     type_code = 4 if str(grid_type).lower() in ("hexagon", "hex") else 2
 
+    grid_out = output_path or _project_scratch_file(layer_name or "grid", ".gpkg")
     params = {
         "TYPE": type_code,
         "EXTENT": target_extent,
@@ -1352,13 +1398,13 @@ def create_sampling_grid(layer_name="Sampling_Grid", extent_layer=None, bbox=Non
         "HOVERLAY": 0,
         "VOVERLAY": 0,
         "CRS": final_crs,
-        "OUTPUT": output_path or "TEMPORARY_OUTPUT"
+        "OUTPUT": grid_out
     }
 
     res = processing.run("native:creategrid", params)
     out_lyr = res.get("OUTPUT")
     if isinstance(out_lyr, str):
-        grid_lyr = QgsVectorLayer(out_lyr, layer_name, "ogr" if output_path else "memory")
+        grid_lyr = QgsVectorLayer(out_lyr, layer_name, "ogr")
     else:
         grid_lyr = out_lyr
         grid_lyr.setName(layer_name)
@@ -2163,7 +2209,25 @@ class _CancelableFeedback(QgsProcessingFeedback):
         super().setProgress(progress)
 
 
-@tool("Run a Processing algorithm. Layer params accept layer names/ids. OUTPUT defaults to TEMPORARY_OUTPUT. Results are added to the map when load=true.",
+def _infer_processing_output_path(alg, output_name=None):
+    """Build a persistent file path in the active project's scratch/ directory (no memory layers)."""
+    out_def = alg.outputDefinition("OUTPUT")
+    out_type = (out_def.type() if out_def else "").lower()
+    prefix = output_name or (alg.id().replace(":", "_") if alg else "proc")
+    if "raster" in out_type:
+        return _project_scratch_file(prefix, ".tif")
+    if "html" in out_type:
+        return _project_scratch_file(prefix, ".html")
+    if "folder" in out_type:
+        d = _project_scratch_file(prefix, "")
+        os.makedirs(d, exist_ok=True)
+        return d
+    if "file" in out_type:
+        return _project_scratch_file(prefix, ".csv")
+    return _project_scratch_file(prefix, ".gpkg")
+
+
+@tool("Run a Processing algorithm. Layer params accept layer names/ids. OUTPUT defaults to a persistent file in the active project scratch/ directory. Results are added to the map when load=true.",
       {"algorithm": S("string", ""), "params": S("object", "parameter dict"),
        "load": S("boolean", "default true"), "output_name": S("string", "rename the loaded result")})
 def run_processing(algorithm, params, load=True, output_name=None):
@@ -2176,7 +2240,9 @@ def run_processing(algorithm, params, load=True, output_name=None):
             params[k] = QgsProject.instance().mapLayersByName(v)[0].id()
     a = QgsApplication.processingRegistry().algorithmById(algorithm)
     if a and "OUTPUT" in [o.name() for o in a.outputDefinitions()]:
-        params.setdefault("OUTPUT", "TEMPORARY_OUTPUT")
+        cur_out = params.get("OUTPUT")
+        if not cur_out or str(cur_out).strip().upper() == "TEMPORARY_OUTPUT" or str(cur_out).strip().lower().startswith("memory:"):
+            params["OUTPUT"] = _infer_processing_output_path(a, output_name=output_name)
     feedback = _CancelableFeedback(tool_name="run_processing", label=f"Processing {algorithm}...")
     _report_progress("run_processing", 0, f"Starting {algorithm}...")
     before = set(QgsProject.instance().mapLayers())
@@ -6207,14 +6273,14 @@ def load_public_cog(url, name=None):
 _DUCKDB_SESSION_SQL = (
     "SET s3_region='us-west-2';",
     "SET geometry_always_xy=true;",
-    "SET memory_limit='512MB';",
+    "SET memory_limit='1GB';",
     "SET threads=4;",
     "SET preserve_insertion_order=false;",
 )
 
 
-def _execute_duckdb_nonblocking(setup_sql_list, copy_query, fetch_scalar=False):
-    """Execute DuckDB SQL on a worker thread while keeping Qt events responsive and cancellable."""
+def _execute_duckdb_nonblocking(setup_sql_list, copy_query, fetch_scalar=False, timeout_sec=180):
+    """Execute DuckDB SQL on a worker thread while keeping Qt events responsive, bounded, and cancellable."""
     try:
         import duckdb
     except ImportError:
@@ -6225,6 +6291,7 @@ def _execute_duckdb_nonblocking(setup_sql_list, copy_query, fetch_scalar=False):
     con_holder = [None]
     con_lock = threading.Lock()
     interrupted = [False]
+    timed_out = [False]
 
     def _worker():
         con = None
@@ -6235,7 +6302,12 @@ def _execute_duckdb_nonblocking(setup_sql_list, copy_query, fetch_scalar=False):
             if CANCEL_REQUESTED:
                 return
             home_dir_sql = paths.get_home_dir().replace("\\", "/").replace("'", "''")
+            tmp_dir_sql = tempfile.gettempdir().replace("\\", "/").replace("'", "''")
             con.execute(f"SET home_directory='{home_dir_sql}';")
+            try:
+                con.execute(f"SET temp_directory='{tmp_dir_sql}';")
+            except Exception:
+                pass
             try:
                 con.execute("LOAD spatial; LOAD httpfs;")
             except Exception:
@@ -6265,9 +6337,19 @@ def _execute_duckdb_nonblocking(setup_sql_list, copy_query, fetch_scalar=False):
 
     worker = threading.Thread(target=_worker, daemon=True)
     worker.start()
+    start_t = time.monotonic()
     while worker.is_alive():
         if CANCEL_REQUESTED and not interrupted[0]:
             interrupted[0] = True
+            with con_lock:
+                active_con = con_holder[0]
+                if active_con is not None and hasattr(active_con, "interrupt"):
+                    try:
+                        active_con.interrupt()
+                    except Exception:
+                        pass
+        elif timeout_sec and (time.monotonic() - start_t) > timeout_sec and not timed_out[0]:
+            timed_out[0] = True
             with con_lock:
                 active_con = con_holder[0]
                 if active_con is not None and hasattr(active_con, "interrupt"):
@@ -6279,10 +6361,12 @@ def _execute_duckdb_nonblocking(setup_sql_list, copy_query, fetch_scalar=False):
             QCoreApplication.processEvents()
         except Exception:
             pass
-        worker.join(timeout=0.03)
+        worker.join(timeout=0.1)
 
     if CANCEL_REQUESTED or interrupted[0]:
         raise RuntimeError("Execution stopped by user.")
+    if timed_out[0]:
+        raise RuntimeError(f"DuckDB spatial query timed out after {int(timeout_sec)}s. Narrow your bbox or use PMTiles via query_overture_maps.")
     if err_holder[0] is not None:
         raise err_holder[0]
     return res_holder[0]
@@ -6560,7 +6644,7 @@ def _choose_pmtiles_tiles(xmin, ymin, xmax, ymax, min_zoom, max_zoom, t_name):
         tx1, ty1 = _lonlat_to_tile_xy(xmax, ymin, z)
         return [(z, x, y) for x in range(tx0, tx1 + 1) for y in range(ty0, ty1 + 1)]
 
-    max_allowed = 64
+    max_allowed = 256
     tiles = _tiles_for_z(max_zoom)
     if len(tiles) <= max_allowed:
         return max_zoom, tiles
@@ -7282,8 +7366,41 @@ def _overture_select_clause(t_name):
     return "id, names.primary as name, subtype, class, geometry"
 
 
+def _iter_spatial_bbox_chunks(xmin, ymin, xmax, ymax, t_name):
+    """Split a bbox into lightweight spatial tile chunks when it exceeds theme thresholds."""
+    max_total_deg = 1.5 if t_name == "buildings" else (6.0 if t_name == "divisions" else 3.0)
+    span_x = max(1e-9, xmax - xmin)
+    span_y = max(1e-9, ymax - ymin)
+    if span_x > max_total_deg or span_y > max_total_deg:
+        raise ValueError(
+            f"Bounding box span ({span_x:.2f}° × {span_y:.2f}°) exceeds safe limit ({max_total_deg}° × {max_total_deg}°) "
+            f"for Overture '{t_name}'. Narrow the bbox to a city or district."
+        )
+
+    chunk_deg = 0.04 if t_name == "buildings" else (0.5 if t_name == "divisions" else 0.12)
+    nx = max(1, math.ceil(span_x / chunk_deg))
+    ny = max(1, math.ceil(span_y / chunk_deg))
+    if nx * ny > 25:
+        raise ValueError(
+            f"Bounding box requires {nx * ny} spatial chunks for Overture '{t_name}' (max 25). "
+            f"Narrow the bbox to prevent multi-GB download."
+        )
+
+    dx = span_x / nx
+    dy = span_y / ny
+    chunks = []
+    for ix in range(nx):
+        cx0 = xmin + ix * dx
+        cx1 = xmax if ix == nx - 1 else xmin + (ix + 1) * dx
+        for iy in range(ny):
+            cy0 = ymin + iy * dy
+            cy1 = ymax if iy == ny - 1 else ymin + (iy + 1) * dy
+            chunks.append((cx0, cy0, cx1, cy1, ix == nx - 1, iy == ny - 1))
+    return chunks
+
+
 def _query_overture_stac_parquet_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax, release, filter_sql, safe_limit, out_file, fetch_all=True, page_size=2000):
-    """Paginated STAC-indexed GeoParquet fetch into an indexed GeoPackage (iterates until complete when fetch_all=True)."""
+    """Lightweight STAC-indexed GeoParquet fetch with bbox threshold and automatic spatial tile chunking."""
     from osgeo import gdal
 
     try:
@@ -7291,113 +7408,154 @@ def _query_overture_stac_parquet_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax,
     except ImportError:
         raise RuntimeError("duckdb is required for GeoParquet Overture queries. Install it in your Python environment with: pip install duckdb")
 
-    _report_progress("query_overture_maps", 15, f"Resolving STAC Parquet partitions for {t_name}/{t_type}...")
-    parquet_urls = []
-    try:
-        parquet_urls = _resolve_overture_stac_parquet_urls(t_name, t_type, xmin, ymin, xmax, ymax, release)
-    except Exception as exc:
-        LOGGER.warning(f"Overture STAC partition resolution failed ({exc}); falling back to S3 glob")
+    chunks = _iter_spatial_bbox_chunks(xmin, ymin, xmax, ymax, t_name) if fetch_all else [(xmin, ymin, xmax, ymax, True, True)]
+    select_clause = _overture_select_clause(t_name)
+    max_partitions = 25 if t_name == "buildings" else 40
 
-    s3_glob = f"s3://overturemaps-us-west-2/release/{release}/theme={t_name}/type={t_type}/*"
-    if parquet_urls:
+    if len(chunks) == 1:
+        _report_progress("query_overture_maps", 15, f"Resolving STAC Parquet partitions for {t_name}/{t_type}...")
+        try:
+            parquet_urls = _resolve_overture_stac_parquet_urls(t_name, t_type, xmin, ymin, xmax, ymax, release)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Overture STAC partition resolution failed for {t_name}/{t_type} ({exc}). "
+                f"Skipping full-bucket S3 scan to prevent QGIS freeze; try PMTiles (source='pmtiles') or a smaller bbox."
+            ) from exc
+
+        if not parquet_urls:
+            raise ValueError(f"No Overture STAC Parquet partitions found for theme='{t_name}', type='{t_type}' in bbox {[xmin, ymin, xmax, ymax]}.")
+        if len(parquet_urls) > max_partitions:
+            raise ValueError(
+                f"Bounding box {[xmin, ymin, xmax, ymax]} spans {len(parquet_urls)} {t_name} Parquet partitions "
+                f"(limit {max_partitions}). Narrow the bbox to prevent multi-GB download and memory exhaustion."
+            )
+
         quoted = ", ".join("'" + u.replace("'", "''") + "'" for u in parquet_urls)
         parquet_source = f"read_parquet([{quoted}])"
         _report_progress("query_overture_maps", 35, f"Streaming {len(parquet_urls)} STAC-matched {t_name} Parquet file(s)...")
-    else:
-        parquet_source = f"read_parquet('{s3_glob}', hive_partitioning=1)"
-        _report_progress("query_overture_maps", 35, f"Streaming {t_name}/{t_type} from S3 Parquet...")
 
-    select_clause = _overture_select_clause(t_name)
-    where_clauses = [
-        f"bbox.xmax >= {xmin} AND bbox.xmin <= {xmax}",
-        f"bbox.ymax >= {ymin} AND bbox.ymin <= {ymax}",
-    ]
-    if filter_sql:
-        where_clauses.append(f"({filter_sql})")
+        where_clauses = [
+            f"bbox.xmax >= {xmin} AND bbox.xmin <= {xmax}",
+            f"bbox.ymax >= {ymin} AND bbox.ymin <= {ymax}",
+        ]
+        if filter_sql:
+            where_clauses.append(f"({filter_sql})")
 
-    out_file_sql = out_file.replace("\\", "/").replace("'", "''")
-    if not fetch_all:
-        dx = max(1e-9, (xmax - xmin) / 4.0)
-        dy = max(1e-9, (ymax - ymin) / 4.0)
-        per_tile_limit = max(50, math.ceil(safe_limit / 16) * 2)
-        copy_query = f"""
-        COPY (
-            WITH _raw AS (
-                SELECT {select_clause},
-                       FLOOR(((bbox.xmin + bbox.xmax) * 0.5 - {xmin}) / {dx}) AS _gx,
-                       FLOOR(((bbox.ymin + bbox.ymax) * 0.5 - {ymin}) / {dy}) AS _gy
-                FROM {parquet_source}
-                WHERE {' AND '.join(where_clauses)}
-            ),
-            _ranked AS (
-                SELECT * EXCLUDE (_gx, _gy),
-                       ROW_NUMBER() OVER (PARTITION BY _gx, _gy) AS _tile_rn
-                FROM _raw
-            )
-            SELECT * EXCLUDE (_tile_rn)
-            FROM _ranked
-            WHERE _tile_rn <= {per_tile_limit}
-            ORDER BY _tile_rn
-            LIMIT {safe_limit}
-        ) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
-        """
-        _execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, copy_query)
-        cnt = _count_gpkg_features(out_file)
-    else:
-        batch_sz = max(200, int(page_size or 2000))
-        total_cnt = 0
-        target_lyr_name = None
-        page_idx = 0
-        while total_cnt < safe_limit:
-            if CANCEL_REQUESTED:
-                raise RuntimeError("Execution stopped by user.")
-            page_idx += 1
-            offset = (page_idx - 1) * batch_sz
-            this_lim = min(batch_sz, safe_limit - total_cnt)
-            page_path = out_file if page_idx == 1 else f"{out_file[:-5]}_p{page_idx}.gpkg"
-            page_sql = page_path.replace("\\", "/").replace("'", "''")
+        out_file_sql = out_file.replace("\\", "/").replace("'", "''")
+        if not fetch_all:
+            dx = max(1e-9, (xmax - xmin) / 4.0)
+            dy = max(1e-9, (ymax - ymin) / 4.0)
+            per_tile_limit = max(50, math.ceil(safe_limit / 16) * 2)
+            copy_query = f"""
+            COPY (
+                WITH _raw AS (
+                    SELECT {select_clause},
+                           FLOOR(((bbox.xmin + bbox.xmax) * 0.5 - {xmin}) / {dx}) AS _gx,
+                           FLOOR(((bbox.ymin + bbox.ymax) * 0.5 - {ymin}) / {dy}) AS _gy
+                    FROM {parquet_source}
+                    WHERE {' AND '.join(where_clauses)}
+                ),
+                _ranked AS (
+                    SELECT * EXCLUDE (_gx, _gy),
+                           ROW_NUMBER() OVER (PARTITION BY _gx, _gy) AS _tile_rn
+                    FROM _raw
+                )
+                SELECT * EXCLUDE (_tile_rn)
+                FROM _ranked
+                WHERE _tile_rn <= {per_tile_limit}
+                ORDER BY _tile_rn
+                LIMIT {safe_limit}
+            ) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
+            """
+        else:
             copy_query = f"""
             COPY (
                 SELECT {select_clause}
                 FROM {parquet_source}
                 WHERE {' AND '.join(where_clauses)}
-                ORDER BY id
-                LIMIT {this_lim} OFFSET {offset}
-            ) TO '{page_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
+                LIMIT {safe_limit}
+            ) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
+            """
+
+        _execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, copy_query)
+        cnt = _count_gpkg_features(out_file) if os.path.exists(out_file) else 0
+    else:
+        total_cnt = 0
+        target_lyr_name = None
+        written_first = False
+        for c_idx, (cx0, cy0, cx1, cy1, is_last_x, is_last_y) in enumerate(chunks, start=1):
+            if CANCEL_REQUESTED:
+                raise RuntimeError("Execution stopped by user.")
+            if total_cnt >= safe_limit:
+                break
+
+            pct = min(92, int(15 + 75 * (c_idx - 1) / len(chunks)))
+            _report_progress(
+                "query_overture_maps",
+                pct,
+                f"Fetching {t_name} spatial chunk {c_idx}/{len(chunks)} ({total_cnt:,} features)...",
+            )
+            try:
+                chunk_urls = _resolve_overture_stac_parquet_urls(t_name, t_type, cx0, cy0, cx1, cy1, release)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Overture STAC partition resolution failed on chunk {c_idx}/{len(chunks)} ({exc})."
+                ) from exc
+            if not chunk_urls:
+                continue
+
+            quoted = ", ".join("'" + u.replace("'", "''") + "'" for u in chunk_urls)
+            parquet_source = f"read_parquet([{quoted}])"
+            op_x = "<=" if is_last_x else "<"
+            op_y = "<=" if is_last_y else "<"
+            where_clauses = [
+                f"bbox.xmax >= {cx0} AND bbox.xmin <= {cx1}",
+                f"bbox.ymax >= {cy0} AND bbox.ymin <= {cy1}",
+                f"((bbox.xmin + bbox.xmax) * 0.5) >= {cx0} AND ((bbox.xmin + bbox.xmax) * 0.5) {op_x} {cx1}",
+                f"((bbox.ymin + bbox.ymax) * 0.5) >= {cy0} AND ((bbox.ymin + bbox.ymax) * 0.5) {op_y} {cy1}",
+            ]
+            if filter_sql:
+                where_clauses.append(f"({filter_sql})")
+
+            rem_limit = safe_limit - total_cnt
+            chunk_path = out_file if not written_first else f"{out_file[:-5]}_c{c_idx}.gpkg"
+            chunk_sql = chunk_path.replace("\\", "/").replace("'", "''")
+            copy_query = f"""
+            COPY (
+                SELECT {select_clause}
+                FROM {parquet_source}
+                WHERE {' AND '.join(where_clauses)}
+                LIMIT {rem_limit}
+            ) TO '{chunk_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
             """
             try:
                 _execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, copy_query)
-                page_cnt = _count_gpkg_features(page_path)
-                if page_idx == 1:
-                    if page_cnt == 0:
-                        break
-                    total_cnt = page_cnt
+                c_cnt = _count_gpkg_features(chunk_path) if os.path.exists(chunk_path) else 0
+                if not written_first:
+                    if c_cnt == 0:
+                        if os.path.exists(chunk_path):
+                            os.remove(chunk_path)
+                        continue
+                    written_first = True
+                    total_cnt = c_cnt
                     target_lyr_name = _gpkg_first_layer_name(out_file) or "features"
                 else:
-                    if page_cnt > 0:
+                    if c_cnt > 0:
                         vt_opts = gdal.VectorTranslateOptions(
                             format="GPKG",
                             accessMode="append",
                             layerName=target_lyr_name or "features",
                         )
-                        res = gdal.VectorTranslate(out_file, page_path, options=vt_opts)
+                        res = gdal.VectorTranslate(out_file, chunk_path, options=vt_opts)
                         if res is not None:
                             res = None
-                        total_cnt += page_cnt
+                        total_cnt += c_cnt
             finally:
-                if page_idx > 1 and os.path.exists(page_path):
+                if written_first and chunk_path != out_file and os.path.exists(chunk_path):
                     try:
-                        os.remove(page_path)
+                        os.remove(chunk_path)
                     except Exception:
                         pass
-
-            _report_progress(
-                "query_overture_maps",
-                min(92, 35 + page_idx * 10),
-                f"Paginating {t_name} Parquet page {page_idx} ({total_cnt:,} features)...",
-            )
-            if page_cnt < this_lim or page_cnt == 0:
-                break
         cnt = _count_gpkg_features(out_file) if os.path.exists(out_file) else 0
 
     if cnt == 0:
@@ -7414,7 +7572,7 @@ def _query_overture_stac_parquet_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax,
 def _rewrite_overture_s3_glob_in_sql(query):
     """Replace slow full-S3 Overture read_parquet globs with STAC-pruned HTTPS partition URLs when bbox bounds exist."""
     pattern = re.compile(
-        r"read_parquet\(\s*'s3://overturemaps-us-west-2/release/([^/]+)/theme=([^/]+)/type=([^/*']+)/\*'"
+        r"read_parquet\(\s*'s3://overturemaps-us-west-2/release/([^/]+)/theme=([^/]+)/type=([^/*']+)/(?:\*(?:\.parquet)?)?'"
         r"(?:\s*,\s*hive_partitioning\s*=\s*[^)]+)?\s*\)",
         flags=re.IGNORECASE,
     )
@@ -7444,14 +7602,19 @@ def _rewrite_overture_s3_glob_in_sql(query):
 
     def _repl(match):
         release, theme, t_type = match.group(1), match.group(2), match.group(3)
-        try:
-            urls = _resolve_overture_stac_parquet_urls(theme, t_type, xmin, ymin, xmax, ymax, release)
-            if urls:
-                quoted = ", ".join("'" + u.replace("'", "''") + "'" for u in urls)
-                return f"read_parquet([{quoted}])"
-        except Exception as exc:
-            LOGGER.warning(f"STAC SQL rewrite skipped for {theme}/{t_type}: {exc}")
-        return match.group(0)
+        urls = _resolve_overture_stac_parquet_urls(theme, t_type, xmin, ymin, xmax, ymax, release)
+        if not urls:
+            raise ValueError(
+                f"No Overture STAC Parquet partitions intersect bbox {[xmin, ymin, xmax, ymax]} for {theme}/{t_type}."
+            )
+        max_partitions = 25 if theme.lower() == "buildings" else 40
+        if len(urls) > max_partitions:
+            raise ValueError(
+                f"Bbox {[xmin, ymin, xmax, ymax]} spans {len(urls)} {theme} Parquet partitions "
+                f"(limit {max_partitions}). Narrow the bbox to prevent scanning gigabytes of S3 Parquet data."
+            )
+        quoted = ", ".join("'" + u.replace("'", "''") + "'" for u in urls)
+        return f"read_parquet([{quoted}])"
 
     return pattern.sub(_repl, query)
 
@@ -7537,7 +7700,7 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
         safe_limit = min(max(1, int(limit or 500)), 250000)
         page_size = safe_limit
 
-    out_file = os.path.join(tempfile.gettempdir(), f"overture_{t_name}_{t_type}_{int(time.time() * 1000)}.gpkg")
+    out_file = _project_scratch_file(f"overture_{t_name}_{t_type}", ".gpkg")
     if os.path.exists(out_file):
         try:
             os.remove(out_file)
@@ -7600,13 +7763,19 @@ def query_duckdb_spatial(query, layer_name="DuckDB_Layer", page_size=2000, fetch
     except ImportError:
         raise RuntimeError("duckdb is required for DuckDB spatial queries. Install it in your Python environment with: pip install duckdb")
     _cleanup_old_temp_files()
-    out_file = os.path.join(tempfile.gettempdir(), f"duckdb_result_{int(time.time() * 1000)}.gpkg")
+    out_file = _project_scratch_file(layer_name or "duckdb_result", ".gpkg")
     if os.path.exists(out_file):
         try:
             os.remove(out_file)
         except Exception:
             pass
     rewritten_query = _rewrite_overture_s3_glob_in_sql(query)
+    if "s3://overturemaps-us-west-2/" in rewritten_query.lower():
+        raise ValueError(
+            "Unscoped Overture S3 glob detected without bbox.xmin/bbox.xmax/bbox.ymin/bbox.ymax bounds. "
+            "Use query_overture_maps(theme=..., bbox=[...]) or add explicit bbox.xmin/xmax/ymin/ymax WHERE filters "
+            "so STAC partition pruning can run instead of scanning the entire global S3 bucket."
+        )
     base_query = re.sub(r";\s*$", "", rewritten_query.strip())
     out_file_sql = out_file.replace("\\", "/").replace("'", "''")
 
@@ -7615,85 +7784,15 @@ def query_duckdb_spatial(query, layer_name="DuckDB_Layer", page_size=2000, fetch
             copy_query = f"COPY ({base_query}) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');"
             _execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, copy_query)
         else:
-            req_ps = max(1, min(int(page_size or 2000), 10000))
             lim_m = re.search(r"\bLIMIT\s+(\d+)\s*$", base_query, flags=re.IGNORECASE)
             has_offset = bool(re.search(r"\bOFFSET\s+\d+(?:\s+LIMIT\s+\d+)?\s*$", base_query, flags=re.IGNORECASE))
             if lim_m and not has_offset:
-                raw_lim = int(lim_m.group(1))
                 base_query = base_query[:lim_m.start()].rstrip()
-                batch_sz = req_ps if req_ps != 2000 else max(200, min(raw_lim, 10000))
-            else:
-                batch_sz = req_ps
 
             max_total = 250000
-            paged_setup = (
-                "SET s3_region='us-west-2';",
-                "SET geometry_always_xy=true;",
-                "SET memory_limit='512MB';",
-                "SET threads=4;",
-                "SET preserve_insertion_order=true;",
-            )
-            has_order = bool(re.search(r"\bORDER\s+BY\b[^)]*$", base_query, flags=re.IGNORECASE))
-            order_clause = "" if has_order else " ORDER BY ALL"
-            total_cnt = 0
-            target_lyr_name = None
-            page_idx = 0
-
-            while total_cnt < max_total:
-                if CANCEL_REQUESTED:
-                    raise RuntimeError("Execution stopped by user.")
-                page_idx += 1
-                offset = (page_idx - 1) * batch_sz
-                this_lim = min(batch_sz, max_total - total_cnt)
-                page_path = out_file if page_idx == 1 else f"{out_file[:-5]}_p{page_idx}.gpkg"
-                page_sql = page_path.replace("\\", "/").replace("'", "''")
-                copy_query = (
-                    f"COPY (SELECT * FROM ({base_query}) AS _q{order_clause} "
-                    f"LIMIT {this_lim} OFFSET {offset}) TO '{page_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');"
-                )
-                try:
-                    try:
-                        _execute_duckdb_nonblocking(paged_setup, copy_query)
-                    except Exception as ord_exc:
-                        if page_idx == 1 and order_clause and "Execution stopped by user" not in str(ord_exc):
-                            LOGGER.debug(f"DuckDB ORDER BY ALL skipped ({ord_exc}); retrying without ORDER BY ALL")
-                            order_clause = ""
-                            copy_query = (
-                                f"COPY (SELECT * FROM ({base_query}) AS _q "
-                                f"LIMIT {this_lim} OFFSET {offset}) TO '{page_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');"
-                            )
-                            _execute_duckdb_nonblocking(paged_setup, copy_query)
-                        else:
-                            raise
-                    page_cnt = _count_gpkg_features(page_path)
-                    if page_idx == 1:
-                        total_cnt = page_cnt
-                        target_lyr_name = _gpkg_first_layer_name(out_file) or "features"
-                    else:
-                        if page_cnt > 0:
-                            vt_opts = gdal.VectorTranslateOptions(
-                                format="GPKG",
-                                accessMode="append",
-                                layerName=target_lyr_name or "features",
-                            )
-                            res = gdal.VectorTranslate(out_file, page_path, options=vt_opts)
-                            if res is not None:
-                                res = None
-                            total_cnt += page_cnt
-                finally:
-                    if page_idx > 1 and os.path.exists(page_path):
-                        try:
-                            os.remove(page_path)
-                        except Exception:
-                            pass
-
-                _report_progress(
-                    "query_duckdb_spatial",
-                    min(94, 20 + page_idx * 10),
-                    f"Paginating DuckDB batch {page_idx} ({total_cnt:,} features)...",
-                )
-                if page_cnt < this_lim or page_cnt == 0:
-                    break
+            _report_progress("query_duckdb_spatial", 30, "Streaming DuckDB spatial query to GeoPackage...")
+            copy_query = f"COPY (SELECT * FROM ({base_query}) AS _q LIMIT {max_total}) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');"
+            _execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, copy_query)
     except Exception as e:
         if os.path.exists(out_file):
             try:

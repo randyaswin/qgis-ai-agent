@@ -478,7 +478,8 @@ class SessionManager:
 
     def get_project_dir(self):
         pid = self.get_project_id()
-        pdir = os.path.join(PROJECTS_DIR, pid)
+        pfile = QgsProject.instance().fileName() or None
+        pdir = paths.get_ai_project_dir(project_file=pfile, project_id=pid)
         os.makedirs(pdir, exist_ok=True)
         return pdir
 

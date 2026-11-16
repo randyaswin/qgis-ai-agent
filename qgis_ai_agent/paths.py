@@ -63,6 +63,84 @@ def get_documents_dir():
     return get_home_dir()
 
 
+_ACTIVE_PROJECT_DIR = None
+
+
+def set_active_project_dir(path):
+    """Record the active QGIS project directory for scratch, AI sessions, and autosave."""
+    global _ACTIVE_PROJECT_DIR
+    if path:
+        _ACTIVE_PROJECT_DIR = os.path.normpath(os.path.abspath(os.path.expanduser(str(path))))
+        try:
+            os.makedirs(_ACTIVE_PROJECT_DIR, exist_ok=True)
+        except Exception:
+            pass
+    else:
+        _ACTIVE_PROJECT_DIR = None
+    return _ACTIVE_PROJECT_DIR
+
+
+def get_active_project_dir():
+    """Return the active QGIS project directory if set, else None."""
+    return _ACTIVE_PROJECT_DIR
+
+
+def get_configured_output_dir():
+    """Return the user-configured output directory (env override -> QSettings -> default)."""
+    env_dir = os.environ.get("QGIS_AI_OUTPUT_DIR", "").strip()
+    if env_dir:
+        target = os.path.normpath(os.path.abspath(os.path.expanduser(env_dir)))
+        try:
+            os.makedirs(target, exist_ok=True)
+        except Exception:
+            pass
+        return target
+    try:
+        from qgis.PyQt.QtCore import QSettings
+        saved = str(QSettings().value("qgis_ai_agent/outdir", "") or "").strip()
+        if saved:
+            target = os.path.normpath(os.path.abspath(os.path.expanduser(saved)))
+            os.makedirs(target, exist_ok=True)
+            return target
+    except Exception:
+        pass
+    return get_default_output_dir()
+
+
+def resolve_project_dir(project_file=None):
+    """Resolve the active project root directory from a .qgz/.qgs path or _ACTIVE_PROJECT_DIR."""
+    if project_file and os.path.isabs(str(project_file)):
+        return os.path.normpath(os.path.dirname(os.path.abspath(str(project_file))))
+    if _ACTIVE_PROJECT_DIR:
+        return _ACTIVE_PROJECT_DIR
+    return None
+
+
+def get_scratch_dir(project_file=None):
+    """Return the persistent scratch directory inside the active project dir (no /tmp or memory layers)."""
+    pdir = resolve_project_dir(project_file)
+    sdir = os.path.join(pdir, "scratch") if pdir else os.path.join(get_configured_output_dir(), "_scratch")
+    try:
+        os.makedirs(sdir, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.normpath(sdir)
+
+
+def get_ai_project_dir(project_file=None, project_id=None):
+    """Return the AI session/workspace directory inside the active project dir when available."""
+    pdir = resolve_project_dir(project_file)
+    if pdir:
+        adir = os.path.join(pdir, "ai")
+    else:
+        adir = os.path.join(get_projects_dir(), project_id or "default")
+    try:
+        os.makedirs(adir, exist_ok=True)
+    except Exception:
+        pass
+    return os.path.normpath(adir)
+
+
 def get_default_output_dir():
     """Returns the standardized cross-platform default directory for generated maps, layouts, and exports:
     - Linux: ~/Documents/qgis-ai-maps

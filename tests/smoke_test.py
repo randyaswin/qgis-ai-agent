@@ -43,10 +43,11 @@ class Iface:
     def layerTreeView(s): return s.v
 import qgis.utils; qgis.utils.iface = Iface()
 
-from qgis_ai_agent import tools
+from qgis_ai_agent import tools, sessions
 from qgis_ai_agent.server import ToolServer
 out = os.path.join(tempfile.gettempdir(), f"qgis_ai_test_{os.getpid()}")
 os.makedirs(out, exist_ok=True)
+os.environ["QGIS_AI_OUTPUT_DIR"] = out
 gj = os.path.join(out, "pts.geojson")
 with open(gj, "w") as f:
     json.dump({"type": "FeatureCollection", "features": [
@@ -54,8 +55,14 @@ with open(gj, "w") as f:
          "geometry": {"type": "Point", "coordinates": [106.8 + i * 0.05, -6.2 + (i % 3) * 0.05]}} for i in range(8)]}, f)
 
 T = tools.call
-p_state = T("new_project", {"crs": "EPSG:4326"})
+p_state = T("new_project", {"crs": "EPSG:4326", "name": "smoke_proj"})
 assert p_state["crs"] == "EPSG:4326", f"Expected EPSG:4326, got {p_state['crs']}"
+assert p_state["project_dir"] and p_state["project_dir"].startswith(out), f"Expected project_dir under {out}, got {p_state}"
+assert os.path.isdir(p_state["scratch_dir"]) and p_state["scratch_dir"].startswith(p_state["project_dir"])
+assert os.path.isdir(p_state["ai_dir"]) and p_state["ai_dir"].startswith(p_state["project_dir"])
+assert os.path.isfile(p_state["project_file"]) and p_state["project_file"].startswith(p_state["project_dir"])
+_sm = sessions.SessionManager()
+assert _sm.get_project_dir() == p_state["ai_dir"], f"Expected AI dir {p_state['ai_dir']}, got {_sm.get_project_dir()}"
 
 v_info = T("add_vector_layer", {"path": gj, "name": "titik"})
 assert v_info["features"] == 8, f"Expected 8 features, got {v_info['features']}"
@@ -64,6 +71,8 @@ r = T("run_processing", {"algorithm": "native:buffer", "params": {"INPUT": "titi
 new_names = [l["name"] for l in r["new_layers"]]
 print("buffer new layers:", new_names)
 assert "buffer" in new_names, f"Expected 'buffer' layer, got {new_names}"
+assert r["new_layers"][0]["source"].startswith(p_state["scratch_dir"]), f"Expected persistent scratch file under {p_state['scratch_dir']}, got {r['new_layers'][0]}"
+assert r["new_layers"][0]["source"].endswith(".gpkg"), f"Expected .gpkg file (no memory layer), got {r['new_layers'][0]}"
 
 calc_res = T("calculate_field", {"layer": "buffer", "field": "dens", "expression": "\"pop\" / ($area*1e4)"})
 assert calc_res["updated"] == 8, f"Expected 8 updated features, got {calc_res['updated']}"
@@ -526,6 +535,27 @@ try:
     })
     assert _duck_pag_res["features"] == 8, f"Expected all 8 paginated DuckDB features, got {_duck_pag_res}"
     T("remove_layer", {"layer": "duckdb_paginated_pts"})
+    # Verify unscoped Overture S3 glob without bbox bounds fails fast instead of scanning global bucket
+    _unscoped_err = False
+    try:
+        T("query_duckdb_spatial", {
+            "query": "SELECT id, geometry FROM read_parquet('s3://overturemaps-us-west-2/release/2026-10-21.0/theme=buildings/type=building/*.parquet') LIMIT 10",
+            "layer_name": "should_fail_unscoped_s3",
+        })
+    except Exception as _uexc:
+        _unscoped_err = "Unscoped Overture S3 glob" in str(_uexc) or "bbox" in str(_uexc).lower()
+    assert _unscoped_err, "Expected unscoped Overture S3 glob without bbox bounds to fail fast"
+    # Verify spatial bbox threshold & chunking helper
+    _c_small = tools._iter_spatial_bbox_chunks(110.36, -7.80, 110.38, -7.78, "buildings")
+    assert len(_c_small) == 1, f"Expected 1 chunk for small buildings bbox, got {len(_c_small)}"
+    _c_med = tools._iter_spatial_bbox_chunks(110.30, -7.85, 110.40, -7.75, "buildings")
+    assert len(_c_med) == 9, f"Expected 3x3=9 spatial chunks for 0.10x0.10 deg buildings bbox, got {len(_c_med)}"
+    _c_too_big = False
+    try:
+        tools._iter_spatial_bbox_chunks(105.0, -9.0, 115.0, -5.0, "buildings")
+    except ValueError:
+        _c_too_big = True
+    assert _c_too_big, "Expected oversized buildings bbox to raise ValueError"
 except ImportError:
     pass
 
