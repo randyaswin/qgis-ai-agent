@@ -25,7 +25,7 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QMetaType
 
-from .tools import tool, S, _layer, _canvas, _safe_transform_extent, _is_valid_extent, _open_layout_window, _register_layout, _project_scratch_file
+from .tools import tool, S, LOGGER, _layer, _canvas, _safe_transform_extent, _is_valid_extent, _open_layout_window, _register_layout, _project_scratch_file
 
 MM = Qgis.LayoutUnit.Millimeters
 ALIGN_H = {"left": Qt.AlignmentFlag.AlignLeft, "center": Qt.AlignmentFlag.AlignHCenter,
@@ -1316,9 +1316,10 @@ def add_map_reference_grid(layout=None, map_id=None, cols=8, rows=6, poi_layers=
                 if tr:
                     try:
                         pt = tr.transform(pt)
-                    except Exception:
-                        continue
-                if not ext.contains(pt):
+                    except Exception as exc:
+                        LOGGER.debug(f"Skipping grid stamp transform on feature {ft.id()}: {exc}")
+                        pt = None
+                if pt is None or not ext.contains(pt):
                     continue
                 ci = min(ncols - 1, max(0, int((pt.x() - ext.xMinimum()) / (ew / ncols))))
                 ri = min(nrows - 1, max(0, int((ext.yMaximum() - pt.y()) / (eh / nrows))))
