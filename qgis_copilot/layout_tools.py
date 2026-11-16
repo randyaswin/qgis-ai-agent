@@ -25,7 +25,7 @@ from qgis.PyQt.QtCore import QMetaType
 
 from .tools import tool, S, _layer, _canvas, _safe_transform_extent, _is_valid_extent, _open_layout_window, _register_layout
 
-MM = Qgis.LayoutUnit.Millimeters if hasattr(Qgis, "LayoutUnit") else QgsUnitTypes.LayoutMillimeters
+MM = Qgis.LayoutUnit.Millimeters
 ALIGN_H = {"left": Qt.AlignmentFlag.AlignLeft, "center": Qt.AlignmentFlag.AlignHCenter,
            "right": Qt.AlignmentFlag.AlignRight, "justify": Qt.AlignmentFlag.AlignJustify}
 ALIGN_V = {"top": Qt.AlignmentFlag.AlignTop, "middle": Qt.AlignmentFlag.AlignVCenter,
@@ -289,13 +289,13 @@ def add_layout_map(layout=None, x=0, y=0, width=100, height=100, item_id=None, e
             g.setAnnotationPrecision(0)
 
         g.setAnnotationEnabled(True)
-        g.setAnnotationPosition(QgsLayoutItemMapGrid.InsideMapFrame, QgsLayoutItemMapGrid.BorderSide.Left)
-        g.setAnnotationPosition(QgsLayoutItemMapGrid.InsideMapFrame, QgsLayoutItemMapGrid.BorderSide.Bottom)
+        g.setAnnotationPosition(QgsLayoutItemMapGrid.AnnotationPosition.InsideMapFrame, QgsLayoutItemMapGrid.BorderSide.Left)
+        g.setAnnotationPosition(QgsLayoutItemMapGrid.AnnotationPosition.InsideMapFrame, QgsLayoutItemMapGrid.BorderSide.Bottom)
         g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.HideAll, QgsLayoutItemMapGrid.BorderSide.Top)
         g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.HideAll, QgsLayoutItemMapGrid.BorderSide.Right)
         g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.ShowAll, QgsLayoutItemMapGrid.BorderSide.Bottom)
         g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.ShowAll, QgsLayoutItemMapGrid.BorderSide.Left)
-        g.setAnnotationDirection(QgsLayoutItemMapGrid.Vertical, QgsLayoutItemMapGrid.BorderSide.Left)
+        g.setAnnotationDirection(QgsLayoutItemMapGrid.AnnotationDirection.Vertical, QgsLayoutItemMapGrid.BorderSide.Left)
         g.setLineSymbol(QgsLineSymbol.createSimple({"color": "#94a3b8", "width": "0.15", "opacity": "0.6"}))
         mp.grids().addGrid(g)
     lay.refresh()

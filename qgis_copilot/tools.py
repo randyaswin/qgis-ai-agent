@@ -2022,10 +2022,7 @@ def field_stats(layer, field):
     if lyr.fields()[idx].isNumeric():
         f_name = lyr.fields()[idx].name()
         req = QgsFeatureRequest().setSubsetOfAttributes([f_name], lyr.fields())
-        if hasattr(QgsFeatureRequest, "Flag") and hasattr(QgsFeatureRequest.Flag, "NoGeometry"):
-            req.setFlags(QgsFeatureRequest.Flag.NoGeometry)
-        elif hasattr(QgsFeatureRequest, "NoGeometry"):
-            req.setFlags(QgsFeatureRequest.NoGeometry)
+        req.setFlags(QgsFeatureRequest.Flag.NoGeometry)
         count = 0
         total = 0.0
         min_v = float("inf")
@@ -3935,13 +3932,13 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
             g.setAnnotationFormat(QgsLayoutItemMapGrid.AnnotationFormat.Decimal)
             g.setAnnotationPrecision(0)
         g.setAnnotationEnabled(True)
-        g.setAnnotationPosition(QgsLayoutItemMapGrid.InsideMapFrame, QgsLayoutItemMapGrid.BorderSide.Left)
-        g.setAnnotationPosition(QgsLayoutItemMapGrid.InsideMapFrame, QgsLayoutItemMapGrid.BorderSide.Bottom)
+        g.setAnnotationPosition(QgsLayoutItemMapGrid.AnnotationPosition.InsideMapFrame, QgsLayoutItemMapGrid.BorderSide.Left)
+        g.setAnnotationPosition(QgsLayoutItemMapGrid.AnnotationPosition.InsideMapFrame, QgsLayoutItemMapGrid.BorderSide.Bottom)
         g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.HideAll, QgsLayoutItemMapGrid.BorderSide.Top)
         g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.HideAll, QgsLayoutItemMapGrid.BorderSide.Right)
         g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.ShowAll, QgsLayoutItemMapGrid.BorderSide.Bottom)
         g.setAnnotationDisplay(QgsLayoutItemMapGrid.DisplayMode.ShowAll, QgsLayoutItemMapGrid.BorderSide.Left)
-        g.setAnnotationDirection(QgsLayoutItemMapGrid.Vertical, QgsLayoutItemMapGrid.BorderSide.Left)
+        g.setAnnotationDirection(QgsLayoutItemMapGrid.AnnotationDirection.Vertical, QgsLayoutItemMapGrid.BorderSide.Left)
         if hasattr(g, "setAnnotationFrameDistance"):
             g.setAnnotationFrameDistance(1.5)
         g_fmt = QgsTextFormat()
