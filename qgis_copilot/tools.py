@@ -2802,9 +2802,15 @@ def _audit_layout_quality(lay, preview_b64=None):
         x, y, w, h = float(pos.x()), float(pos.y()), float(rect.width()), float(rect.height())
         if w <= 0.1 or h <= 0.1:
             continue
+        rot = float(it.itemRotation()) if hasattr(it, "itemRotation") else 0.0
+        if abs(rot) > 0.1 and hasattr(it, "sceneBoundingRect"):
+            sb = it.sceneBoundingRect()
+            bx1, by1, bx2, by2 = float(sb.left()), float(sb.top()), float(sb.right()), float(sb.bottom())
+        else:
+            bx1, by1, bx2, by2 = x, y, x + w, y + h
 
         kind = type(it).__name__.replace("QgsLayoutItem", "")
-        entry = (kind, x, y, x + w, y + h, it)
+        entry = (kind, bx1, by1, bx2, by2, it)
         if isinstance(it, QgsLayoutItemLegend):
             legends.append(it)
         elif isinstance(it, QgsLayoutItemLabel):
@@ -2816,7 +2822,8 @@ def _audit_layout_quality(lay, preview_b64=None):
         overlays.append(entry)
 
     map_area_pct = round(sum(w * h for _, _, _, w, h in maps) / page_area * 100.0, 1)
-    if maps and map_area_pct < 40.0:
+    is_booklet_lay = "booklet" in str(lay.name() or "").lower()
+    if maps and map_area_pct < 40.0 and not is_booklet_lay and len(overlays) < 12:
         warnings.append(f"Hero map covers only {map_area_pct}% of page; consider expanding map frame.")
 
     for mp_it, _, _, mw, mh in maps:
@@ -2836,9 +2843,13 @@ def _audit_layout_quality(lay, preview_b64=None):
 
     overlaps = []
     for i in range(len(overlays)):
-        k1, ax1, ay1, ax2, ay2, _ = overlays[i]
+        k1, ax1, ay1, ax2, ay2, it1 = overlays[i]
+        a_area = max(0.0, (ax2 - ax1) * (ay2 - ay1))
         for j in range(i + 1, len(overlays)):
-            k2, bx1, by1, bx2, by2, _ = overlays[j]
+            k2, bx1, by1, bx2, by2, it2 = overlays[j]
+            b_area = max(0.0, (bx2 - bx1) * (by2 - by1))
+            if (k1 == "Picture" and a_area > page_area * 0.12) or (k2 == "Picture" and b_area > page_area * 0.12):
+                continue
             ix = min(ax2, bx2) - max(ax1, bx1)
             iy = min(ay2, by2) - max(ay1, by1)
             if ix > 2.0 and iy > 2.0:
@@ -3764,9 +3775,9 @@ def _format_dms_center(ext, src_crs, p):
         return ""
 
 
-@tool("Create a publication-grade themed print layout matching specific cartographic genres: 'retro_poster', 'poster_minimalist', 'figure_ground', 'blueprint_technical', 'small_multiples', 'transit_schematic', 'editorial_vertical', 'antique_historical', 'landscape_masterplan', 'scientific_dark', 'editorial_infographic', 'infographic_disaster', 'bento_dashboard', 'planning_official', 'dual_comparison', 'corridor_trail', 'cyberpunk_hud', 'nautical_bathymetric', 'natgeo', 'statistical_thematic', or 'relief_topographic'. Defaults to A4.",
+@tool("Create a publication-grade themed print layout matching specific cartographic genres: 'tourist_map_a3', 'stepped_booklet_a3', 'retro_poster', 'poster_minimalist', 'figure_ground', 'blueprint_technical', 'small_multiples', 'transit_schematic', 'editorial_vertical', 'antique_historical', 'landscape_masterplan', 'scientific_dark', 'editorial_infographic', 'infographic_disaster', 'bento_dashboard', 'planning_official', 'dual_comparison', 'corridor_trail', 'cyberpunk_hud', 'nautical_bathymetric', 'natgeo', 'statistical_thematic', or 'relief_topographic'. Defaults to A4 (A3 for tourist_map_a3/stepped_booklet_a3).",
       {"name": S("string", "layout name"),
-       "style_theme": S("string", "retro_poster | poster_minimalist | figure_ground | blueprint_technical | small_multiples | transit_schematic | editorial_vertical | antique_historical | landscape_masterplan | scientific_dark | editorial_infographic | infographic_disaster | bento_dashboard | planning_official | dual_comparison | corridor_trail | cyberpunk_hud | nautical_bathymetric | natgeo | statistical_thematic | relief_topographic | modern_clean"),
+       "style_theme": S("string", "tourist_map_a3 | stepped_booklet_a3 | retro_poster | poster_minimalist | figure_ground | blueprint_technical | small_multiples | transit_schematic | editorial_vertical | antique_historical | landscape_masterplan | scientific_dark | editorial_infographic | infographic_disaster | bento_dashboard | planning_official | dual_comparison | corridor_trail | cyberpunk_hud | nautical_bathymetric | natgeo | statistical_thematic | relief_topographic | modern_clean"),
        "title": S("string", "main map title"),
        "subtitle": S("string", "subtitle or administrative region"),
        "credits": S("string", "mandatory real data source attribution"),
@@ -3778,7 +3789,7 @@ def _format_dms_center(ext, src_crs, p):
        "grid": S("boolean", "include coordinate grid (default false)"),
        "agency": S("string", "government agency or municipal department name")})
 def create_styled_layout(name="Map", style_theme="planning_official", title="", subtitle="", credits="",
-                         extent_layer=None, key_extent_layer=None, page_size="A4", orientation="landscape",
+                         extent_layer=None, key_extent_layer=None, page_size=None, orientation="landscape",
                          grid=False, agency="", bbox=None, **kwargs):
     import html as _html
     import math
@@ -3799,16 +3810,20 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
     if old:
         mgr.removeLayout(old)
 
+    th = (style_theme or "planning_official").lower()
+    is_tourist_map = th in ("tourist_map_a3", "tourist_map", "city_tourist_map", "travel_map", "guide_map")
+    is_stepped_booklet = th in ("stepped_booklet_a3", "stepped_booklet", "booklet_a3", "folded_booklet", "stepped_tab")
+    eff_page_size = page_size or ("A3" if (is_tourist_map or is_stepped_booklet) else "A4")
+
     lay = QgsPrintLayout(p)
     lay.initializeDefaults()
     lay.setName(name)
     ori = QgsLayoutItemPage.Orientation.Landscape if orientation == "landscape" else QgsLayoutItemPage.Orientation.Portrait
     page = lay.pageCollection().page(0)
-    page.setPageSize(page_size, ori)
+    page.setPageSize(eff_page_size, ori)
     W, H = page.pageSize().width(), page.pageSize().height()
     mm = QgsUnitTypes.LayoutUnit.LayoutMillimeters if hasattr(QgsUnitTypes, "LayoutUnit") else Qgis.LayoutUnit.Millimeters
 
-    th = (style_theme or "planning_official").lower()
     is_landscape_masterplan = th in ("landscape_masterplan", "landscape_plan", "site_plan", "master_plan_landscape", "watercolor_plan", "eco_park", "landscape")
     is_planning = not is_landscape_masterplan and th in ("planning_official", "tata_ruang", "master_plan", "urban_planning", "zoning", "planning", "official")
     is_infographic = th in ("infographic_bencana", "infographic_disaster", "disaster", "hazard", "bencana")
@@ -5164,6 +5179,240 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
 
         _register_layout(mgr, lay)
         return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale()}
+
+    # =========================================================================
+    # THEME 5G: TOURIST MAP A3 (Full Side-1 Map + Grid + Highlight Cards + Directory)
+    # =========================================================================
+    if is_tourist_map:
+        from . import layout_tools as _lt
+        u = max(1.0, W / 420.0)
+        _add_layout_card_shape(lay, 0, 0, W, H, fill="#faf7f0", stroke="transparent", stroke_w=0, radius_mm=0)
+
+        strip = 4.5 * u
+        mx, my = 6.0 * u + strip, 6.0 * u + strip
+        dir_h = max(44.0, H * 0.175)
+        right_w = max(86.0, W * 0.245)
+        mw = W - mx - right_w - 9.0 * u
+        mh = H - my - dir_h - 8.5 * u
+
+        mp = QgsLayoutItemMap(lay)
+        mp.setRect(0, 0, 10, 10)
+        lay.addLayoutItem(mp)
+        mp.setId("main_map")
+        mp.setCrs(p.crs())
+        mp.setBackgroundEnabled(True)
+        mp.setBackgroundColor(QColor("#eef3e2"))
+        mp.attemptMove(QgsLayoutPoint(mx, my, mm))
+        mp.attemptResize(QgsLayoutSize(mw, mh, mm))
+        main_ext = _setup_extent(mp, extent_layer)
+        mp.setFrameEnabled(True)
+        mp.setFrameStrokeColor(QColor("#94a3b8"))
+        mp.setFrameStrokeWidth(QgsLayoutMeasurement(0.3, mm))
+
+        _register_layout(mgr, lay)
+        _lt.add_map_reference_grid(layout=name, map_id="main_map", cols=8, rows=6, strip_size=strip)
+
+        # Inset downtown/detail map on bottom-left of main map
+        inset_w, inset_h = mw * 0.28, mh * 0.34
+        inset = QgsLayoutItemMap(lay)
+        inset.setRect(0, 0, 10, 10)
+        lay.addLayoutItem(inset)
+        inset.setId("inset_map")
+        inset.setCrs(p.crs())
+        inset.setBackgroundEnabled(True)
+        inset.setBackgroundColor(QColor("#ffffff"))
+        inset.attemptMove(QgsLayoutPoint(mx + 3.0 * u, my + mh - inset_h - 3.0 * u, mm))
+        inset.attemptResize(QgsLayoutSize(inset_w, inset_h, mm))
+        _setup_extent(inset, key_extent_layer or extent_layer)
+        if not key_extent_layer and main_ext and _is_valid_extent(main_ext):
+            cx, cy = main_ext.center().x(), main_ext.center().y()
+            zw, zh = main_ext.width() * 0.16, main_ext.height() * 0.16
+            inset.zoomToExtent(QgsRectangle(cx - zw, cy - zh, cx + zw, cy + zh))
+        inset.setFrameEnabled(True)
+        inset.setFrameStrokeColor(QColor("#475569"))
+        inset.setFrameStrokeWidth(QgsLayoutMeasurement(0.45, mm))
+        ov = QgsLayoutItemMapOverview("inset_ov", mp)
+        ov.setLinkedMap(inset)
+        mp.overviews().addOverview(ov)
+
+        # Curved ribbon title banner & QR code on top of main map header
+        rib_title = title or "CITY TOURIST MAP"
+        rib_w = min(88.0 * u, mw * 0.34)
+        _lt.generate_layout_graphic(
+            kind="ribbon_banner", text=rib_title, subtitle=subtitle or "Sightseeing · Food · Stay",
+            color="#d97373", accent_color="#ffffff", layout=name,
+            x=mx + 3.0 * u, y=my + 2.5 * u, width=rib_w, height=23.0 * u, item_id="hero_ribbon",
+        )
+        _lt.generate_layout_graphic(
+            kind="qr_code", text=credits or "https://qgis.org", color="#1e293b", accent_color="#ffffff",
+            layout=name, x=mx + 3.0 * u + rib_w + 2.5 * u, y=my + 3.5 * u, width=15.0 * u, height=15.0 * u, item_id="hero_qr",
+        )
+
+        _create_clean_scalebar(mp, style="Single Box", position="bottom-right", pad=3.5, font_size=6.5 * u,
+                               color="#1e293b", background="#ffffff", frame_color="#cbd5e1")
+        na = QgsLayoutItemPicture(lay)
+        na.setId("north_arrow")
+        na.setPicturePath(":/images/north_arrows/layout_default_north_arrow.svg")
+        na.setLinkedMap(mp)
+        lay.addLayoutItem(na)
+        na.attemptResize(QgsLayoutSize(9.0 * u, 11.5 * u, mm))
+        na.attemptMove(QgsLayoutPoint(mx + mw - 12.5 * u, my + 3.0 * u, mm))
+
+        # Right Editorial Feature Column (3 themed cards with icon + image/slot + text)
+        rx = mx + mw + 3.5 * u
+        ry = my - strip
+        card_specs = [
+            ("card_1", "SCENIC HIGHLIGHTS", "camera", "#0284c7", "Scenic viewpoints, parks & iconic photo spots."),
+            ("card_2", "WALK & HERITAGE", "hiking", "#65a30d", "Historic alleys, trails & museum corridors."),
+            ("card_3", "RELAX & WELLNESS", "onsen", "#d97706", "Cafes, hot springs & local evening hubs."),
+        ]
+        card_gap = 3.0 * u
+        total_rh = (my + mh) - ry
+        ch = (total_rh - 2 * card_gap) / 3.0
+        for idx, (cid, c_title, c_icon, c_col, c_desc) in enumerate(card_specs):
+            cy = ry + idx * (ch + card_gap)
+            _add_layout_card_shape(lay, rx, cy, right_w, ch, fill="#ffffff", stroke="#cbd5e1", stroke_w=0.3, radius_mm=1.2)
+            _add_layout_card_shape(lay, rx, cy, right_w, 7.5 * u, fill=c_col, stroke="transparent", stroke_w=0, radius_mm=1.0)
+            _lt.generate_layout_graphic(kind="tourist_icon", subtitle=c_icon, color=c_col, accent_color="#ffffff",
+                                        layout=name, x=rx + 1.5 * u, y=cy + 1.0 * u, width=5.5 * u, height=5.5 * u, item_id=f"{cid}_icon")
+            _lt.add_layout_text(name, rx + 8.5 * u, cy + 0.8 * u, right_w - 10.0 * u, 6.0 * u, c_title, item_id=f"{cid}_title",
+                                size=8.0 * u, color="#ffffff", bold=True, padding=0.2)
+            _lt.add_layout_text(name, rx + 3.0 * u, cy + 9.0 * u, right_w - 6.0 * u, ch - 11.0 * u, c_desc, item_id=f"{cid}_body",
+                                size=7.0 * u, color="#334155", valign="top", padding=0.5)
+
+        # Bottom Multi-Column Categorized Directory Strip (Stay + Dining)
+        dir_y = my + mh + 3.5 * u
+        dir_x = 6.0 * u
+        dir_total_w = W - 12.0 * u
+        stay_w = dir_total_w * 0.44
+        eat_w = dir_total_w - stay_w - 3.5 * u
+        _lt.generate_layout_graphic(
+            kind="directory_card", text="ACCOMMODATION & STAY", color="#65a30d", accent_color="#ffffff", columns=2,
+            items=[{"num": i + 1, "name": f"Stay Highlight #{i + 1}", "grid": f"{chr(65 + i)}-2", "meta": "Populate from POI layer"} for i in range(4)],
+            layout=name, x=dir_x, y=dir_y, width=stay_w, height=dir_h, item_id="dir_stay",
+        )
+        _lt.generate_layout_graphic(
+            kind="directory_card", text="DINING, CAFES & LANDMARKS", color="#d97373", accent_color="#ffffff", columns=3,
+            items=[{"num": i + 1, "name": f"Highlight Spot #{i + 1}", "grid": f"{chr(66 + i)}-4", "meta": "Populate from POI layer"} for i in range(6)],
+            layout=name, x=dir_x + stay_w + 3.5 * u, y=dir_y, width=eat_w, height=dir_h, item_id="dir_eat",
+        )
+
+        lay.refresh()
+        return {"layout": name, "theme": style_theme, "page_mm": [W, H], "main_map_scale": mp.scale(),
+                "items": ["main_map", "inset_map", "hero_ribbon", "hero_qr", "card_1_body", "card_2_body", "card_3_body", "dir_stay", "dir_eat"]}
+
+    # =========================================================================
+    # THEME 5H: STEPPED BOOKLET A3 (6-Panel 2x3 Fold with Stepped Vertical Side Tabs)
+    # =========================================================================
+    if is_stepped_booklet:
+        from . import layout_tools as _lt
+        u = max(1.0, W / 420.0)
+        _add_layout_card_shape(lay, 0, 0, W, H, fill="#faf8f5", stroke="transparent", stroke_w=0, radius_mm=0)
+
+        col_w = W / 3.0
+        row_h = H / 2.0
+        tab_w = 7.5 * u
+        # Fold guides (subtle dashed rectangles)
+        for ci in range(1, 3):
+            _add_layout_card_shape(lay, ci * col_w - 0.15, 0, 0.3, H, fill="#cbd5e1", stroke="transparent", stroke_w=0, radius_mm=0)
+        _add_layout_card_shape(lay, 0, row_h - 0.15, W, 0.3, fill="#cbd5e1", stroke="transparent", stroke_w=0, radius_mm=0)
+
+        panels = [
+            # id, col, row, rot, tab_side, tab_color, tab_title, hdr_title, body_hint
+            ("panel_4", 0, 0, 180, "left", "#0284c7", "NATURE & PLAY", "Nature & Outdoor", "Trails, viewpoints, seasonal highlights & activity spots."),
+            ("panel_5", 1, 0, 180, "left", "#16a34a", "FOUR SEASONS", "Seasonal Story", "Spring blossoms, summer highlands, autumn foliage & winter charm."),
+            ("panel_6", 2, 0, 180, "right", "#7c3aed", "ACCESS & INFO", "Access & Transit", "Rail stations, highway exits, transit hubs & tourist office."),
+            ("panel_1", 0, 1, 0, "right", "#0f766e", "WELCOME COVER", title or "CITY GUIDE", subtitle or "Official Folded Tourist Map & Directory"),
+            ("panel_2", 1, 1, 0, "right", "#d97706", "LOCAL FLAVOR", "Stay & Gastronomy", "Signature dishes, cafés, markets & boutique stays."),
+            ("panel_3", 2, 1, 0, "right", "#d97373", "TOP SPOTS", "Featured Spots", "Must-visit landmarks, cultural heritage & photo stops."),
+        ]
+
+        _register_layout(mgr, lay)
+        for idx, (pid, ci, ri, rot, tab_side, tcol, ttitle, htitle, btext) in enumerate(panels):
+            px0 = ci * col_w + 3.0 * u
+            py0 = ri * row_h + 3.0 * u
+            pw = col_w - 6.0 * u
+            ph = row_h - 6.0 * u
+            # Stepped horizontal inset per column so folded tabs cascade neatly
+            step_off = (idx % 2) * (tab_w * 0.9)
+            if tab_side == "right":
+                tab_x = ci * col_w + col_w - tab_w - step_off * 0.5
+                content_x = px0
+                content_w = max(40.0, tab_x - content_x - 2.5 * u)
+            else:
+                tab_x = ci * col_w + step_off * 0.5
+                content_x = tab_x + tab_w + 2.5 * u
+                content_w = max(40.0, (ci * col_w + col_w - 3.0 * u) - content_x)
+
+            # Side Tab Strip (SVG text rotated cleanly)
+            _lt.generate_layout_graphic(
+                kind="stepped_tab", text=ttitle, color=tcol, accent_color="#ffffff",
+                layout=name, x=tab_x, y=ri * row_h + 2.0 * u, width=tab_w, height=row_h - 4.0 * u,
+                item_id=f"{pid}_tab", rotation=rot,
+            )
+            # Panel Card Header + Body
+            _add_layout_card_shape(lay, content_x, py0, content_w, ph, fill="#ffffff", stroke="#e2e8f0", stroke_w=0.25, radius_mm=1.2)
+            hdr_y = (py0 + ph - 11.0 * u) if rot == 180 else py0
+            body_y = py0 + 2.0 * u if rot == 180 else (py0 + 13.0 * u)
+            _lt.add_layout_text(name, content_x + 2.0 * u, hdr_y, content_w - 4.0 * u, 9.5 * u, htitle,
+                                item_id=f"{pid}_header", size=10.5 * u, color="#ffffff", bold=True, align="center",
+                                background=tcol, padding=0.8, rotation=rot)
+
+            if pid == "panel_1":
+                _lt.generate_layout_graphic(
+                    kind="ribbon_banner", text=htitle, subtitle=btext, color=tcol, accent_color="#ffffff",
+                    layout=name, x=content_x + 4.0 * u, y=py0 + 13.0 * u, width=content_w - 8.0 * u, height=22.0 * u,
+                    item_id="cover_ribbon",
+                )
+                # Locator map inset on cover bottom
+                loc_h = min(46.0 * u, ph * 0.34)
+                loc = QgsLayoutItemMap(lay)
+                loc.setRect(0, 0, 10, 10)
+                lay.addLayoutItem(loc)
+                loc.setId("locator_map")
+                loc.setCrs(p.crs())
+                loc.setBackgroundEnabled(True)
+                loc.setBackgroundColor(QColor("#e8f0fe"))
+                loc.attemptMove(QgsLayoutPoint(content_x + 4.0 * u, py0 + ph - loc_h - 4.0 * u, mm))
+                loc.attemptResize(QgsLayoutSize(content_w * 0.48, loc_h, mm))
+                _setup_extent(loc, key_extent_layer or extent_layer)
+                loc.setFrameEnabled(True)
+                loc.setFrameStrokeColor(QColor("#64748b"))
+                loc.setFrameStrokeWidth(QgsLayoutMeasurement(0.3, mm))
+                _lt.add_layout_text(name, content_x + content_w * 0.54, py0 + ph - loc_h - 2.0 * u, content_w * 0.42, loc_h - 4.0 * u,
+                                    credits or "Replace with hero photo & regional summary.", item_id="panel_1_body",
+                                    size=7.5 * u, color="#334155", valign="top", padding=1.0)
+            elif pid == "panel_6":
+                acc_h = min(56.0 * u, ph * 0.44)
+                acc = QgsLayoutItemMap(lay)
+                acc.setRect(0, 0, 10, 10)
+                lay.addLayoutItem(acc)
+                acc.setId("access_map")
+                acc.setCrs(p.crs())
+                acc.setBackgroundEnabled(True)
+                acc.setBackgroundColor(QColor("#f1f5f9"))
+                acc.attemptMove(QgsLayoutPoint(content_x + 4.0 * u, py0 + 6.0 * u, mm))
+                acc.attemptResize(QgsLayoutSize(content_w - 8.0 * u, acc_h, mm))
+                _setup_extent(acc, extent_layer)
+                acc.setFrameEnabled(True)
+                acc.setFrameStrokeColor(QColor("#64748b"))
+                acc.setFrameStrokeWidth(QgsLayoutMeasurement(0.3, mm))
+                acc.setItemRotation(180.0, True)
+                _lt.generate_layout_graphic(
+                    kind="qr_code", text=credits or "https://qgis.org", color="#1e293b", accent_color="#ffffff",
+                    layout=name, x=content_x + 5.0 * u, y=py0 + acc_h + 9.0 * u, width=16.0 * u, height=16.0 * u,
+                    item_id="access_qr", rotation=180,
+                )
+                _lt.add_layout_text(name, content_x + 23.0 * u, py0 + acc_h + 9.0 * u, content_w - 27.0 * u, ph - acc_h - 22.0 * u,
+                                    btext, item_id="panel_6_body", size=7.5 * u, color="#334155", valign="top", padding=1.0, rotation=180)
+            else:
+                _lt.add_layout_text(name, content_x + 4.0 * u, body_y, content_w - 8.0 * u, ph - 17.0 * u,
+                                    btext, item_id=f"{pid}_body", size=8.0 * u, color="#334155", valign="top", padding=1.5, rotation=rot)
+
+        lay.refresh()
+        return {"layout": name, "theme": style_theme, "page_mm": [W, H], "panels": 6,
+                "items": ["panel_1_tab", "panel_2_tab", "panel_3_tab", "panel_4_tab", "panel_5_tab", "panel_6_tab",
+                          "cover_ribbon", "locator_map", "access_map", "access_qr"]}
 
     # =========================================================================
     # THEME 6: SCIENTIFIC DARK MODE THEMATIC ATLAS (Continuous Gradient & Ocean Space)

@@ -163,6 +163,8 @@ Workflow:
      * `small_multiples`: Synchronized 2x2 grid for 4-period time-series or multi-scenario comparison (`panel_titles`, `panel_layers`), shared legend & scale bar.
      * `transit_schematic`: Transit, mobility & isochrone accessibility map with network hero, station catchment summary, and corridor legend.
      * `editorial_vertical`: Modern vertical data journalism briefing (FT/NYT style). Bold headline + lead deck, clean portrait hero map, compact floating key, and 1-line source footer.
+     * `tourist_map_a3`: Double-sided Side-1 A3 tourist map with alpha-numeric reference grid (`A–H`/`1–6`), downtown zoom inset map, curved ribbon banner, QR code, right photo highlight cards, and bottom multi-column numbered directory strip.
+     * `stepped_booklet_a3`: Double-sided Side-2 A3 6-panel folded pocket booklet (`2×3` with `180°`-inverted top row + staggered `90°`/`270°` colored side-tab strips) for stacked edge index tabs when folded. Use `generate_layout_graphic` & `add_map_reference_grid`.
      * `antique_historical`: Historical & archival engraved plan (e.g. Plan of Rome). Sepia parchment background (`#f4ecd8`), ornamental double neatline, quadrant coordinate folding grid, corner cartouche in negative space, antique scale bar.
      * `cyberpunk_hud`: Dark sci-fi geospatial HUD. Obsidian dark (`#090a0f`), glowing neon cyan (`#00f0ff`) and magenta (`#ff007f`) accents, monospace telemetry readouts, radar grid.
      * `nautical_bathymetric`: Admiralty / NOAA marine chart. Pale parchment land (`#fbf5dc`), bathymetric depth soundings, nautical neatline, 360-degree compass rose, official hydrographic cartouche.

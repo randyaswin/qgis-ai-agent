@@ -717,6 +717,8 @@ for _th_nm, _ori in (
     ("small_multiples", "landscape"),
     ("transit_schematic", "landscape"),
     ("editorial_vertical", "portrait"),
+    ("tourist_map_a3", "landscape"),
+    ("stepped_booklet_a3", "landscape"),
 ):
     _ln = f"Theme_{_th_nm}_Test"
     _th_res = T("create_styled_layout", {
@@ -725,7 +727,7 @@ for _th_nm, _ori in (
         "orientation": _ori,
         "title": _th_nm.upper(),
         "subtitle": "Malioboro Verification",
-        "credits": "Overture Maps",
+        "credits": "https://visitingjogja.jogjaprov.go.id",
         "panel_titles": ["2010", "2015", "2020", "2025"],
     })
     assert _th_res["theme"] == _th_nm, _th_res
@@ -733,6 +735,18 @@ for _th_nm, _ori in (
     assert _th_qa["qa"]["map_blank_pct"] < 98.5, (_th_nm, _th_qa["qa"])
     assert not _th_qa["qa"]["out_of_bounds_items"], (_th_nm, _th_qa["qa"])
     assert not _th_qa["qa"]["overlapping_items"], (_th_nm, _th_qa["qa"])
+
+# Verify graphic generators (QR code, ribbon, directory card) and POI map_grid stamping
+_grid_res = T("add_map_reference_grid", {
+    "layout": "Theme_tourist_map_a3_Test",
+    "map_id": "main_map",
+    "cols": 8,
+    "rows": 6,
+    "poi_layers": ["malioboro_places"],
+})
+assert _grid_res["stamped_layers"].get("malioboro_places", 0) > 0, _grid_res
+_qr_res = T("generate_layout_graphic", {"kind": "qr_code", "text": "https://visitingjogja.jogjaprov.go.id"})
+assert os.path.isfile(_qr_res["path"]) and "<svg" in open(_qr_res["path"], encoding="utf-8").read()
 
 # Verify update_layer(name=...) alias, style_categorized(column=...) alias, and outlier-extent exclusion
 _tmp_out = T("create_vector_layer", {"layer_name": "giant_outlier_river", "geometry_type": "Polygon", "fields": [{"name": "tag", "type": "string"}]})
@@ -783,7 +797,7 @@ srv3._busy = False
 srv3._active_sock = None
 
 print("tools count check:", len(tools.TOOLS))
-assert len(tools.TOOLS) == 70, f"Expected 70 tools, got {len(tools.TOOLS)}"
+assert len(tools.TOOLS) == 72, f"Expected 72 tools, got {len(tools.TOOLS)}"
 
 # Clean up test temp dir cleanly
 QgsProject.instance().clear()

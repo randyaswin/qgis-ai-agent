@@ -7,6 +7,8 @@ dashboards) and adjust it afterwards with `list_layout_items` / `update_layout_i
 Registered into tools.TOOLS on import.
 """
 import glob
+import html as _html
+import math
 import os
 
 from qgis.PyQt.QtCore import Qt
@@ -23,7 +25,7 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QMetaType
 
-from .tools import tool, S, _layer, _canvas, _safe_transform_extent, _is_valid_extent, _open_layout_window, _register_layout
+from .tools import tool, S, _layer, _canvas, _safe_transform_extent, _is_valid_extent, _open_layout_window, _register_layout, _project_scratch_file
 
 MM = Qgis.LayoutUnit.Millimeters
 ALIGN_H = {"left": Qt.AlignmentFlag.AlignLeft, "center": Qt.AlignmentFlag.AlignHCenter,
@@ -59,11 +61,13 @@ def _lay(name):
     return lay
 
 
-def _place(lay, item, x, y, w=None, h=None, item_id=None):
+def _place(lay, item, x, y, w=None, h=None, item_id=None, rotation=0):
     lay.addLayoutItem(item)
     item.attemptMove(QgsLayoutPoint(float(x), float(y), MM))
     if w is not None and h is not None:
         item.attemptResize(QgsLayoutSize(float(w), float(h), MM))
+    if rotation:
+        item.setItemRotation(float(rotation), True)
     if item_id:
         item.setId(str(item_id))
     return item
@@ -307,9 +311,9 @@ def add_layout_map(layout=None, x=0, y=0, width=100, height=100, item_id=None, e
        "item_id": S("string", ""), "shape": S("string", "rectangle|ellipse|triangle, default rectangle"),
        "fill": S("string", "fill colour, 'none' for transparent"), "stroke": S("string", "outline colour, 'none' for no outline"),
        "stroke_width": S("number", "mm, default 0.3"), "corner_radius": S("number", "mm, rounded corners for rectangles"),
-       "opacity": S("number", "0..1")})
+       "opacity": S("number", "0..1"), "rotation": S("number", "clockwise rotation degrees (0, 90, 180, 270)")})
 def add_layout_shape(layout=None, x=0, y=0, width=10, height=10, item_id=None, shape="rectangle", fill="#ffffff", stroke="none",
-                     stroke_width=0.3, corner_radius=0, opacity=None, **kwargs):
+                     stroke_width=0.3, corner_radius=0, opacity=None, rotation=0, **kwargs):
     lay = _lay(layout or kwargs.get("layout_name") or kwargs.get("name"))
     it = QgsLayoutItemShape(lay)
     kinds = {"rectangle": QgsLayoutItemShape.Shape.Rectangle, "ellipse": QgsLayoutItemShape.Shape.Ellipse,
@@ -324,11 +328,11 @@ def add_layout_shape(layout=None, x=0, y=0, width=10, height=10, item_id=None, s
         it.setCornerRadius(QgsLayoutMeasurement(float(corner_radius), MM))
     if opacity is not None:
         it.setItemOpacity(float(opacity))
-    _place(lay, it, x, y, width, height, item_id)
+    _place(lay, it, x, y, width, height, item_id, rotation=rotation)
     return {"item_id": it.id() or it.uuid()}
 
 
-@tool("Add a text box. Supports font, size, colour, bold/italic, alignment, a background fill, padding and simple inline HTML "
+@tool("Add a text box. Supports font, size, colour, bold/italic, alignment, rotation, a background fill, padding and simple inline HTML "
       "(<b>, <i>, <br>, <span style='font-size:..;color:..'>) for mixed styles such as multilingual titles.",
       {"layout": S("string", ""), "x": S("number", "mm"), "y": S("number", "mm"), "width": S("number", "mm"), "height": S("number", "mm"),
        "text": S("string", "text; may contain QGIS expressions in [% %]"), "item_id": S("string", ""),
@@ -337,10 +341,11 @@ def add_layout_shape(layout=None, x=0, y=0, width=10, height=10, item_id=None, s
        "align": S("string", "left|center|right|justify"), "valign": S("string", "top|middle|bottom"),
        "background": S("string", "fill colour behind text"), "frame_color": S("string", "outline colour"),
        "padding": S("number", "mm, default 1"), "html": S("boolean", "allow inline HTML formatting"),
-       "halo_color": S("string", "text halo colour"), "halo_size": S("number", "halo mm")})
+       "halo_color": S("string", "text halo colour"), "halo_size": S("number", "halo mm"),
+       "rotation": S("number", "clockwise rotation degrees (0, 90, 180, 270)")})
 def add_layout_text(layout=None, x=0, y=0, width=50, height=10, text="", item_id=None, size=10, color="#000000", font=None, bold=False,
                     italic=False, align="left", valign="middle", background=None, frame_color=None, padding=1.0,
-                    html=False, halo_color=None, halo_size=0, **kwargs):
+                    html=False, halo_color=None, halo_size=0, rotation=0, **kwargs):
     if "margin_mm" in kwargs:
         padding = kwargs["margin_mm"]
     elif "margin" in kwargs:
@@ -365,7 +370,7 @@ def add_layout_text(layout=None, x=0, y=0, width=50, height=10, text="", item_id
     if frame_color:
         it.setFrameEnabled(True)
         it.setFrameStrokeColor(QColor(frame_color))
-    _place(lay, it, x, y, width, height, item_id)
+    _place(lay, it, x, y, width, height, item_id, rotation=rotation)
     return {"item_id": it.id() or it.uuid()}
 
 
@@ -373,8 +378,9 @@ def add_layout_text(layout=None, x=0, y=0, width=50, height=10, text="", item_id
       {"layout": S("string", ""), "x": S("number", "mm"), "y": S("number", "mm"), "width": S("number", "mm"), "height": S("number", "mm"),
        "path": S("string", "file path, URL, or QGIS SVG name (see list_svg_icons)"), "item_id": S("string", ""),
        "fit": S("string", "zoom (keep aspect, default) | stretch | clip | zoom_resize"),
-       "frame_color": S("string", "optional border colour"), "svg_fill": S("string", "fill colour for parametrised SVGs")})
-def add_layout_picture(layout=None, x=0, y=0, width=10, height=10, path="", item_id=None, fit="zoom", frame_color=None, svg_fill=None, **kwargs):
+       "frame_color": S("string", "optional border colour"), "svg_fill": S("string", "fill colour for parametrised SVGs"),
+       "rotation": S("number", "clockwise rotation degrees (0, 90, 180, 270)")})
+def add_layout_picture(layout=None, x=0, y=0, width=10, height=10, path="", item_id=None, fit="zoom", frame_color=None, svg_fill=None, rotation=0, **kwargs):
     lay = _lay(layout or kwargs.get("layout_name") or kwargs.get("name"))
     it = QgsLayoutItemPicture(lay)
     src = path
@@ -389,7 +395,7 @@ def add_layout_picture(layout=None, x=0, y=0, width=10, height=10, path="", item
     if frame_color:
         it.setFrameEnabled(True)
         it.setFrameStrokeColor(QColor(frame_color))
-    _place(lay, it, x, y, width, height, item_id)
+    _place(lay, it, x, y, width, height, item_id, rotation=rotation)
     return {"item_id": it.id() or it.uuid(), "source": src}
 
 
@@ -635,19 +641,23 @@ def list_layout_items(layout=None, **kwargs):
             d["text"] = it.text()[:80]
         if isinstance(it, QgsLayoutItemMap):
             d["scale"] = round(it.scale())
+        rot = round(float(it.itemRotation()), 2)
+        if abs(rot) > 1e-3:
+            d["rotation"] = rot
         out.append(d)
     return {"page_mm": [page.width(), page.height()], "items": sorted(out, key=lambda d: (d["y"], d["x"]))}
 
 
-@tool("Move, resize, retext, restyle, reorder, hide or delete a layout item by id (or uuid). For maps also change scale/extent.",
+@tool("Move, resize, retext, restyle, rotate, reorder, hide or delete a layout item by id (or uuid). For maps also change scale/extent.",
       {"layout": S("string", ""), "item_id": S("string", "id or uuid"),
        "x": S("number", "mm"), "y": S("number", "mm"), "width": S("number", "mm"), "height": S("number", "mm"),
        "text": S("string", "new label text"), "size": S("number", "label font pt"), "color": S("string", "label text colour"),
        "background": S("string", "background colour"), "visible": S("boolean", ""), "delete": S("boolean", ""),
-       "z": S("number", "stacking order (higher = on top)"), "scale": S("number", "map scale denominator"),
+       "z": S("number", "stacking order (higher = on top)"), "rotation": S("number", "clockwise rotation degrees"),
+       "scale": S("number", "map scale denominator"),
        "extent_layer": S("string", "map: fit to layer"), "bbox": S("array", "map: [xmin,ymin,xmax,ymax] project CRS", items={"type": "number"})})
 def update_layout_item(layout=None, item_id=None, x=None, y=None, width=None, height=None, text=None, size=None, color=None,
-                       background=None, visible=None, delete=False, z=None, scale=None, extent_layer=None, bbox=None, **kwargs):
+                       background=None, visible=None, delete=False, z=None, rotation=None, scale=None, extent_layer=None, bbox=None, **kwargs):
     target = layout or kwargs.get("layout_name") or kwargs.get("name")
     lay = _lay(target)
     target_item_id = item_id or kwargs.get("id") or kwargs.get("item")
@@ -688,6 +698,8 @@ def update_layout_item(layout=None, item_id=None, x=None, y=None, width=None, he
         it.setVisibility(bool(visible))
     if z is not None:
         it.setZValue(float(z))
+    if rotation is not None:
+        it.setItemRotation(float(rotation), True)
     it.refresh()
     lay.refresh()
     return {"updated": item_id}
@@ -900,4 +912,423 @@ def create_wayfinding_layout(name="Wayfinding_Map", title="Information Map", sub
     return {"layout": name, "page_mm": [W, H], "theme": theme,
             "items": [d["id"] for d in list_layout_items(name)["items"] if d["id"]],
             "next": "export_layout(preview=true), then refine with update_layout_item / add_layout_* as needed."}
+
+
+# ---------------------------------------------------------------- tourist booklet / graphic generators & reference grid
+_QR_CAPACITIES_L = (17, 32, 53, 78, 106, 134, 154)
+_QR_TOTAL_CODEWORDS = (26, 44, 70, 100, 134, 172, 196)
+_QR_EC_PER_BLOCK = (
+    (7, 1),    # V1: 1 block, 7 ec
+    (10, 1),   # V2: 1 block, 10 ec
+    (15, 1),   # V3: 1 block, 15 ec
+    (20, 1),   # V4: 1 block, 20 ec
+    (26, 1),   # V5: 1 block, 26 ec
+    (18, 2),   # V6: 2 blocks, 18 ec each
+    (20, 2),   # V7: 2 blocks, 20 ec each
+)
+_QR_ALIGN_POS = ((), (), (6, 18), (6, 22), (6, 26), (6, 30), (6, 34), (6, 22, 38))
+
+
+def _gf_mul(x, y):
+    r = 0
+    while y:
+        if y & 1:
+            r ^= x
+        y >>= 1
+        x <<= 1
+        if x & 0x100:
+            x ^= 0x11D
+    return r
+
+
+def _rs_encode(data, nsym):
+    gen = [1]
+    exp = 1
+    for _ in range(nsym):
+        nxt = [0] * (len(gen) + 1)
+        for j, g in enumerate(gen):
+            nxt[j] ^= g
+            nxt[j + 1] ^= _gf_mul(g, exp)
+        gen = nxt
+        exp = _gf_mul(exp, 2)
+    rem = list(data) + [0] * nsym
+    for i in range(len(data)):
+        coef = rem[i]
+        if coef:
+            for j in range(1, len(gen)):
+                rem[i + j] ^= _gf_mul(gen[j], coef)
+    return rem[len(data):]
+
+
+def _qr_matrix(payload):
+    """Pure-Python ISO/IEC 18004 Byte-mode EC-L QR encoder (Versions 1..7, up to ~150 UTF-8 bytes)."""
+    raw = str(payload or "https://qgis.org").encode("utf-8")[:150]
+    ver = next((v + 1 for v, cap in enumerate(_QR_CAPACITIES_L) if len(raw) <= cap), 7)
+    size = 17 + 4 * ver
+    total_cw = _QR_TOTAL_CODEWORDS[ver - 1]
+    ec_len, num_blocks = _QR_EC_PER_BLOCK[ver - 1]
+    data_cw_total = total_cw - ec_len * num_blocks
+
+    # Bit stream: mode 0100 (Byte), 8-bit char count, payload bytes, terminator, byte pad, 0xEC/0x11 pad
+    bits = [0, 1, 0, 0]
+    for b in range(7, -1, -1):
+        bits.append((len(raw) >> b) & 1)
+    for byte in raw:
+        for b in range(7, -1, -1):
+            bits.append((byte >> b) & 1)
+    max_bits = data_cw_total * 8
+    for _ in range(min(4, max_bits - len(bits))):
+        bits.append(0)
+    while len(bits) % 8:
+        bits.append(0)
+    pad_bytes = (0xEC, 0x11)
+    p_idx = 0
+    while len(bits) < max_bits:
+        val = pad_bytes[p_idx % 2]
+        p_idx += 1
+        for b in range(7, -1, -1):
+            bits.append((val >> b) & 1)
+    data_cw = [sum(bits[i + k] << (7 - k) for k in range(8)) for i in range(0, len(bits), 8)]
+
+    # Split blocks & compute RS EC + interleave
+    short_len = data_cw_total // num_blocks
+    long_blocks = data_cw_total % num_blocks
+    data_blocks, ec_blocks = [], []
+    off = 0
+    for blk in range(num_blocks):
+        blen = short_len + (1 if blk >= num_blocks - long_blocks else 0)
+        d_blk = data_cw[off:off + blen]
+        off += blen
+        data_blocks.append(d_blk)
+        ec_blocks.append(_rs_encode(d_blk, ec_len))
+    interleaved = []
+    for i in range(max(len(b) for b in data_blocks)):
+        for b in data_blocks:
+            if i < len(b):
+                interleaved.append(b[i])
+    for i in range(ec_len):
+        for b in ec_blocks:
+            interleaved.append(b[i])
+    code_bits = [(cw >> b) & 1 for cw in interleaved for b in range(7, -1, -1)]
+
+    # Matrix setup (-1 = unset, 0 = light, 1 = dark)
+    grid = [[-1] * size for _ in range(size)]
+    func = [[False] * size for _ in range(size)]
+
+    def _set_func(r, c, v):
+        if 0 <= r < size and 0 <= c < size:
+            grid[r][c] = 1 if v else 0
+            func[r][c] = True
+
+    def _finder(r0, c0):
+        for dr in range(-1, 8):
+            for dc in range(-1, 8):
+                r, c = r0 + dr, c0 + dc
+                if not (0 <= r < size and 0 <= c < size):
+                    continue
+                if dr in (-1, 7) or dc in (-1, 7):
+                    _set_func(r, c, 0)
+                elif dr in (0, 6) or dc in (0, 6) or (2 <= dr <= 4 and 2 <= dc <= 4):
+                    _set_func(r, c, 1)
+                else:
+                    _set_func(r, c, 0)
+
+    _finder(0, 0)
+    _finder(0, size - 7)
+    _finder(size - 7, 0)
+
+    ap = _QR_ALIGN_POS[ver]
+    for ar in ap:
+        for ac in ap:
+            if func[ar][ac]:
+                continue
+            for dr in range(-2, 3):
+                for dc in range(-2, 3):
+                    _set_func(ar + dr, ac + dc, 1 if (abs(dr) == 2 or abs(dc) == 2 or (dr == 0 and dc == 0)) else 0)
+
+    for i in range(8, size - 8):
+        if not func[6][i]:
+            _set_func(6, i, 1 if i % 2 == 0 else 0)
+        if not func[i][6]:
+            _set_func(i, 6, 1 if i % 2 == 0 else 0)
+    _set_func(size - 8, 8, 1)
+
+    # Reserve format info cells
+    fmt_coords_1 = [(8, i) for i in range(9) if i != 6] + [(i, 8) for i in range(7, -1, -1) if i != 6]
+    fmt_coords_2 = [(size - 1 - i, 8) for i in range(7)] + [(8, size - 8 + i) for i in range(8)]
+    for r, c in fmt_coords_1 + fmt_coords_2:
+        func[r][c] = True
+        if grid[r][c] < 0:
+            grid[r][c] = 0
+
+    # Place data bits in zigzag
+    bit_i = 0
+    col = size - 1
+    up = True
+    while col > 0:
+        if col == 6:
+            col -= 1
+        rows = range(size - 1, -1, -1) if up else range(size)
+        for r in rows:
+            for dc in (0, -1):
+                c = col + dc
+                if not func[r][c]:
+                    b = code_bits[bit_i] if bit_i < len(code_bits) else 0
+                    bit_i += 1
+                    grid[r][c] = b
+        col -= 2
+        up = not up
+
+    # Mask 0: (r + c) % 2 == 0, Format info for EC-L (01) + Mask 0 (000) -> 111011111000100
+    fmt_bits = "111011111000100"
+    for r in range(size):
+        for c in range(size):
+            if not func[r][c] and (r + c) % 2 == 0:
+                grid[r][c] ^= 1
+    for idx, (r, c) in enumerate(fmt_coords_1):
+        grid[r][c] = int(fmt_bits[idx])
+    for idx, (r, c) in enumerate(fmt_coords_2):
+        grid[r][c] = int(fmt_bits[idx])
+    return grid
+
+
+def _build_layout_graphic_svg(kind, text="", subtitle="", color="#d97373", accent_color="#ffffff", items=None, columns=2):
+    """Build crisp vector SVG content for QR codes, ribbon banners, tourist icons/pins, tabs, and directory cards."""
+    k = str(kind or "tourist_icon").strip().lower()
+    fg = color or "#1e293b"
+    bg = accent_color or "#ffffff"
+
+    if k == "qr_code":
+        mat = _qr_matrix(text or "https://qgis.org")
+        n = len(mat)
+        pad = 2
+        vb = n + pad * 2
+        rects = [
+            f'<rect x="{c + pad}" y="{r + pad}" width="1.02" height="1.02" fill="{fg}"/>'
+            for r in range(n) for c in range(n) if mat[r][c]
+        ]
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {vb} {vb}">'
+            f'<rect width="{vb}" height="{vb}" fill="{bg}" rx="1"/>'
+            + "".join(rects)
+            + "</svg>"
+        )
+
+    if k == "ribbon_banner":
+        t_esc = _html.escape(str(text or "GUIDE MAP"))
+        sub_esc = _html.escape(str(subtitle or ""))
+        sub_svg = f'<text x="150" y="69" text-anchor="middle" font-family="sans-serif" font-size="11" font-weight="bold" fill="{bg}">{sub_esc}</text>' if sub_esc else ""
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 84">'
+            f'<path d="M12,30 Q150,8 288,30 L276,46 L292,62 Q150,40 8,62 L24,46 Z" fill="{fg}" opacity="0.88"/>'
+            f'<path d="M36,24 Q150,4 264,24 L264,54 Q150,34 36,54 Z" fill="{fg}" stroke="{bg}" stroke-width="1.5"/>'
+            f'<text x="150" y="38" text-anchor="middle" font-family="Georgia, serif" font-size="21" font-weight="bold" fill="{bg}">{t_esc}</text>'
+            + sub_svg
+            + "</svg>"
+        )
+
+    if k == "stepped_tab":
+        t_esc = _html.escape(str(text or "SECTION"))
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 240">'
+            f'<rect width="40" height="240" fill="{fg}"/>'
+            f'<path d="M0,0 L40,20 L40,36 L0,16 Z M0,48 L40,68 L40,84 L0,64 Z M0,96 L40,116 L40,132 L0,112 Z '
+            f'M0,144 L40,164 L40,180 L0,160 Z M0,192 L40,212 L40,228 L0,208 Z" fill="{bg}" opacity="0.14"/>'
+            f'<text x="20" y="120" text-anchor="middle" dominant-baseline="central" transform="rotate(90 20 120)" '
+            f'font-family="sans-serif" font-size="15" font-weight="bold" letter-spacing="1.5" fill="{bg}">{t_esc}</text>'
+            f'</svg>'
+        )
+
+    if k == "directory_card":
+        rows_data = list(items or ())
+        cols = max(1, min(4, int(columns or 2)))
+        w = cols * 185 + 16
+        per_col = max(1, math.ceil(max(1, len(rows_data)) / cols))
+        row_h = 34
+        h = 34 + per_col * row_h + 10
+        t_esc = _html.escape(str(text or "DIRECTORY"))
+        parts = [
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}">',
+            f'<rect x="1" y="1" width="{w - 2}" height="{h - 2}" rx="6" fill="#fcfaf5" stroke="{fg}" stroke-width="1.8"/>',
+            f'<rect x="1" y="1" width="{w - 2}" height="26" rx="6" fill="{fg}"/>',
+            f'<text x="12" y="18" font-family="sans-serif" font-size="13" font-weight="bold" fill="{bg}">{t_esc}</text>',
+        ]
+        for idx, entry in enumerate(rows_data):
+            if isinstance(entry, str):
+                entry = {"num": idx + 1, "name": entry}
+            ci = idx // per_col
+            ri = idx % per_col
+            cx = 10 + ci * 185
+            cy = 34 + ri * row_h
+            num_s = _html.escape(str(entry.get("num", idx + 1)))
+            nm_s = _html.escape(str(entry.get("name", ""))[:24])
+            gr_s = _html.escape(str(entry.get("grid", "")))
+            mt_s = _html.escape(str(entry.get("meta") or entry.get("phone") or "")[:32])
+            parts.append(f'<rect x="{cx}" y="{cy}" width="177" height="{row_h - 4}" rx="3" fill="#ffffff" stroke="#e2e8f0" stroke-width="0.8"/>')
+            parts.append(f'<circle cx="{cx + 12}" cy="{cy + 11}" r="7.5" fill="{fg}"/>')
+            parts.append(f'<text x="{cx + 12}" y="{cy + 14.5}" text-anchor="middle" font-family="sans-serif" font-size="8.5" font-weight="bold" fill="{bg}">{num_s}</text>')
+            parts.append(f'<text x="{cx + 24}" y="{cy + 13}" font-family="sans-serif" font-size="8.8" font-weight="bold" fill="#1e293b">{nm_s}</text>')
+            if gr_s:
+                parts.append(f'<rect x="{cx + 146}" y="{cy + 4}" width="26" height="11" rx="2.5" fill="#f1f5f9" stroke="{fg}" stroke-width="0.6"/>')
+                parts.append(f'<text x="{cx + 159}" y="{cy + 12}" text-anchor="middle" font-family="sans-serif" font-size="7" font-weight="bold" fill="{fg}">{gr_s}</text>')
+            if mt_s:
+                parts.append(f'<text x="{cx + 24}" y="{cy + 24.5}" font-family="sans-serif" font-size="7.2" fill="#64748b">{mt_s}</text>')
+        parts.append("</svg>")
+        return "".join(parts)
+
+    # Default: tourist_icon / numbered pin
+    icon_name = str(subtitle or "map_pin").strip().lower()
+    lbl = _html.escape(str(text or ""))
+    glyphs = {
+        "onsen": '<path d="M14,22 Q12,16 16,12 Q18,9 15,6 M22,22 Q20,15 24,11 Q26,8 23,5 M30,22 Q28,16 32,12 Q34,9 31,6" fill="none" stroke="WHITE" stroke-width="2.4" stroke-linecap="round"/><ellipse cx="22" cy="30" rx="12" ry="5" fill="none" stroke="WHITE" stroke-width="2.6"/>',
+        "hiking": '<path d="M8,34 L19,13 L26,25 L31,18 L38,34 Z" fill="WHITE" opacity="0.92"/><circle cx="33" cy="11" r="3" fill="WHITE"/>',
+        "camera": '<rect x="9" y="15" width="26" height="18" rx="3" fill="none" stroke="WHITE" stroke-width="2.6"/><path d="M16,15 L19,11 L25,11 L28,15" fill="WHITE"/><circle cx="22" cy="24" r="5" fill="none" stroke="WHITE" stroke-width="2.4"/>',
+        "dining": '<path d="M15,9 L15,35 M12,9 L12,18 Q15,21 18,18 L18,9 M28,9 C32,9 32,21 28,21 L28,35" fill="none" stroke="WHITE" stroke-width="2.4" stroke-linecap="round"/>',
+        "hotel": '<path d="M8,33 L8,14 M8,27 L36,27 L36,33 M11,22 L21,22 L21,27 L11,27 Z M22,20 L35,20 Q36,20 36,27" fill="none" stroke="WHITE" stroke-width="2.4" stroke-linecap="round"/>',
+        "train": '<rect x="13" y="9" width="18" height="22" rx="4" fill="none" stroke="WHITE" stroke-width="2.4"/><rect x="16" y="13" width="12" height="7" rx="1" fill="WHITE"/><circle cx="17" cy="26" r="1.6" fill="WHITE"/><circle cx="27" cy="26" r="1.6" fill="WHITE"/><path d="M16,31 L12,37 M28,31 L32,37" stroke="WHITE" stroke-width="2.4" stroke-linecap="round"/>',
+        "flower": '<circle cx="22" cy="13" r="5" fill="WHITE"/><circle cx="30" cy="20" r="5" fill="WHITE"/><circle cx="26" cy="29" r="5" fill="WHITE"/><circle cx="18" cy="29" r="5" fill="WHITE"/><circle cx="14" cy="20" r="5" fill="WHITE"/><circle cx="22" cy="22" r="4" fill="{fg}"/>',
+        "shrine": '<path d="M10,13 Q22,10 34,13 M12,18 L32,18 M16,13 L16,35 M28,13 L28,35 M22,13 L22,18" fill="none" stroke="WHITE" stroke-width="2.6" stroke-linecap="round"/>',
+        "map_pin": '<path d="M22,4 C13,4 7,10.5 7,18.5 C7,28.5 22,41 22,41 C22,41 37,28.5 37,18.5 C37,10.5 31,4 22,4 Z" fill="{fg}" stroke="WHITE" stroke-width="2"/>',
+    }
+    if icon_name == "map_pin" or lbl.isdigit():
+        pin_txt = lbl or "1"
+        return (
+            f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 46">'
+            f'<path d="M22,3 C13,3 7,9.5 7,17.5 C7,27.5 22,43 22,43 C22,43 37,27.5 37,17.5 C37,9.5 31,3 22,3 Z" fill="{fg}" stroke="{bg}" stroke-width="2.2"/>'
+            f'<circle cx="22" cy="17.5" r="9.5" fill="{bg}"/>'
+            f'<text x="22" y="21" text-anchor="middle" font-family="sans-serif" font-size="11.5" font-weight="bold" fill="{fg}">{pin_txt}</text>'
+            f'</svg>'
+        )
+    inner = glyphs.get(icon_name, glyphs["camera"]).replace("WHITE", bg).replace("{fg}", fg)
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 44">'
+        f'<circle cx="22" cy="22" r="20" fill="{fg}" stroke="{bg}" stroke-width="2"/>'
+        f'{inner}'
+        f'</svg>'
+    )
+
+
+@tool("Generate vector SVG graphics (QR code, curved ribbon banner, numbered map pins, tourist icons, stepped side-tabs, or multi-column directory cards) "
+      "into the project scratch/ folder and optionally place onto a print layout.",
+      {"kind": S("string", "'qr_code' | 'ribbon_banner' | 'tourist_icon' | 'stepped_tab' | 'directory_card'"),
+       "text": S("string", "URL for qr_code, title for banner/tab/card, or pin number"),
+       "subtitle": S("string", "subtitle for banner, or icon type: onsen|hiking|camera|dining|hotel|train|flower|shrine|map_pin"),
+       "color": S("string", "primary hex colour, default '#d97373'"),
+       "accent_color": S("string", "secondary/text colour, default '#ffffff'"),
+       "items": S("array", "directory_card entries: [{num, name, grid, meta, phone}]"),
+       "columns": S("integer", "directory_card columns (1..4, default 2)"),
+       "layout": S("string", "optional layout name to immediately place the generated graphic"),
+       "x": S("number", "mm (if layout is given)"), "y": S("number", "mm"),
+       "width": S("number", "mm"), "height": S("number", "mm"),
+       "item_id": S("string", "optional layout item id"),
+       "rotation": S("number", "clockwise rotation degrees (0, 90, 180, 270)")})
+def generate_layout_graphic(kind="tourist_icon", text="", subtitle="", color="#d97373", accent_color="#ffffff",
+                            items=None, columns=2, layout=None, x=0, y=0, width=20, height=20, item_id=None, rotation=0):
+    svg = _build_layout_graphic_svg(kind, text=text, subtitle=subtitle, color=color, accent_color=accent_color, items=items, columns=columns)
+    svg_path = _project_scratch_file(f"gfx_{kind}", ".svg")
+    with open(svg_path, "w", encoding="utf-8") as fh:
+        fh.write(svg)
+    res = {"path": svg_path, "kind": kind}
+    if layout:
+        placed = add_layout_picture(layout=layout, x=x, y=y, width=width, height=height, path=svg_path, item_id=item_id, fit="zoom", rotation=rotation)
+        res["item_id"] = placed["item_id"]
+    return res
+
+
+@tool("Add an alpha-numeric tourist reference grid (columns A, B, C... and rows 1, 2, 3...) over a layout map frame and optionally stamp 'map_grid' (e.g. 'G-3') onto POI layers.",
+      {"layout": S("string", "layout name"),
+       "map_id": S("string", "map item id (default first map)"),
+       "cols": S("integer", "number of lettered columns (default 8 -> A..H)"),
+       "rows": S("integer", "number of numbered rows (default 6 -> 1..6)"),
+       "poi_layers": S("array", "optional POI layer names/ids to populate 'map_grid' field", items={"type": "string"}),
+       "grid_color": S("string", "hairline grid colour, default '#64748b'"),
+       "header_fill": S("string", "strip background, default '#f1f5f9'"),
+       "header_color": S("string", "strip text colour, default '#1e293b'"),
+       "strip_size": S("number", "mm width/height of index border strips, default 4.2")})
+def add_map_reference_grid(layout=None, map_id=None, cols=8, rows=6, poi_layers=None,
+                           grid_color="#64748b", header_fill="#f1f5f9", header_color="#1e293b", strip_size=4.2):
+    lay = _lay(layout)
+    mp = _map(lay, map_id)
+    ext = mp.extent()
+    ew, eh = float(ext.width()), float(ext.height())
+    if ew <= 0 or eh <= 0:
+        raise ValueError("Map item has empty extent; set map extent before adding reference grid.")
+
+    ncols = max(2, min(26, int(cols or 8)))
+    nrows = max(2, min(20, int(rows or 6)))
+    pos, sz = mp.positionWithUnits(), mp.sizeWithUnits()
+    mx, my, mw, mh = float(pos.x()), float(pos.y()), float(sz.width()), float(sz.height())
+    s = float(strip_size or 4.2)
+
+    # Configure QGIS map grid lines synced to exact extent intervals
+    grid = QgsLayoutItemMapGrid(f"RefGrid_{mp.id() or 'main'}", mp)
+    grid.setEnabled(True)
+    grid.setStyle(QgsLayoutItemMapGrid.GridStyle.Solid)
+    grid.setIntervalX(ew / ncols)
+    grid.setIntervalY(eh / nrows)
+    grid.setOffsetX(ext.xMinimum())
+    grid.setOffsetY(ext.yMinimum())
+    grid.setLineSymbol(QgsLineSymbol.createSimple({"color": grid_color, "width": "0.18", "line_style": "solid"}))
+    grid.setAnnotationEnabled(False)
+    mp.grids().addGrid(grid)
+    mp.refresh()
+
+    col_labels = [chr(65 + i) for i in range(ncols)]
+    cw = mw / ncols
+    rh = mh / nrows
+    top_y = max(0.0, my - s)
+    left_x = max(0.0, mx - s)
+    base_tag = mp.id() or "main"
+
+    for ci, ch in enumerate(col_labels):
+        add_layout_text(lay.name(), mx + ci * cw, top_y, cw, s, ch, item_id=f"{base_tag}_grid_col_{ch}",
+                        size=7.5, color=header_color, bold=True, align="center", valign="middle",
+                        background=header_fill, frame_color="#cbd5e1", padding=0.2)
+    for ri in range(nrows):
+        rnum = str(ri + 1)
+        add_layout_text(lay.name(), left_x, my + ri * rh, s, rh, rnum, item_id=f"{base_tag}_grid_row_{rnum}",
+                        size=7.5, color=header_color, bold=True, align="center", valign="middle",
+                        background=header_fill, frame_color="#cbd5e1", padding=0.2)
+
+    stamped = {}
+    if poi_layers:
+        p = QgsProject.instance()
+        map_crs = mp.crs() or p.crs()
+        for lref in poi_layers:
+            lyr = _layer(lref)
+            if not lyr or not lyr.isValid():
+                continue
+            tr = QgsCoordinateTransform(lyr.crs(), map_crs, p) if lyr.crs() != map_crs else None
+            idx = lyr.fields().indexFromName("map_grid")
+            if idx < 0:
+                lyr.startEditing()
+                lyr.dataProvider().addAttributes([QgsField("map_grid", QMetaType.Type.QString)])
+                lyr.updateFields()
+                idx = lyr.fields().indexFromName("map_grid")
+            if not lyr.isEditable():
+                lyr.startEditing()
+            count = 0
+            for ft in lyr.getFeatures():
+                geom = ft.geometry()
+                if geom.isNull() or geom.isEmpty():
+                    continue
+                pt = geom.centroid().asPoint()
+                if tr:
+                    try:
+                        pt = tr.transform(pt)
+                    except Exception:
+                        continue
+                if not ext.contains(pt):
+                    continue
+                ci = min(ncols - 1, max(0, int((pt.x() - ext.xMinimum()) / (ew / ncols))))
+                ri = min(nrows - 1, max(0, int((ext.yMaximum() - pt.y()) / (eh / nrows))))
+                code = f"{col_labels[ci]}-{ri + 1}"
+                lyr.changeAttributeValue(ft.id(), idx, code)
+                count += 1
+            lyr.commitChanges()
+            stamped[lyr.name()] = count
+
+    lay.refresh()
+    return {"layout": lay.name(), "cols": col_labels, "rows": list(range(1, nrows + 1)), "stamped_layers": stamped}
+
 

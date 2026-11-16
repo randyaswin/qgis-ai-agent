@@ -3,8 +3,8 @@ name=QGIS Copilot
 qgisMinimumVersion=3.34
 qgisMaximumVersion=4.99
 description=Autonomous AI cartography and spatial analysis copilot driven via Model Context Protocol (MCP) and AI CLIs.
-about=Connects QGIS to autonomous AI agents (Google Antigravity agy, Claude Code, Gemini CLI, OpenAI Codex) via the Model Context Protocol (MCP). Features 70 deep QGIS tools (STAC, COG streaming, Overture Maps DuckDB spatial SQL, 440+ Processing algorithms, cartographic styling, sampling grid classification, GCP Helmert georeferencing, and 5 distinct layout archetypes: Official Planning, Disaster Infographic, NatGeo, Statistical Thematic, and Relief Topographic) paired with 61 GIS domain skills.
-version=1.1.6
+about=Connects QGIS to autonomous AI agents (Google Antigravity agy, Claude Code, Gemini CLI, OpenAI Codex) via the Model Context Protocol (MCP). Features 72 deep QGIS tools (STAC, COG streaming, Overture Maps DuckDB spatial SQL, 440+ Processing algorithms, cartographic styling, sampling grid classification, GCP Helmert georeferencing, vector graphic/QR generation, alpha-numeric reference grids, and themed + A3 folded booklet print layouts) paired with 61 GIS domain skills.
+version=1.1.7
 author=M. Randy Aswin
 email=mrandyaswin@gmail.com
 homepage=https://github.com/randyaswin/qgis-copilot
@@ -16,7 +16,11 @@ experimental=False
 deprecated=False
 has_processing_provider=False
 icon=icon.svg
-changelog=1.1.6:
+changelog=1.1.7:
+    - Added item rotation support (rotation=0/90/180/270) to add_layout_shape, add_layout_text, add_layout_picture, update_layout_item, and list_layout_items, plus sceneBoundingRect() audit accuracy in snapshot_layout.
+    - Added generate_layout_graphic (pure-Python QR code SVG encoder, curved ribbon banner, numbered tourist pins & category icons, stepped colored side-tabs, and multi-column directory cards) and add_map_reference_grid (A-H/1-6 index strips + automatic POI map_grid field stamping).
+    - Added tourist_map_a3 and stepped_booklet_a3 (6-panel 2x3 fold with 180-degree inverted top row and staggered vertical side tabs) themes in create_styled_layout, plus Qt6/QGIS4 enum compatibility fixes for plugins.qgis.org.
+1.1.6:
     - Added multiple HEIC/HEIF/WebP image attachment support in Attach dialog with automatic JPEG conversion into <project_dir>/scratch/ (preserving EXIF/GPS via pillow_heif/Pillow, QImage, heif-convert, ImageMagick, ffmpeg, or sips).
     - Enforced mandatory load_skill(name) & skill catalog/hint injection across all reasoning effort levels (low, medium, high, xhigh) in AGENT.md, prompts.py, and dock.py.
     - Hardened QGIS-to-MCP bridge connection stability: added server.ensure_endpoint() before CLI launch, port+pid guard in server.stop(), and automatic endpoint.json retry/reconnect in mcp_bridge.py.
