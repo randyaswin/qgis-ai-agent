@@ -179,12 +179,30 @@ def _abort_on_dead_qgis(dead_pid=None):
         os._exit(1)
 
 
+def _read_endpoint_with_retry(method):
+    """Read endpoint.json with brief retry to survive QGIS startup or plugin reload races."""
+    max_attempts = 12 if method == "list_tools" else 6
+    last_exc = None
+    for attempt in range(max_attempts):
+        try:
+            with open(ENDPOINT_FILE, encoding="utf-8") as f:
+                ep = json.load(f)
+            if isinstance(ep, dict) and ep.get("port") and ep.get("token"):
+                return ep
+        except FileNotFoundError as exc:
+            last_exc = exc
+        except (json.JSONDecodeError, OSError) as exc:
+            last_exc = exc
+        raw_parent = os.environ.get("QGIS_AI_PARENT_PID", "").strip()
+        if raw_parent.isdigit() and not _is_pid_alive(int(raw_parent)):
+            break
+        if attempt < max_attempts - 1:
+            time.sleep(0.25)
+    raise RuntimeError("QGIS Copilot plugin is not running. Open QGIS and enable the plugin.") from last_exc
+
+
 def qgis_rpc(method, params=None):
-    try:
-        with open(ENDPOINT_FILE, encoding="utf-8") as f:
-            ep = json.load(f)
-    except FileNotFoundError:
-        raise RuntimeError("QGIS Copilot plugin is not running. Open QGIS and enable the plugin.")
+    ep = _read_endpoint_with_retry(method)
 
     ep_pid = ep.get("pid")
     if ep_pid and not _is_pid_alive(ep_pid):
@@ -215,6 +233,28 @@ def qgis_rpc(method, params=None):
     except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError, OSError):
         if ep_pid and not _is_pid_alive(ep_pid):
             _abort_on_dead_qgis(ep_pid)
+        # Re-read endpoint once in case QGIS reloaded on a new port
+        try:
+            ep2 = _read_endpoint_with_retry(method)
+            if ep2.get("port") != ep.get("port"):
+                with socket.create_connection(("127.0.0.1", ep2["port"]), timeout=timeout_sec) as s2:
+                    req2 = {"token": ep2["token"], "id": _counter[0], "method": method, "params": params or {}}
+                    s2.sendall((json.dumps(req2) + "\n").encode())
+                    buf2 = b""
+                    while b"\n" not in buf2:
+                        chunk = s2.recv(1 << 20)
+                        if not chunk:
+                            break
+                        buf2 += chunk
+                    if buf2:
+                        resp2 = json.loads(buf2.split(b"\n", 1)[0], parse_constant=lambda c: None)
+                        if "error" in resp2:
+                            raise RuntimeError(resp2["error"] + ("\n" + resp2["trace"] if resp2.get("trace") else ""))
+                        return resp2["result"]
+        except RuntimeError:
+            raise
+        except Exception:
+            pass
         raise RuntimeError("QGIS Copilot plugin port is not responding. Ensure QGIS is running and the plugin is active.")
     if not buf:
         if ep_pid and not _is_pid_alive(ep_pid):

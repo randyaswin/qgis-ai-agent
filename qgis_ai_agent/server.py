@@ -48,18 +48,39 @@ class ToolServer(QObject):
         self._disconnect_cancelled = False
         tools._PROGRESS_CALLBACK = lambda name, pct, msg="": self.tool_progress.emit(str(name), int(pct), str(msg or ""))
 
-    def start(self):
-        if not self.server.listen(QHostAddress(QHostAddress.SpecialAddress.LocalHost), 0):
-            raise RuntimeError(self.server.errorString())
+    def _write_endpoint_file(self):
         os.makedirs(ENDPOINT_DIR, exist_ok=True)
         tmp_path = f"{ENDPOINT_FILE}.{os.getpid()}.tmp"
         fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump({"port": self.server.serverPort(), "token": self.token, "pid": os.getpid()}, f)
         os.replace(tmp_path, ENDPOINT_FILE)
+
+    def ensure_endpoint(self):
+        """Ensure the TCP server is listening and endpoint.json points to this live QGIS instance."""
+        if not self.server.isListening():
+            return self.start()
+        cur_port = self.server.serverPort()
+        needs_write = True
+        try:
+            with open(ENDPOINT_FILE, encoding="utf-8") as f:
+                ep = json.load(f)
+            if ep.get("pid") == os.getpid() and ep.get("port") == cur_port and ep.get("token") == self.token:
+                needs_write = False
+        except Exception:
+            needs_write = True
+        if needs_write:
+            self._write_endpoint_file()
+        return cur_port
+
+    def start(self):
+        if not self.server.listen(QHostAddress(QHostAddress.SpecialAddress.LocalHost), 0):
+            raise RuntimeError(self.server.errorString())
+        self._write_endpoint_file()
         return self.server.serverPort()
 
     def stop(self):
+        cur_port = self.server.serverPort()
         for sock in list(self.buffers.keys()):
             self.buffers.pop(sock, None)
             if not _is_deleted(sock):
@@ -73,7 +94,8 @@ class ToolServer(QObject):
         self.server.close()
         try:
             with open(ENDPOINT_FILE, encoding="utf-8") as f:
-                if json.load(f).get("pid") == os.getpid():
+                ep = json.load(f)
+                if ep.get("pid") == os.getpid() and ep.get("port") == cur_port:
                     os.remove(ENDPOINT_FILE)
         except Exception:
             pass

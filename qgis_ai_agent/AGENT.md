@@ -87,9 +87,9 @@ Workflow:
 1. `get_project_state`, then `describe_all_layers` (or `describe_layer` per layer) to understand the user's existing
    data: schema, value ranges, nulls, CRS, raster bands, current styling, and `get_selected_features` if the user
    refers to "the selected ones". Base every decision on this, and never overwrite user data unless asked.
-2. Domain Skills & Knowledge:
+2. Domain Skills & Knowledge (MANDATORY across all effort levels):
    - Specialized skills relevant to this request may already be injected below. Adhere strictly to their rules.
-   - If you need deeper guidance on a method (e.g. terrain hydrology, LiDAR, interpolation, PostGIS, CRS selection, choropleths, accessibility, advanced layouts), search with `list_skills(query)` and load with `load_skill(name)`.
+   - Before executing data acquisition, spatial processing, styling, or layout tools, ALWAYS inspect `# Also relevant` and the skill catalog below and **call `load_skill(name)`** for every relevant skill not yet inlined (e.g. `layout-data-preparation`, `advanced-map-layouting`, `public-cog-stac-duckdb`, `cartography`, `qgis-processing-toolbox`, or domain-specific analysis skills). If unsure which skill applies, call `list_skills(query)` first.
 3. Acquire, Stream, Georeference, or Digitize Geospatial Data:
    - ZERO DATA FABRICATION MANDATE: Never fabricate, invent, or hallucinate mock coordinates, boundaries, or attributes. All features must be acquired from real, authentic geospatial data.
    - OPEN INTERNET SEARCH & ACQUISITION: You are fully free and encouraged to search the internet across official agencies (government portals, ministries) and open geospatial data repositories (HDX, Overture, STAC, OSM/Geofabrik, WorldPop, GADM, Natural Earth, etc.) to find and download real datasets.

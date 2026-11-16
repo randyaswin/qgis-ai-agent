@@ -47,11 +47,11 @@ def skills_block(sel, catalog_names):
             refs = f"\nReferences (load with load_skill reference=...): {', '.join(s_refs)}" if s_refs else ""
             parts.append(f"## Skill: {s_name} ({tag})\n{s_body}{refs}")
     if sel.get("hint"):
-        parts.append("# Also relevant (too large to inline; call `load_skill` if needed)\n" +
+        parts.append("# Also relevant (MANDATORY: call `load_skill(name)` for any skill matching this task before executing)\n" +
                      "\n".join(f"- {getattr(s, 'name', str(s))}: {getattr(s, 'description', '')[:200]}" for s in sel["hint"]))
     rest = [n for n in catalog_names if n not in {getattr(s, 'name', str(s)) for s in full + sel.get("hint", [])}]
     if rest:
-        parts.append("# Other skills you can load on demand with `load_skill(name)` (use `list_skills(query)` to search)\n" +
+        parts.append("# Other available skills (call `load_skill(name)` or `list_skills(query)` if the task touches these domains)\n" +
                      ", ".join(rest))
     return "\n\n".join(parts)
 

@@ -4,7 +4,7 @@ qgisMinimumVersion=3.34
 qgisMaximumVersion=4.99
 description=Autonomous AI cartography and spatial analysis copilot driven via Model Context Protocol (MCP) and AI CLIs.
 about=Connects QGIS to autonomous AI agents (Google Antigravity agy, Claude Code, Gemini CLI, OpenAI Codex) via the Model Context Protocol (MCP). Features 70 deep QGIS tools (STAC, COG streaming, Overture Maps DuckDB spatial SQL, 440+ Processing algorithms, cartographic styling, sampling grid classification, GCP Helmert georeferencing, and 5 distinct layout archetypes: Official Planning, Disaster Infographic, NatGeo, Statistical Thematic, and Relief Topographic) paired with 61 GIS domain skills.
-version=1.1.5
+version=1.1.6
 author=M. Randy Aswin
 email=mrandyaswin@gmail.com
 homepage=https://github.com/randyaswin/qgis-ai-agent
@@ -16,7 +16,11 @@ experimental=False
 deprecated=False
 has_processing_provider=False
 icon=icon.svg
-changelog=1.1.5:
+changelog=1.1.6:
+    - Added multiple HEIC/HEIF/WebP image attachment support in Attach dialog with automatic JPEG conversion into <project_dir>/scratch/ (preserving EXIF/GPS via pillow_heif/Pillow, QImage, heif-convert, ImageMagick, ffmpeg, or sips).
+    - Enforced mandatory load_skill(name) & skill catalog/hint injection across all reasoning effort levels (low, medium, high, xhigh) in AGENT.md, prompts.py, and dock.py.
+    - Hardened QGIS-to-MCP bridge connection stability: added server.ensure_endpoint() before CLI launch, port+pid guard in server.stop(), and automatic endpoint.json retry/reconnect in mcp_bridge.py.
+1.1.5:
     - Eliminated Overture S3 Parquet hangs/force-closes: single-pass STAC-pruned Parquet streaming (no repeated ORDER BY / OFFSET re-scans), unscoped S3 glob rejection, 1GB memory limit + temp spill, and 180s interrupt timeout.
     - Added bbox size thresholds & automatic spatial tile chunking (_iter_spatial_bbox_chunks) for STAC Parquet plus expanded PMTiles capacity (up to 256 tiles) so only data inside the bbox is fetched.
     - Unified project workspace on new_project(): creates a dedicated folder inside the configured Output directory containing <project>.qgz (also autosave target), scratch/ (all Processing, Overture, DuckDB, and remote vector outputs saved as real files—no memory/temporary layers), and ai/ (AI sessions & CLI workspaces).

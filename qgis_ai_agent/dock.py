@@ -4,11 +4,13 @@ import json
 import os
 import random
 import re
+import shutil
 import subprocess
 import time
+import uuid
 
 from qgis.PyQt.QtCore import Qt, QSettings, QTimer, QEvent
-from qgis.PyQt.QtGui import QTextCursor
+from qgis.PyQt.QtGui import QTextCursor, QImage
 from qgis.PyQt.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout, QComboBox, QPushButton, QPlainTextEdit,
     QTextEdit, QTextBrowser, QCheckBox, QLabel, QLineEdit, QFileDialog, QMessageBox, QDialog,
@@ -435,6 +437,70 @@ def render_assistant_message_html(text, model_info="", timestamp=""):
         f"</td></tr>"
         f"</table>"
     )
+
+
+def _convert_heic_for_agent(src_path):
+    """Convert a .heic/.heif image to .jpg in the active project's scratch/ dir for AI vision compatibility."""
+    if not src_path or not os.path.exists(src_path):
+        return None
+    ext = os.path.splitext(src_path)[1].lower()
+    if ext not in (".heic", ".heif"):
+        return src_path
+
+    pfile = QgsProject.instance().fileName() or None
+    scratch_dir = paths.get_scratch_dir(pfile)
+    os.makedirs(scratch_dir, exist_ok=True)
+    stem = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in os.path.splitext(os.path.basename(src_path))[0]).strip("_") or "image"
+    dst_path = os.path.join(scratch_dir, f"{stem}_{uuid.uuid4().hex[:6]}.jpg")
+
+    # 1. Try pillow_heif + Pillow (preserves EXIF/GPS & orientation cleanly)
+    try:
+        import pillow_heif
+        from PIL import Image, ImageOps
+        pillow_heif.register_heif_opener()
+        with Image.open(src_path) as im:
+            im = ImageOps.exif_transpose(im)
+            exif_bytes = im.info.get("exif")
+            rgb = im.convert("RGB")
+            save_kwargs = {"format": "JPEG", "quality": 92}
+            if exif_bytes:
+                save_kwargs["exif"] = exif_bytes
+            rgb.save(dst_path, **save_kwargs)
+        if os.path.exists(dst_path) and os.path.getsize(dst_path) > 0:
+            return dst_path
+    except Exception:
+        pass
+
+    # 2. Try Qt QImage (works if Qt HEIF imageformat plugin is installed)
+    try:
+        qimg = QImage(src_path)
+        if not qimg.isNull() and qimg.save(dst_path, "JPEG", 92):
+            if os.path.exists(dst_path) and os.path.getsize(dst_path) > 0:
+                return dst_path
+    except Exception:
+        pass
+
+    # 3. Try CLI converters: heif-convert, ImageMagick, ffmpeg, macOS sips
+    cli_cmds = [
+        ("heif-convert", [src_path, dst_path]),
+        ("magick", [src_path, "-auto-orient", "-quality", "92", dst_path]),
+        ("convert", [src_path, "-auto-orient", "-quality", "92", dst_path]),
+        ("ffmpeg", ["-y", "-i", src_path, "-q:v", "2", dst_path]),
+        ("sips", ["-s", "format", "jpeg", src_path, "--out", dst_path]),
+    ]
+    for bin_name, args in cli_cmds:
+        exe = shutil.which(bin_name)
+        if not exe:
+            continue
+        try:
+            res = subprocess.run([exe] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            if res.returncode == 0 and os.path.exists(dst_path) and os.path.getsize(dst_path) > 0:
+                return dst_path
+        except Exception:
+            pass
+
+    tools.LOGGER.warning(f"Could not convert HEIC/HEIF image to JPEG: {src_path}")
+    return None
 
 
 def render_user_message_html(text, attachments=None, timestamp=""):
@@ -2605,7 +2671,7 @@ class AgentDock(QDockWidget):
     def _add_attachment(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Attach Reference Material", "",
-            "All Supported (*.png *.jpg *.jpeg *.tif *.tiff *.pdf *.geojson *.shp *.gpkg *.qml *.txt);;Images (*.png *.jpg *.jpeg *.tif);;Vector Data (*.geojson *.shp *.gpkg);;Styles (*.qml);;All Files (*)"
+            "All Supported (*.png *.jpg *.jpeg *.heic *.heif *.webp *.tif *.tiff *.pdf *.geojson *.shp *.gpkg *.qml *.txt);;Images (*.png *.jpg *.jpeg *.heic *.heif *.webp *.tif);;Vector Data (*.geojson *.shp *.gpkg);;Styles (*.qml);;All Files (*)"
         )
         if paths:
             for p in paths:
@@ -2766,7 +2832,15 @@ class AgentDock(QDockWidget):
         if attach_list:
             att_block = ["\n\n# User Attached References / Files:"]
             for a_path in attach_list:
-                att_block.append(f"- File: `{a_path}`")
+                ext = os.path.splitext(a_path)[1].lower()
+                if ext in (".heic", ".heif"):
+                    conv_path = _convert_heic_for_agent(a_path)
+                    if conv_path:
+                        att_block.append(f"- File: `{conv_path}` (JPEG converted from HEIC: `{a_path}`)")
+                    else:
+                        att_block.append(f"- File: `{a_path}` (HEIC image; install pillow-heif or libheif-examples if vision preview is needed)")
+                else:
+                    att_block.append(f"- File: `{a_path}`")
             user += "\n".join(att_block)
             self.attachments = []
             self._update_attachment_bar()
@@ -2821,6 +2895,12 @@ class AgentDock(QDockWidget):
                 if not has_mutating_tool_run and (has_clarify or not any(m.tool_calls for m in active_sess.messages)):
                     is_after_clarification = True
 
+        is_vague = bool(
+            not cont
+            and not is_after_clarification
+            and REGISTRY.is_vague_request(user, layer_names=live_layer_names)
+        )
+
         inherited_skills = []
         if REGISTRY.mode == "manual":
             # Manual mode: pre-load all pinned / manual skills in full before execution
@@ -2840,7 +2920,7 @@ class AgentDock(QDockWidget):
             loaded_skills = [s.name for s in sel.get("pinned", []) + sel.get("full", [])]
             active_sess.active_skills = list(loaded_skills)
             active_sess.is_e2e = sel.get("is_e2e", False)
-            skills_txt = prompts.skills_block(sel, catalog) if loaded_skills else ""
+            skills_txt = prompts.skills_block(sel, catalog)
         elif cont and active_sess.active_skills:
             # Auto mode continuing turn after tools were already executed: inherit and add newly needed skills
             inherited_skills = list(active_sess.active_skills)
@@ -2859,19 +2939,21 @@ class AgentDock(QDockWidget):
                 added_objs = [avail_skills[n] for n in added_names if n in avail_skills]
                 skills_txt = (
                     f"# Active skills inherited: {', '.join(inherited_skills)}\n\n"
-                    + prompts.skills_block({"pinned": [], "full": added_objs, "hint": [], "scores": new_sel.get("scores", {}), "is_e2e": False}, catalog)
+                    + prompts.skills_block({"pinned": [], "full": added_objs, "hint": new_sel.get("hint", []), "scores": new_sel.get("scores", {}), "is_e2e": False}, catalog)
                 )
             else:
-                skills_txt = f"# Active session skills: {', '.join(merged_skill_names)} (already in context)"
+                hint_part = ""
+                if new_sel.get("hint"):
+                    hint_part = "\n\n" + prompts.skills_block({"pinned": [], "full": [], "hint": new_sel.get("hint", []), "scores": {}}, [])
+                skills_txt = f"# Active session skills: {', '.join(merged_skill_names)} (already in context){hint_part}"
             sel = {"pinned": [], "full": [avail_skills[n] for n in merged_skill_names if n in avail_skills], "scores": {}}
         else:
             # Auto mode: first turn / before execution
-            # If the request is vague, REGISTRY.select returns empty skills until clarified
             sel = REGISTRY.select(user, layer_names=live_layer_names)
             loaded_skills = [s.name for s in sel.get("pinned", []) + sel.get("full", [])]
             active_sess.active_skills = list(loaded_skills)
             active_sess.is_e2e = sel.get("is_e2e", False)
-            skills_txt = prompts.skills_block(sel, catalog) if loaded_skills else ""
+            skills_txt = "" if is_vague else prompts.skills_block(sel, catalog)
 
         # Model and Effort selection
         selected_model = self._get_selected_model_id() or None
@@ -2888,12 +2970,14 @@ class AgentDock(QDockWidget):
             sys_text += f"\n\n# User custom instructions\n{self.custom_instructions.strip()}"
         live_ctx = self._get_live_context()
         sess_hist = active_sess.format_history_for_prompt() if (active_sess.turns_count > 0 and not cont) else None
-        is_vague = bool(
-            not cont
-            and not is_after_clarification
-            and REGISTRY.is_vague_request(user, layer_names=live_layer_names)
-        )
         full = prompts.build(sys_text, live_ctx, skills_txt, user, continuing=cont, session_history=sess_hist, is_vague=is_vague)
+
+        # Ensure live MCP endpoint file is present & pointing to this QGIS instance before spawning CLI
+        if hasattr(self.server, "ensure_endpoint"):
+            try:
+                self.server.ensure_endpoint()
+            except Exception:
+                pass
 
         # Explicit CLI Session ID tracking: never rely on global "last"
         cli_sess_id = active_sess.cli_session_id
