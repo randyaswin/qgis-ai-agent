@@ -4,7 +4,7 @@ qgisMinimumVersion=3.34
 qgisMaximumVersion=4.99
 description=Autonomous AI cartography and spatial analysis copilot driven via Model Context Protocol (MCP) and AI CLIs.
 about=Connects QGIS to autonomous AI agents (Google Antigravity agy, Claude Code, Gemini CLI, OpenAI Codex) via the Model Context Protocol (MCP). Features 72 deep QGIS tools (STAC, COG streaming, Overture Maps DuckDB spatial SQL, 440+ Processing algorithms, cartographic styling, sampling grid classification, GCP Helmert georeferencing, vector graphic/QR generation, alpha-numeric reference grids, and themed + A3 folded booklet print layouts) paired with 61 GIS domain skills.
-version=1.1.7
+version=1.1.8
 author=M. Randy Aswin
 email=mrandyaswin@gmail.com
 homepage=https://github.com/randyaswin/qgis-copilot
@@ -16,7 +16,10 @@ experimental=False
 deprecated=False
 has_processing_provider=False
 icon=icon.svg
-changelog=1.1.7:
+changelog=1.1.8:
+    - Security & QA cleanup: resolved Bandit B112 finding in layout_tools.py (add_map_reference_grid CRS transform logging) cleanly with zero scanner issues across all 21 plugin files.
+    - Includes all v1.1.7 features: item rotation (0/90/180/270), generate_layout_graphic (QR codes, curved ribbons, numbered tourist pins/icons, stepped tabs, multi-column directory cards), add_map_reference_grid, and tourist_map_a3 / stepped_booklet_a3 A3 booklet layouts.
+1.1.7:
     - Added item rotation support (rotation=0/90/180/270) to add_layout_shape, add_layout_text, add_layout_picture, update_layout_item, and list_layout_items, plus sceneBoundingRect() audit accuracy in snapshot_layout.
     - Added generate_layout_graphic (pure-Python QR code SVG encoder, curved ribbon banner, numbered tourist pins & category icons, stepped colored side-tabs, and multi-column directory cards) and add_map_reference_grid (A-H/1-6 index strips + automatic POI map_grid field stamping).
     - Added tourist_map_a3 and stepped_booklet_a3 (6-panel 2x3 fold with 180-degree inverted top row and staggered vertical side tabs) themes in create_styled_layout, plus Qt6/QGIS4 enum compatibility fixes for plugins.qgis.org.
