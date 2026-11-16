@@ -3,8 +3,8 @@
 
 Validates metadata.txt against QGIS Plugin Repository standards, excludes build artifacts,
 and packages the plugin into:
-  - dist/qgis_ai_agent.zip (ready for plugins.qgis.org upload)
-  - dist/qgis_ai_agent-<version>.zip (versioned release asset)
+  - dist/qgis_copilot.zip (ready for plugins.qgis.org upload)
+  - dist/qgis_copilot-<version>.zip (versioned release asset)
 """
 import configparser
 import hashlib
@@ -13,7 +13,7 @@ import shutil
 import sys
 import zipfile
 
-PLUGIN_NAME = "qgis_ai_agent"
+PLUGIN_NAME = "qgis_copilot"
 REQUIRED_METADATA_FIELDS = [
     "name",
     "qgisMinimumVersion",

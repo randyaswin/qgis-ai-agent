@@ -17,8 +17,8 @@ class AIAgentPlugin:
 
     def initGui(self):
         import sys
-        if "qgis_ai_agent.dock" in sys.modules:
-            del sys.modules["qgis_ai_agent.dock"]
+        if "qgis_copilot.dock" in sys.modules:
+            del sys.modules["qgis_copilot.dock"]
 
         self.server = ToolServer()
         port = self.server.start()

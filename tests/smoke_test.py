@@ -43,8 +43,8 @@ class Iface:
     def layerTreeView(s): return s.v
 import qgis.utils; qgis.utils.iface = Iface()
 
-from qgis_ai_agent import tools, sessions
-from qgis_ai_agent.server import ToolServer
+from qgis_copilot import tools, sessions
+from qgis_copilot.server import ToolServer
 out = os.path.join(tempfile.gettempdir(), f"qgis_ai_test_{os.getpid()}")
 os.makedirs(out, exist_ok=True)
 os.environ["QGIS_AI_OUTPUT_DIR"] = out
@@ -181,7 +181,7 @@ srv.stop()
 tools.LOGGER.info("smoke test logger info")
 tools.LOGGER.warning("smoke test logger warning")
 
-from qgis_ai_agent import layout_tools, skills, dock
+from qgis_copilot import layout_tools, skills, dock
 assert hasattr(layout_tools, "QgsLineSymbol"), "QgsLineSymbol missing in layout_tools"
 
 # Verify updated tool schemas
@@ -236,7 +236,7 @@ assert "Digitized +1 features" in dock.summarize_tool_result("digitize_features"
 assert "cells generated" in dock.summarize_tool_result("create_sampling_grid", grid_res) or "Sampling grid" in dock.summarize_tool_result("create_sampling_grid", grid_res)
 
 # --- Phase 2: performance, memory bounds, new skills, & auto skill selection ---
-from qgis_ai_agent import sessions, prompts
+from qgis_copilot import sessions, prompts
 
 # 1. Streaming Welford vector stats + NoGeometry/chunked calculate_field
 d_titik = T("describe_layer", {"layer": "titik"})
@@ -316,7 +316,7 @@ finally:
     reg.mode = orig_mode
 
 # --- Phase 3: thread/memory safety & cross-platform portability ---
-from qgis_ai_agent import paths, runner, server
+from qgis_copilot import paths, runner, server
 
 # 1. Cross-platform Python & CLI path discovery
 py_exec = paths.get_python_executable()
@@ -380,7 +380,7 @@ assert "--model" in agy_argv and "gemini-4-argon-high" in agy_argv and "--effort
 
 # 7. Dead-QGIS PID checks, fast /proc tree discovery, stale endpoint cleanup, and Overture normalization
 import time as _t
-from qgis_ai_agent import guard, mcp_bridge
+from qgis_copilot import guard, mcp_bridge
 
 assert mcp_bridge._is_pid_alive(os.getpid()) is True
 assert mcp_bridge._is_pid_alive(99999999) is False
@@ -757,12 +757,12 @@ _bbox_mp = [it for it in QgsProject.instance().layoutManager().layoutByName("Exp
 assert abs(_bbox_mp.extent().width() - 0.015) < 0.004, f"Expected explicit bbox lock width ~0.015, got {_bbox_mp.extent().width()}"
 T("remove_layer", {"layer": "Giant_River_Renamed"})
 
-from qgis_ai_agent import runner as _runner
+from qgis_copilot import runner as _runner
 assert any("Agent Orchestration" in lbl and val == "gemini-pro-orchestrator-g1-pro"
            for lbl, val in _runner.DEFAULT_ADAPTER_MODELS["agy (Antigravity CLI)"]), "Missing Agent Orchestration in DEFAULT_ADAPTER_MODELS"
 
 # Protocol 0 vague prompt gating
-from qgis_ai_agent import prompts as _prompts
+from qgis_copilot import prompts as _prompts
 assert skills.REGISTRY.is_vague_request("make city map yogyakarta around malioboro") is True
 assert skills.REGISTRY.is_vague_request("make city map of center yogyakarta around malioboro and tugu") is True
 assert "DO NOT EXECUTE MAP TOOLS YET" in _prompts.build("", "", "", "make city map yogyakarta around malioboro", False, is_vague=True)

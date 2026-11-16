@@ -87,28 +87,28 @@ Layouts adapt to your domain theme. The agent never forces generic templates on 
 ## 🚀 Installation
 
 ### Option A: Install via QGIS Plugin Manager (Recommended)
-1. Download the latest `qgis_ai_agent-1.1.1.zip` from [Releases](https://github.com/randyaswin/qgis-ai-agent/releases).
+1. Download the latest `qgis_copilot-<version>.zip` from [Releases](https://github.com/randyaswin/qgis-ai-agent/releases).
 2. In QGIS, navigate to **Plugins** ➔ **Manage and Install Plugins...**
 3. Select **Install from ZIP**, choose the downloaded zip file, and click **Install Plugin**.
 4. Activate the plugin: check **QGIS Copilot** in the plugin list.
 
 ### Option B: Manual Installation via Git
-Clone this repository directly into your QGIS 3 Python plugins directory:
+Clone this repository directly into your QGIS 3 Python plugins directory (symlink or copy `qgis_copilot/`):
 
 * **Linux**:
   ```bash
-  cd ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins
-  git clone https://github.com/randyaswin/qgis-ai-agent.git qgis_ai_agent
+  git clone https://github.com/randyaswin/qgis-ai-agent.git /tmp/qgis-ai-agent
+  ln -s /tmp/qgis-ai-agent/qgis_copilot ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/qgis_copilot
   ```
 * **macOS**:
   ```bash
-  cd ~/Library/Application\ Support/QGIS/QGIS3/profiles/default/python/plugins
-  git clone https://github.com/randyaswin/qgis-ai-agent.git qgis_ai_agent
+  git clone https://github.com/randyaswin/qgis-ai-agent.git /tmp/qgis-ai-agent
+  ln -s /tmp/qgis-ai-agent/qgis_copilot ~/Library/Application\ Support/QGIS/QGIS3/profiles/default/python/plugins/qgis_copilot
   ```
 * **Windows (PowerShell)**:
   ```powershell
-  cd "$env:APPDATA\QGIS\QGIS3\profiles\default\python\plugins"
-  git clone https://github.com/randyaswin/qgis-ai-agent.git qgis_ai_agent
+  git clone https://github.com/randyaswin/qgis-ai-agent.git "$env:TEMP\qgis-ai-agent"
+  Copy-Item -Recurse "$env:TEMP\qgis-ai-agent\qgis_copilot" "$env:APPDATA\QGIS\QGIS3\profiles\default\python\plugins\qgis_copilot"
   ```
 
 Restart QGIS and enable **QGIS Copilot** in the Plugins menu.
@@ -156,13 +156,13 @@ Generate the upload-ready ZIP archive locally at any time:
 python3 scripts/package_plugin.py
 ```
 This validates `metadata.txt`, strips unwanted cache/OS files, and outputs:
-* `dist/qgis_ai_agent.zip` (ready for plugins.qgis.org upload or manual QGIS ZIP install)
-* `dist/qgis_ai_agent-<version>.zip` (versioned release asset)
+* `dist/qgis_copilot.zip` (ready for plugins.qgis.org upload or manual QGIS ZIP install)
+* `dist/qgis_copilot-<version>.zip` (versioned release asset)
 * `dist/checksums.sha256` (SHA-256 integrity checksums)
 
 ### Automated GitHub Actions Release
 To publish an official release with attached ZIP assets on GitHub:
-1. Update `version` and `changelog` in [`qgis_ai_agent/metadata.txt`](qgis_ai_agent/metadata.txt).
+1. Update `version` and `changelog` in [`qgis_copilot/metadata.txt`](qgis_copilot/metadata.txt).
 2. Tag and push to GitHub:
    ```bash
    git tag v1.0.0
