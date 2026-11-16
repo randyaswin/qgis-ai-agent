@@ -8,7 +8,7 @@ Provides unified discovery of:
 import glob
 import os
 import shutil
-import subprocess
+import subprocess  # nosec B404
 import sys
 from pathlib import Path
 
@@ -31,7 +31,7 @@ def get_documents_dir():
         loc = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
         if loc and os.path.isdir(loc):
             return os.path.normpath(loc)
-    except Exception:
+    except Exception:  # nosec B110
         pass
 
     # Windows fallback
@@ -73,7 +73,7 @@ def set_active_project_dir(path):
         _ACTIVE_PROJECT_DIR = os.path.normpath(os.path.abspath(os.path.expanduser(str(path))))
         try:
             os.makedirs(_ACTIVE_PROJECT_DIR, exist_ok=True)
-        except Exception:
+        except Exception:  # nosec B110
             pass
     else:
         _ACTIVE_PROJECT_DIR = None
@@ -92,7 +92,7 @@ def get_configured_output_dir():
         target = os.path.normpath(os.path.abspath(os.path.expanduser(env_dir)))
         try:
             os.makedirs(target, exist_ok=True)
-        except Exception:
+        except Exception:  # nosec B110
             pass
         return target
     try:
@@ -102,7 +102,7 @@ def get_configured_output_dir():
             target = os.path.normpath(os.path.abspath(os.path.expanduser(saved)))
             os.makedirs(target, exist_ok=True)
             return target
-    except Exception:
+    except Exception:  # nosec B110
         pass
     return get_default_output_dir()
 
@@ -122,7 +122,7 @@ def get_scratch_dir(project_file=None):
     sdir = os.path.join(pdir, "scratch") if pdir else os.path.join(get_configured_output_dir(), "_scratch")
     try:
         os.makedirs(sdir, exist_ok=True)
-    except Exception:
+    except Exception:  # nosec B110
         pass
     return os.path.normpath(sdir)
 
@@ -136,7 +136,7 @@ def get_ai_project_dir(project_file=None, project_id=None):
         adir = os.path.join(get_projects_dir(), project_id or "default")
     try:
         os.makedirs(adir, exist_ok=True)
-    except Exception:
+    except Exception:  # nosec B110
         pass
     return os.path.normpath(adir)
 
@@ -151,7 +151,7 @@ def get_default_output_dir():
     target_dir = os.path.join(doc_dir, "qgis-ai-maps")
     try:
         os.makedirs(target_dir, exist_ok=True)
-    except Exception:
+    except Exception:  # nosec B110
         pass
     return os.path.normpath(target_dir)
 

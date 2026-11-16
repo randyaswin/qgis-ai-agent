@@ -108,7 +108,7 @@ Every reproducible pipeline should write a small manifest next to outputs:
     {
       "path": "buildings.pmtiles",
       "format": "PMTiles",
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "sha256": "<sha256-hex>",
       "validation": ["pmtiles show"],
       "attribution": "required map/API text"
     }

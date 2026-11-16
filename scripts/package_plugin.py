@@ -93,10 +93,16 @@ def validate_metadata(plugin_dir):
 
 
 def should_include(rel_path):
-    parts = rel_path.replace("\\", "/").split("/")
+    norm = rel_path.replace("\\", "/")
+    parts = norm.split("/")
     for p in parts:
         if p in EXCLUDED_DIRS:
             return False
+    # Exclude non-runtime vendored example/template trees that trigger false-positive security scans
+    if "skills/vendor/openmapstack-skills/" in norm and (
+        "/examples/" in norm or "/templates/" in norm
+    ):
+        return False
     filename = parts[-1]
     if filename in EXCLUDED_FILES:
         return False

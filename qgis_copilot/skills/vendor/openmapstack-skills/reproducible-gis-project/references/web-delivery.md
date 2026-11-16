@@ -261,7 +261,7 @@ When data is dynamic or in a database, a tile server beats pre-generation.
 ```bash
 # Auto-discover all tables with geometry columns
 docker run -d -p 3000:3000 \
-  -e DATABASE_URL=postgres://user:pass@host/db \
+  -e DATABASE_URL=postgres://martin_user@host/db \
   ghcr.io/maplibre/martin
 
 # Tiles available at /<schema>.<table>/{z}/{x}/{y}

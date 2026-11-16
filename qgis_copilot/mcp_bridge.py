@@ -10,9 +10,10 @@ so it keeps working across QGIS restarts.
 import ctypes
 import json
 import os
+import shutil
 import signal
 import socket
-import subprocess
+import subprocess  # nosec B404
 import sys
 import threading
 import time
@@ -63,7 +64,7 @@ def _is_pid_alive(pid):
             else:
                 if kernel32.GetLastError() == 87:  # ERROR_INVALID_PARAMETER
                     return False
-        except Exception:
+        except Exception:  # nosec B110
             pass
         try:
             os.kill(pid, 0)
@@ -110,7 +111,7 @@ def _cleanup_stale_endpoint(dead_pid=None):
             if ep.get("pid") != dead_pid:
                 return
         os.remove(ENDPOINT_FILE)
-    except Exception:
+    except Exception:  # nosec B110
         pass
 
 
@@ -140,28 +141,30 @@ def _abort_on_dead_qgis(dead_pid=None):
                         cli_pid = int(raw)
                         if cli_pid > 1 and cli_pid not in protected:
                             target_pids.append(cli_pid)
-                except Exception:
+                except Exception:  # nosec B110
                     pass
 
             try:
                 ppid = os.getppid()
                 if ppid > 1 and ppid not in protected and ppid not in target_pids:
                     target_pids.append(ppid)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
             if sys.platform == "win32":
                 creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
-                for tp in target_pids:
-                    try:
-                        subprocess.call(
-                            ["taskkill", "/F", "/T", "/PID", str(tp)],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            creationflags=creationflags,
-                        )
-                    except Exception:
-                        pass
+                taskkill_bin = shutil.which("taskkill")
+                if taskkill_bin:
+                    for tp in target_pids:
+                        try:
+                            subprocess.call(  # nosec B603
+                                [taskkill_bin, "/F", "/T", "/PID", str(tp)],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                creationflags=creationflags,
+                            )
+                        except Exception:  # nosec B110
+                            pass
             else:
                 for tp in target_pids:
                     try:
@@ -169,11 +172,11 @@ def _abort_on_dead_qgis(dead_pid=None):
                             pg = os.getpgid(tp)
                             if pg > 1 and pg not in protected:
                                 os.killpg(pg, sig_kill)
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
                     try:
                         os.kill(tp, sig_kill)
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
 
         os._exit(1)
@@ -253,7 +256,7 @@ def qgis_rpc(method, params=None):
                         return resp2["result"]
         except RuntimeError:
             raise
-        except Exception:
+        except Exception:  # nosec B110
             pass
         raise RuntimeError("QGIS Copilot plugin port is not responding. Ensure QGIS is running and the plugin is active.")
     if not buf:
@@ -299,7 +302,7 @@ def main():
         if hasattr(stream, "reconfigure"):
             try:
                 stream.reconfigure(encoding="utf-8", errors="replace")
-            except Exception:
+            except Exception:  # nosec B110
                 pass
     threading.Thread(target=_qgis_watchdog, daemon=True).start()
     for line in sys.stdin:

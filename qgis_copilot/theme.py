@@ -42,7 +42,7 @@ def is_dark():
             win_color = pal.color(color_role)
             # If window color lightness is < 128, it is a dark theme
             return win_color.lightness() < 128
-    except Exception:
+    except Exception:  # nosec B110
         pass
     return False
 

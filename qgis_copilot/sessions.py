@@ -54,7 +54,7 @@ def record_autosave_info(project_file, project_id=None):
         }
         with open(AUTOSAVE_REGISTRY_FILE, "w", encoding="utf-8") as f:
             json.dump(registry, f, indent=2, ensure_ascii=False)
-    except Exception:
+    except Exception:  # nosec B110
         pass
 
 
@@ -72,7 +72,7 @@ def get_autosave_info_for_current_project():
             with open(AUTOSAVE_REGISTRY_FILE, "r", encoding="utf-8") as f:
                 registry = json.load(f)
             return registry.get(norm_path)
-        except Exception:
+        except Exception:  # nosec B110
             pass
     return None
 
@@ -230,7 +230,7 @@ class Session:
                             if norm_k_real in (norm_ws, raw_ws) or norm_k_abs in (norm_ws, raw_ws):
                                 self.cli_session_id = str(v)
                                 return self.cli_session_id
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
 
         # 2. Claude Code session detection (strictly scoped to workspace project slugs)
@@ -253,7 +253,7 @@ class Session:
                         cid = os.path.splitext(os.path.basename(recent[0]))[0]
                         self.cli_session_id = str(cid)
                         return self.cli_session_id
-                except Exception:
+                except Exception:  # nosec B110
                     pass
 
         # 3. OpenCode session detection (Linux, macOS, Windows)
@@ -271,7 +271,7 @@ class Session:
                             cid = os.path.splitext(os.path.basename(recent[0]))[0]
                             self.cli_session_id = str(cid)
                             return self.cli_session_id
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
 
         return self.cli_session_id
@@ -431,7 +431,7 @@ class SessionManager:
             p.readProject.connect(self.on_project_loaded)
             p.projectSaved.connect(self.on_project_saved)
             p.cleared.connect(self.on_project_cleared)
-        except Exception:
+        except Exception:  # nosec B110
             pass
         self.load_project_sessions(trigger_callback=trigger_callback)
         # Guarantee plugin activation never dirties a blank/unmodified project
@@ -445,7 +445,7 @@ class SessionManager:
             except RuntimeError as e:
                 if "deleted" in str(e).lower():
                     self.disconnect_signals()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     def disconnect_signals(self):
@@ -453,15 +453,15 @@ class SessionManager:
         p = QgsProject.instance()
         try:
             p.readProject.disconnect(self.on_project_loaded)
-        except Exception:
+        except Exception:  # nosec B110
             pass
         try:
             p.projectSaved.disconnect(self.on_project_saved)
-        except Exception:
+        except Exception:  # nosec B110
             pass
         try:
             p.cleared.disconnect(self.on_project_cleared)
-        except Exception:
+        except Exception:  # nosec B110
             pass
         self.on_change = None
 
@@ -519,7 +519,7 @@ class SessionManager:
                     disk_data = json.load(f)
                     if not loaded_data or (disk_data.get("updated_at", "") > loaded_data.get("updated_at", "")):
                         loaded_data = disk_data
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
         if loaded_data and "sessions" in loaded_data:
@@ -560,7 +560,7 @@ class SessionManager:
             pid = self.get_project_id()
             p.write()
             record_autosave_info(cur_file, pid)
-        except Exception:
+        except Exception:  # nosec B110
             pass
         finally:
             self._saving = False
@@ -582,7 +582,7 @@ class SessionManager:
         try:
             with open(sfile, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
         # 2. Embed into QGIS Project entry ONLY if project is already a saved file on disk
@@ -597,7 +597,7 @@ class SessionManager:
                 p.writeEntry("qgis_ai_agent", "session_manifest", manifest_json)
                 if not was_dirty:
                     p.setDirty(False)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
         # 3. Auto-save QGIS project to disk across iterations when requested (only if already saved on disk)

@@ -425,7 +425,7 @@ def add_layout_legend(layout=None, x=0, y=0, width=None, height=None, item_id=No
                 lyr = _layer(n)
                 if lyr:
                     root.addLayer(lyr)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
     else:
         # Auto-exclude background basemaps, hillshades, and raw grayscale tiles

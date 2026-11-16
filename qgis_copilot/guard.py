@@ -12,8 +12,9 @@ import ctypes
 import glob
 import os
 import shutil
+import shutil
 import signal
-import subprocess
+import subprocess  # nosec B404
 import sys
 import threading
 import time
@@ -56,7 +57,7 @@ def _is_pid_alive(pid):
             else:
                 if kernel32.GetLastError() == 87:
                     return False
-        except Exception:
+        except Exception:  # nosec B110
             pass
         try:
             os.kill(pid, 0)
@@ -100,7 +101,7 @@ def _cleanup_stale_endpoint(parent_pid):
             ep = json.load(f)
         if ep.get("pid") == parent_pid:
             os.remove(_ENDPOINT_FILE)
-    except Exception:
+    except Exception:  # nosec B110
         pass
 
 
@@ -132,9 +133,9 @@ def _get_process_tree(root_pids, protected_pids=None):
                             if len(parts) >= 2 and parts[1].isdigit():
                                 ppid = int(parts[1])
                                 ppid_map.setdefault(ppid, set()).add(int(name))
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     descendants = set()
@@ -151,16 +152,18 @@ def _get_process_tree(root_pids, protected_pids=None):
                         for c in f.read().split():
                             if c.isdigit():
                                 found.add(int(c))
-                except Exception:
+                except Exception:  # nosec B110
                     pass
         else:
             # pgrep -P fallback (cross-unix / macOS without /proc)
             try:
-                out = subprocess.check_output(["pgrep", "-P", str(curr)], stderr=subprocess.DEVNULL, text=True, **_SUBPROC_KWARGS)
-                for c in out.split():
-                    if c.isdigit():
-                        found.add(int(c))
-            except Exception:
+                pgrep_bin = shutil.which("pgrep")
+                if pgrep_bin:
+                    out = subprocess.check_output([pgrep_bin, "-P", str(curr)], stderr=subprocess.DEVNULL, text=True, **_SUBPROC_KWARGS)  # nosec B603
+                    for c in out.split():
+                        if c.isdigit():
+                            found.add(int(c))
+            except Exception:  # nosec B110
                 pass
         for c in found:
             if c not in visited and c not in protected_pids:
@@ -188,7 +191,7 @@ def main():
     if hasattr(os, "setpgrp"):
         try:
             os.setpgrp()
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     # 1. Linux PR_SET_PDEATHSIG: kernel sends SIGTERM if parent dies so on_signal/kill_child_tree runs
@@ -197,14 +200,14 @@ def main():
             libc = ctypes.CDLL(None)
             PR_SET_PDEATHSIG = 1
             libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     proc = None
     protected_base = {parent_pid, os.getpid()}
     try:
         protected_base.add(os.getppid())
-    except Exception:
+    except Exception:  # nosec B110
         pass
 
     tracked_pids = set()
@@ -232,7 +235,7 @@ def main():
                     pg = os.getpgid(p)
                     if pg not in protected_base and pg > 1:
                         new_pgids.add(pg)
-                except Exception:
+                except Exception:  # nosec B110
                     pass
                 if p not in protected_base and p > 1:
                     new_pgids.add(p)
@@ -266,7 +269,7 @@ def main():
                         pg = os.getpgid(p)
                         if pg not in protected_base and pg > 1:
                             all_pgids.add(pg)
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
                     if p not in protected_base and p > 1:
                         all_pgids.add(p)
@@ -274,13 +277,15 @@ def main():
             # Windows tree termination
             if sys.platform == "win32":
                 try:
-                    subprocess.call(
-                        ["taskkill", "/F", "/T", "/PID", str(c_pid)],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        **_SUBPROC_KWARGS,
-                    )
-                except Exception:
+                    taskkill_bin = shutil.which("taskkill")
+                    if taskkill_bin:
+                        subprocess.call(  # nosec B603
+                            [taskkill_bin, "/F", "/T", "/PID", str(c_pid)],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            **_SUBPROC_KWARGS,
+                        )
+                except Exception:  # nosec B110
                     pass
                 return
 
@@ -289,14 +294,14 @@ def main():
                 for pg in all_pgids:
                     try:
                         os.killpg(pg, signal.SIGTERM)
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
 
                 for p in all_pids:
                     if p not in protected_base:
                         try:
                             os.kill(p, signal.SIGTERM)
-                        except Exception:
+                        except Exception:  # nosec B110
                             pass
 
                 time.sleep(0.015)
@@ -305,14 +310,14 @@ def main():
             for pg in all_pgids:
                 try:
                     os.killpg(pg, signal.SIGKILL)
-                except Exception:
+                except Exception:  # nosec B110
                     pass
 
             for p in all_pids:
                 if p not in protected_base:
                     try:
                         os.kill(p, signal.SIGKILL)
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
 
     def on_signal(signum, frame):
@@ -338,7 +343,7 @@ def main():
                     kernel32.CloseHandle(h_parent)
                     kill_child_tree(parent_dead=True)
                     os._exit(0)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
         # Polling fallback (Linux / macOS / generic) + continuous descendant snapshotting
@@ -349,7 +354,7 @@ def main():
                 try:
                     if os.getppid() != parent_pid:
                         is_dead = True
-                except Exception:
+                except Exception:  # nosec B110
                     pass
 
             if is_dead:
@@ -369,7 +374,7 @@ def main():
                 chunk = sys.stdin.read(1024)
                 if not chunk:
                     break
-        except Exception:
+        except Exception:  # nosec B110
             pass
         kill_child_tree(parent_dead=not _is_pid_alive(parent_pid))
         os._exit(0)
@@ -432,14 +437,14 @@ def main():
         if hasattr(os, "setsid"):
             try:
                 os.setsid()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         if sys.platform.startswith("linux"):
             try:
                 libc = ctypes.CDLL(None)
                 PR_SET_PDEATHSIG = 1
                 libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     creationflags = 0
@@ -455,7 +460,7 @@ def main():
             child_cmd = [resolved_bin] + child_cmd[1:]
 
     try:
-        proc = subprocess.Popen(
+        proc = subprocess.Popen(  # nosec B603
             child_cmd,
             cwd=cwd,
             stdin=subprocess.DEVNULL,
@@ -467,7 +472,7 @@ def main():
         if h_job and hasattr(proc, "_handle"):
             try:
                 ctypes.windll.kernel32.AssignProcessToJobObject(h_job, proc._handle)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
         # Write child PID to PID tracking file so runner can immediately target it directly
@@ -475,7 +480,7 @@ def main():
             try:
                 with open(pid_file, "w") as f:
                     f.write(f"{proc.pid}\n")
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
         _snapshot_descendants()

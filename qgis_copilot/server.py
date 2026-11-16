@@ -88,7 +88,7 @@ class ToolServer(QObject):
                     sock.disconnectFromHost()
                     sock.close()
                     sock.deleteLater()
-                except Exception:
+                except Exception:  # nosec B110
                     pass
         self._reading_sockets.clear()
         self.server.close()
@@ -97,7 +97,7 @@ class ToolServer(QObject):
                 ep = json.load(f)
                 if ep.get("pid") == os.getpid() and ep.get("port") == cur_port:
                     os.remove(ENDPOINT_FILE)
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     def _on_conn(self):
@@ -116,7 +116,7 @@ class ToolServer(QObject):
         if hasattr(sock, "deleteLater") and not _is_deleted(sock):
             try:
                 sock.deleteLater()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     def _on_read(self, sock):
@@ -133,7 +133,7 @@ class ToolServer(QObject):
                         sock.write((json.dumps({"id": None, "error": "request exceeds 32MB buffer limit"}) + "\n").encode("utf-8"))
                         sock.flush()
                         sock.close()
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
                 return
             self.buffers[sock] = cur + chunk

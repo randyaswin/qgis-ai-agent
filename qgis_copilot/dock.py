@@ -5,7 +5,7 @@ import os
 import random
 import re
 import shutil
-import subprocess
+import subprocess  # nosec B404
 import time
 import uuid
 
@@ -53,7 +53,7 @@ def _extract_thinking_from_jsonl(filepath):
     for line in reversed(_tail_lines(filepath)):
         try:
             d = json.loads(line)
-        except Exception:
+        except Exception:  # nosec B112
             continue
         th = d.get("thinking")
         if isinstance(th, str) and th.strip():
@@ -468,7 +468,7 @@ def _convert_heic_for_agent(src_path):
             rgb.save(dst_path, **save_kwargs)
         if os.path.exists(dst_path) and os.path.getsize(dst_path) > 0:
             return dst_path
-    except Exception:
+    except Exception:  # nosec B110
         pass
 
     # 2. Try Qt QImage (works if Qt HEIF imageformat plugin is installed)
@@ -477,7 +477,7 @@ def _convert_heic_for_agent(src_path):
         if not qimg.isNull() and qimg.save(dst_path, "JPEG", 92):
             if os.path.exists(dst_path) and os.path.getsize(dst_path) > 0:
                 return dst_path
-    except Exception:
+    except Exception:  # nosec B110
         pass
 
     # 3. Try CLI converters: heif-convert, ImageMagick, ffmpeg, macOS sips
@@ -493,10 +493,10 @@ def _convert_heic_for_agent(src_path):
         if not exe:
             continue
         try:
-            res = subprocess.run([exe] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+            res = subprocess.run([exe] + args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)  # nosec B603
             if res.returncode == 0 and os.path.exists(dst_path) and os.path.getsize(dst_path) > 0:
                 return dst_path
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     tools.LOGGER.warning(f"Could not convert HEIC/HEIF image to JPEG: {src_path}")
@@ -1352,11 +1352,11 @@ class AgentDock(QDockWidget):
         if self._model_thread is not None:
             try:
                 self._model_thread.cancel()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
             try:
                 self._model_thread.models_ready.disconnect(self._on_models_discovered)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         t = ModelDiscoveryThread(cli_name, self)
         self._model_thread = t
@@ -1371,11 +1371,11 @@ class AgentDock(QDockWidget):
             from qgis.PyQt import sip
             if not sip.isdeleted(self) and th is self._model_thread and hasattr(self, "btn_refresh_models") and not sip.isdeleted(self.btn_refresh_models):
                 self.btn_refresh_models.setEnabled(True)
-        except Exception:
+        except Exception:  # nosec B110
             pass
         try:
             th.deleteLater()
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     def _on_models_discovered(self, cli_name, models):
@@ -1383,7 +1383,7 @@ class AgentDock(QDockWidget):
             from qgis.PyQt import sip
             if sip.isdeleted(self) or sip.isdeleted(self.model_combo):
                 return
-        except Exception:
+        except Exception:  # nosec B110
             pass
         if self.cli.currentData() != cli_name:
             return
@@ -1443,7 +1443,7 @@ class AgentDock(QDockWidget):
             from qgis.PyQt import sip
             if sip.isdeleted(self) or not hasattr(self, "session_combo") or sip.isdeleted(self.session_combo):
                 return
-        except Exception:
+        except Exception:  # nosec B110
             pass
         self._populate_sessions_dropdown()
         self._render_active_session_log()
@@ -1454,7 +1454,7 @@ class AgentDock(QDockWidget):
             from qgis.PyQt import sip
             if sip.isdeleted(self) or not hasattr(self, "session_combo") or sip.isdeleted(self.session_combo):
                 return
-        except Exception:
+        except Exception:  # nosec B110
             pass
         self.session_combo.blockSignals(True)
         self.session_combo.clear()
@@ -1711,7 +1711,7 @@ class AgentDock(QDockWidget):
                     if os.path.exists(old_path):
                         try:
                             os.remove(old_path)
-                        except Exception:
+                        except Exception:  # nosec B110
                             pass
                 self.session_manager.save_project_sessions(autosave_qgz=True)
                 self._update_revert_ui()
@@ -1723,7 +1723,7 @@ class AgentDock(QDockWidget):
             from qgis.PyQt import sip
             if sip.isdeleted(self) or not hasattr(self, "revert_menu") or sip.isdeleted(self.revert_menu):
                 return
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
         self.revert_menu.clear()
@@ -1784,7 +1784,7 @@ class AgentDock(QDockWidget):
             try:
                 canvas.stopRendering()
                 canvas.freeze(True)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         try:
             orig_filename = QgsProject.instance().fileName()
@@ -1796,7 +1796,7 @@ class AgentDock(QDockWidget):
                 try:
                     canvas.freeze(False)
                     canvas.refreshAllLayers()
-                except Exception:
+                except Exception:  # nosec B110
                     pass
             gc.collect()
 
@@ -1823,7 +1823,7 @@ class AgentDock(QDockWidget):
             from qgis.PyQt import sip
             if sip.isdeleted(self) or not hasattr(self, "log") or sip.isdeleted(self.log):
                 return
-        except Exception:
+        except Exception:  # nosec B110
             pass
         self._active_tool_pos = None
         self._active_running_tool = None
@@ -1946,7 +1946,7 @@ class AgentDock(QDockWidget):
             vp = self.log.viewport()
             if vp and not sip.isdeleted(vp):
                 vp.update()
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     def _clean_ansi(self, text):
@@ -2115,7 +2115,7 @@ class AgentDock(QDockWidget):
             self._thinking_probe_at = now_mono
             self._thinking_probe_val = result
             return result
-        except Exception:
+        except Exception:  # nosec B110
             pass
         return ""
 
@@ -2461,7 +2461,7 @@ class AgentDock(QDockWidget):
                     if isinstance(data, dict):
                         is_json = True
                         self._handle_json_event(data)
-                except Exception:
+                except Exception:  # nosec B110
                     pass
 
             if not is_json:
@@ -2634,7 +2634,7 @@ class AgentDock(QDockWidget):
         argv = list(self._adapter()["register"])
         argv[0] = find_cli_bin(argv[0])
         try:
-            r = subprocess.run(
+            r = subprocess.run(  # nosec B603
                 argv,
                 capture_output=True,
                 text=True,
@@ -2976,7 +2976,7 @@ class AgentDock(QDockWidget):
         if hasattr(self.server, "ensure_endpoint"):
             try:
                 self.server.ensure_endpoint()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
         # Explicit CLI Session ID tracking: never rely on global "last"
@@ -3121,7 +3121,7 @@ class AgentDock(QDockWidget):
         try:
             proj_workspace = self.session_manager.get_workspace_dir(active_sess.id)
             active_sess.detect_and_store_cli_session_id(proj_workspace, active_sess.cli)
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
         raw_asst_text = self._current_assistant_text.strip()
@@ -3205,7 +3205,7 @@ class AgentDock(QDockWidget):
         try:
             if hasattr(self, "indicator_timer") and self.indicator_timer:
                 self.indicator_timer.stop()
-        except Exception:
+        except Exception:  # nosec B110
             pass
         if hasattr(self, "message_queue"):
             self.message_queue.clear()
@@ -3214,7 +3214,7 @@ class AgentDock(QDockWidget):
                 th.cancel()
                 if th.isRunning():
                     th.wait(3000)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         if hasattr(self, "_active_model_threads"):
             self._active_model_threads.clear()

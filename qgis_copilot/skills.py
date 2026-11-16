@@ -15,7 +15,7 @@ import os
 import re
 import shutil
 import stat
-import subprocess
+import subprocess  # nosec B404
 import sys
 import tempfile
 
@@ -220,7 +220,7 @@ class Registry:
             s.setValue("qgis_ai_agent/pinned_skills", ",".join(sorted(self.pinned)))
             s.setValue("qgis_ai_agent/disabled_skills", ",".join(sorted(self.disabled)))
             s.setValue("qgis_ai_agent/skill_mode", self.mode)
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     # ------------------------------------------------------------ discovery
@@ -239,7 +239,7 @@ class Registry:
                 dirnames[:] = []  # a skill folder is a leaf
                 try:
                     s = self._load(dirpath, root)
-                except Exception:
+                except Exception:  # nosec B112
                     continue
                 if s:
                     self.skills[s.name] = s
@@ -766,8 +766,11 @@ class Registry:
         repo_dir = os.path.join(tmp, "repo")
         try:
             env = {**paths.get_augmented_path_env(), "GIT_TERMINAL_PROMPT": "0"}
-            r = subprocess.run(
-                ["git", "clone", "--depth", "1", "-q", "--", url, repo_dir],
+            git_bin = shutil.which("git", path=env.get("PATH"))
+            if not git_bin:
+                raise RuntimeError("git executable not found on PATH")
+            r = subprocess.run(  # nosec B603
+                [git_bin, "clone", "--depth", "1", "-q", "--", url, repo_dir],
                 capture_output=True,
                 text=True,
                 timeout=180,

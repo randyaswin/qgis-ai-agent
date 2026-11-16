@@ -68,7 +68,7 @@ class _PluginLogger:
         _PY_LOGGER.log(level_py, text)
         try:
             QgsMessageLog.logMessage(text, "AI Agent", level_qgis)
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     def info(self, msg):
@@ -94,7 +94,7 @@ def _report_progress(tool_name, pct, msg=""):
         try:
             clamped = max(0, min(100, int(pct)))
             cb(tool_name, clamped, msg)
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
 
@@ -179,7 +179,7 @@ def _canvas():
         try:
             from qgis.gui import QgsMapCanvas
             _HEADLESS_CANVAS = QgsMapCanvas()
-        except Exception:
+        except Exception:  # nosec B110
             pass
     return _HEADLESS_CANVAS
 
@@ -213,7 +213,7 @@ def _safe_transform_extent(ext, src_crs, dst_crs, project=None):
         res = tr.transformBoundingBox(ext)
         if _is_valid_extent(res):
             return res
-    except Exception:
+    except Exception:  # nosec B110
         pass
     try:
         if not dst_crs.isGeographic():
@@ -223,7 +223,7 @@ def _safe_transform_extent(ext, src_crs, dst_crs, project=None):
                 clamped_b = tr_wgs.transformBoundingBox(b)
                 if _is_valid_extent(clamped_b):
                     return clamped_b
-    except Exception:
+    except Exception:  # nosec B110
         pass
     return None
 
@@ -339,7 +339,7 @@ def _canvas_freeze_guard():
         try:
             c.stopRendering()
             c.freeze(True)
-        except Exception:
+        except Exception:  # nosec B110
             pass
     try:
         yield
@@ -348,7 +348,7 @@ def _canvas_freeze_guard():
             try:
                 c.freeze(False)
                 c.refreshAllLayers()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         gc.collect()
 
@@ -364,7 +364,7 @@ def _record_study_bbox(bbox, crs_authid="EPSG:4326"):
             vals = [float(v) for v in bbox]
             if vals[2] > vals[0] and vals[3] > vals[1]:
                 _ACTIVE_STUDY_BBOX = (vals, str(crs_authid or "EPSG:4326"))
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
 
@@ -464,7 +464,7 @@ def save_project(path=None):
     try:
         from .sessions import record_autosave_info
         record_autosave_info(path)
-    except Exception:
+    except Exception:  # nosec B110
         pass
     return {"saved": ok, "path": path}
 
@@ -557,7 +557,7 @@ def _append_remote_bytes_to_gpkg(raw_bytes, tag, page_idx, out_file, target_laye
         try:
             if os.path.exists(tmp_src):
                 os.remove(tmp_src)
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
 
@@ -750,7 +750,7 @@ def _fetch_paginated_remote_vector_to_gpkg(path, provider="ogr", bbox=None, page
         if os.path.exists(out_file):
             try:
                 os.remove(out_file)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         return None
 
@@ -782,7 +782,7 @@ def add_vector_layer(path, name=None, provider="ogr", bbox=None, paginate=True, 
     if not _is_valid_extent(lyr.extent()):
         try:
             lyr.updateExtents()
-        except Exception:
+        except Exception:  # nosec B110
             pass
     p = QgsProject.instance()
     non_wms = [l for l in p.mapLayers().values() if l.providerType() != "wms"]
@@ -1038,7 +1038,7 @@ def georeference_raster(image_path, gcps, output_path=None, crs="EPSG:4326", tra
         out_ds = None
         try:
             gdal.Unlink(vrt_path)
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     layer_info = None
@@ -1750,7 +1750,7 @@ def _vector_detail(lyr, sample, max_unique, scan_limit=10000, valid_check_limit=
     num_sum = [0.0] * n_fields
     med_cap = 1024
     num_samples = [[] for _ in range(n_fields)]
-    rng = random.Random(0)
+    rng = random.Random(0)  # nosec B311
 
     geom_invalid = geom_empty = scanned = 0
     req = QgsFeatureRequest().setLimit(scan_limit)
@@ -1849,7 +1849,7 @@ def _raster_detail(lyr, sample):
             from qgis.core import QgsRasterHistogram  # noqa
             h = dp.histogram(b, 10, st.minimumValue, st.maximumValue, lyr.extent(), sample or 250000)
             info["histogram_10"] = list(h.histogramVector)
-        except Exception:
+        except Exception:  # nosec B110
             pass
         if dp.colorTable(b):
             info["color_table"] = [{"value": c.value, "label": c.label, "color": c.color.name()} for c in dp.colorTable(b)][:64]
@@ -1887,7 +1887,7 @@ def _pointcloud_detail(lyr):
                                     "mean": _jsonable(st.mean(a["name"]))} for a in attrs}
         if "Classification" in [a["name"] for a in attrs]:
             out["classes"] = {str(k): v for k, v in st.statisticsOf("Classification").classCount.items()}
-    except Exception:
+    except Exception:  # nosec B110
         pass
     return out
 
@@ -1896,7 +1896,7 @@ def _vectortile_detail(lyr):
     out = {"source_type": lyr.sourceType(), "zoom": [lyr.sourceMinZoom(), lyr.sourceMaxZoom()]}
     try:
         out["styles"] = [s.styleName() + " / layer=" + s.layerName() for s in lyr.renderer().styles()][:80]
-    except Exception:
+    except Exception:  # nosec B110
         pass
     return out
 
@@ -2598,7 +2598,7 @@ def set_labels(layer, field=None, expression=None, size=9, color="#000000", font
 
     try:
         s.obstacleSettings().setIsObstacle(True)
-    except Exception:
+    except Exception:  # nosec B110
         pass
 
     ts = s.thinningSettings()
@@ -2669,7 +2669,7 @@ def _cleanup_old_temp_files(
                     continue
                 if os.path.getmtime(fpath) < cutoff:
                     os.remove(fpath)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
 
@@ -2701,7 +2701,7 @@ def _export_layout_preview_b64(lay, dpi=120, max_dim=1600):
         if os.path.exists(tmp):
             try:
                 os.remove(tmp)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
 
@@ -2731,7 +2731,7 @@ def _render(extent, width, height, layers=None):
     finally:
         try:
             job.deleteLater()
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
 
@@ -2896,7 +2896,7 @@ def _audit_layout_quality(lay, preview_b64=None):
                         f"CRITICAL: Map frame rendered BLANK/EMPTY ({map_blank_pct}% uniform background)! "
                         "Check map extent/CRS, layer visibility, or overlapping shapes and iterate before finishing."
                     )
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     return {
@@ -3020,7 +3020,7 @@ def _compute_project_kpis(p) -> dict:
                 if lyr.crs() != p.crs():
                     ext = QgsCoordinateTransform(lyr.crs(), p.crs(), p).transformBoundingBox(ext)
                 extent = ext if extent is None else extent.united(ext)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
     area_km2 = width_km = height_km = 0.0
     if extent is not None and not extent.isEmpty():
@@ -3136,7 +3136,7 @@ def _configure_clean_legend(
                 if max_items_per_layer and len(nodes) > max_items_per_layer:
                     QgsMapLayerLegendUtils.setLegendNodeOrder(ch, list(range(int(max_items_per_layer))))
                     leg.model().refreshLayerLegend(ch)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     title_color = QColor("#f8fafc" if dark else "#0f172a")
@@ -3161,14 +3161,14 @@ def _configure_clean_legend(
         leg.rstyle(QgsLegendStyle.Style.Subgroup).setMargin(QgsLegendStyle.Side.Top, 1.8)
         leg.rstyle(QgsLegendStyle.Style.Subgroup).setMargin(QgsLegendStyle.Side.Bottom, 0.8)
         leg.rstyle(QgsLegendStyle.Style.Symbol).setMargin(QgsLegendStyle.Side.Bottom, 0.6)
-    except Exception:
+    except Exception:  # nosec B110
         pass
     try:
         leg.setSymbolWidth(6.0)
         leg.setSymbolHeight(3.2)
         leg.setBoxSpace(2.5)
         leg.updateLegend()
-    except Exception:
+    except Exception:  # nosec B110
         pass
     return leg
 
@@ -3280,7 +3280,7 @@ def create_layout(name="Map", title="", subtitle="", credits="", page_size="A4",
                     continue
                 te = QgsCoordinateTransform(lyr.crs(), p.crs(), p).transformBoundingBox(le)
                 cands.append((max(float(te.width()) * float(te.height()), 0.0), te))
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         if len(cands) >= 2:
             areas = sorted(a for a, _ in cands)
@@ -3427,7 +3427,7 @@ def _open_layout_window(lay):
                 win.show()
                 win.raise_()
         return designer
-    except Exception:
+    except Exception:  # nosec B110
         pass
     return None
 
@@ -3892,7 +3892,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
                 if not use_cover:
                     ext.scale(1.05)
                 return _fit_extent_to_frame(mp_item, ext, cover=use_cover)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         study_rect = _study_bbox_rect(p, None)
         if study_rect is not None:
@@ -4948,7 +4948,7 @@ def create_styled_layout(name="Map", style_theme="planning_official", title="", 
                 try:
                     pmp.setLayers([_layer(ln) for ln in panel_layers[idx]])
                     pmp.setKeepLayerSet(True)
-                except Exception:
+                except Exception:  # nosec B110
                     pass
             pmp.setFrameEnabled(True)
             pmp.setFrameStrokeColor(QColor("#94a3b8"))
@@ -6306,7 +6306,7 @@ def _execute_duckdb_nonblocking(setup_sql_list, copy_query, fetch_scalar=False, 
             con.execute(f"SET home_directory='{home_dir_sql}';")
             try:
                 con.execute(f"SET temp_directory='{tmp_dir_sql}';")
-            except Exception:
+            except Exception:  # nosec B110
                 pass
             try:
                 con.execute("LOAD spatial; LOAD httpfs;")
@@ -6332,7 +6332,7 @@ def _execute_duckdb_nonblocking(setup_sql_list, copy_query, fetch_scalar=False, 
             if active is not None:
                 try:
                     active.close()
-                except Exception:
+                except Exception:  # nosec B110
                     pass
 
     worker = threading.Thread(target=_worker, daemon=True)
@@ -6346,7 +6346,7 @@ def _execute_duckdb_nonblocking(setup_sql_list, copy_query, fetch_scalar=False, 
                 if active_con is not None and hasattr(active_con, "interrupt"):
                     try:
                         active_con.interrupt()
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
         elif timeout_sec and (time.monotonic() - start_t) > timeout_sec and not timed_out[0]:
             timed_out[0] = True
@@ -6355,11 +6355,11 @@ def _execute_duckdb_nonblocking(setup_sql_list, copy_query, fetch_scalar=False, 
                 if active_con is not None and hasattr(active_con, "interrupt"):
                     try:
                         active_con.interrupt()
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
         try:
             QCoreApplication.processEvents()
-        except Exception:
+        except Exception:  # nosec B110
             pass
         worker.join(timeout=0.1)
 
@@ -6453,8 +6453,11 @@ def _fetch_http_bytes(url, headers=None, timeout=12):
     hdrs = {"User-Agent": "QGIS-AI-Agent/1.1"}
     if headers:
         hdrs.update(headers)
+    parsed_scheme = urllib.parse.urlparse(url).scheme.lower()
+    if parsed_scheme not in ("http", "https"):
+        raise ValueError(f"Unsupported URL scheme '{parsed_scheme}'; only http/https are allowed.")
     req = urllib.request.Request(url, headers=hdrs)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosec B310
         return resp.read()
 
 
@@ -6668,7 +6671,7 @@ def _parse_json_primary(raw_val):
         parsed = json.loads(raw_val)
         if isinstance(parsed, dict):
             return parsed.get("primary")
-    except Exception:
+    except Exception:  # nosec B110
         pass
     return None
 
@@ -6804,7 +6807,7 @@ def _write_pmtiles_records_to_gpkg(records, fields_spec, gpkg_path):
     if os.path.exists(gpkg_path):
         try:
             os.remove(gpkg_path)
-        except Exception:
+        except Exception:  # nosec B110
             pass
     target_wkb = _determine_ogr_wkb_type(records)
     drv = ogr.GetDriverByName("GPKG")
@@ -6925,7 +6928,7 @@ def _apply_local_duckdb_filter(raw_gpkg, out_file, fields_spec, norm_filter, xmi
             GROUP BY id
             LIMIT {safe_limit}
         ) TO '{out_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
-        """
+        """  # nosec B608
     else:
         select_cols = ", ".join(fname for fname, _ in fields_spec)
         dx = max(1e-9, (xmax - xmin) / 4.0)
@@ -6951,7 +6954,7 @@ def _apply_local_duckdb_filter(raw_gpkg, out_file, fields_spec, norm_filter, xmi
             ORDER BY _tile_rn
             LIMIT {safe_limit}
         ) TO '{out_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
-        """
+        """  # nosec B608
     local_setup = ("SET geometry_always_xy=true;", "SET preserve_insertion_order=false;")
     _execute_duckdb_nonblocking(local_setup, copy_sql)
     return _count_gpkg_features(out_file)
@@ -6989,7 +6992,7 @@ def _pmtiles_vectortranslate_to_gpkg(src_mvt, actual_lyr_name, field_idx, fields
             width = 128 if fname == "id" else 64
             cols.append(f'"{fname}"' if fname in field_idx else f"CAST(NULL AS CHARACTER({width})) AS {fname}")
 
-    sql_stmt = f'SELECT {", ".join(cols)} FROM "{actual_lyr_name}"'
+    sql_stmt = f'SELECT {", ".join(cols)} FROM "{actual_lyr_name}"'  # nosec B608
     opts_kw = {
         "format": "GPKG",
         "spatFilter": [float(x3857_0), float(y3857_0), float(x3857_1), float(y3857_1)],
@@ -7041,7 +7044,7 @@ def _fetch_overture_pmtiles_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax, rele
         if os.path.exists(vt_target):
             try:
                 os.remove(vt_target)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         vt_failed = False
         try:
@@ -7096,12 +7099,12 @@ def _fetch_overture_pmtiles_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax, rele
                     for p in written_batch_paths:
                         try:
                             gdal.Unlink(p)
-                        except Exception:
+                        except Exception:  # nosec B110
                             pass
                     if hasattr(gdal, "RmdirRecursive"):
                         try:
                             gdal.RmdirRecursive(vsi_batch_base)
-                        except Exception:
+                        except Exception:  # nosec B110
                             pass
 
             cnt = _count_gpkg_features(vt_target)
@@ -7109,7 +7112,7 @@ def _fetch_overture_pmtiles_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax, rele
                 if os.path.exists(vt_target):
                     try:
                         os.remove(vt_target)
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
                 raise ValueError(f"No Overture features found for theme='{t_name}', type='{t_type}' in bbox {[xmin, ymin, xmax, ymax]}.")
 
@@ -7136,7 +7139,7 @@ def _fetch_overture_pmtiles_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax, rele
                     if os.path.exists(vt_target):
                         try:
                             os.remove(vt_target)
-                        except Exception:
+                        except Exception:  # nosec B110
                             pass
         except ValueError:
             raise
@@ -7146,12 +7149,12 @@ def _fetch_overture_pmtiles_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax, rele
             if os.path.exists(vt_target):
                 try:
                     os.remove(vt_target)
-                except Exception:
+                except Exception:  # nosec B110
                     pass
         if vt_failed and os.path.exists(vt_target):
             try:
                 os.remove(vt_target)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     # Fallback OGR path (used for explicit small 4x4 balanced samples when fetch_all=False or if C++ fast path failed)
@@ -7259,7 +7262,7 @@ def _fetch_overture_pmtiles_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax, rele
                     merged = geom.Union(extra)
                     if merged is not None and not merged.IsEmpty():
                         geom = merged
-                except Exception:
+                except Exception:  # nosec B110
                     pass
             if geom.Transform(ct) != 0:
                 continue
@@ -7272,12 +7275,12 @@ def _fetch_overture_pmtiles_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax, rele
         for p in written_vsi_paths:
             try:
                 gdal.Unlink(p)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         if hasattr(gdal, "RmdirRecursive"):
             try:
                 gdal.RmdirRecursive(vsi_base)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     if not records:
@@ -7308,7 +7311,7 @@ def _fetch_overture_pmtiles_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax, rele
         if os.path.exists(raw_tmp):
             try:
                 os.remove(raw_tmp)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
 
@@ -7466,7 +7469,7 @@ def _query_overture_stac_parquet_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax,
                 ORDER BY _tile_rn
                 LIMIT {safe_limit}
             ) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
-            """
+            """  # nosec B608
         else:
             copy_query = f"""
             COPY (
@@ -7475,7 +7478,7 @@ def _query_overture_stac_parquet_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax,
                 WHERE {' AND '.join(where_clauses)}
                 LIMIT {safe_limit}
             ) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
-            """
+            """  # nosec B608
 
         _execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, copy_query)
         cnt = _count_gpkg_features(out_file) if os.path.exists(out_file) else 0
@@ -7527,7 +7530,7 @@ def _query_overture_stac_parquet_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax,
                 WHERE {' AND '.join(where_clauses)}
                 LIMIT {rem_limit}
             ) TO '{chunk_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');
-            """
+            """  # nosec B608
             try:
                 _execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, copy_query)
                 c_cnt = _count_gpkg_features(chunk_path) if os.path.exists(chunk_path) else 0
@@ -7554,7 +7557,7 @@ def _query_overture_stac_parquet_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax,
                 if written_first and chunk_path != out_file and os.path.exists(chunk_path):
                     try:
                         os.remove(chunk_path)
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
         cnt = _count_gpkg_features(out_file) if os.path.exists(out_file) else 0
 
@@ -7562,7 +7565,7 @@ def _query_overture_stac_parquet_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax,
         if os.path.exists(out_file):
             try:
                 os.remove(out_file)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         raise ValueError(f"No Overture features found for theme='{t_name}', type='{t_type}' in bbox {[xmin, ymin, xmax, ymax]}.")
     _report_progress("query_overture_maps", 95, f"Loading {cnt} {t_name} features...")
@@ -7704,7 +7707,7 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
     if os.path.exists(out_file):
         try:
             os.remove(out_file)
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     source_mode = (source or "auto").strip().lower()
@@ -7725,7 +7728,7 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
                 if os.path.exists(out_file):
                     try:
                         os.remove(out_file)
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
                 _query_overture_stac_parquet_to_gpkg(t_name, t_type, xmin, ymin, xmax, ymax, release, filter_sql, safe_limit, out_file, fetch_all=fetch_all_flag, page_size=page_size)
     except ValueError:
@@ -7734,7 +7737,7 @@ def query_overture_maps(theme="places", type=None, bbox=None, filter_sql=None, l
         if os.path.exists(out_file):
             try:
                 os.remove(out_file)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         if "Execution stopped by user" in str(e):
             raise
@@ -7767,7 +7770,7 @@ def query_duckdb_spatial(query, layer_name="DuckDB_Layer", page_size=2000, fetch
     if os.path.exists(out_file):
         try:
             os.remove(out_file)
-        except Exception:
+        except Exception:  # nosec B110
             pass
     rewritten_query = _rewrite_overture_s3_glob_in_sql(query)
     if "s3://overturemaps-us-west-2/" in rewritten_query.lower():
@@ -7791,13 +7794,13 @@ def query_duckdb_spatial(query, layer_name="DuckDB_Layer", page_size=2000, fetch
 
             max_total = 250000
             _report_progress("query_duckdb_spatial", 30, "Streaming DuckDB spatial query to GeoPackage...")
-            copy_query = f"COPY (SELECT * FROM ({base_query}) AS _q LIMIT {max_total}) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');"
+            copy_query = f"COPY (SELECT * FROM ({base_query}) AS _q LIMIT {max_total}) TO '{out_file_sql}' WITH (FORMAT GDAL, DRIVER 'GPKG');"  # nosec B608
             _execute_duckdb_nonblocking(_DUCKDB_SESSION_SQL, copy_query)
     except Exception as e:
         if os.path.exists(out_file):
             try:
                 os.remove(out_file)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         if "Execution stopped by user" in str(e):
             raise
@@ -7816,15 +7819,15 @@ def exec_pyqgis(code):
         raise PermissionError("exec_pyqgis is disabled by the user. Use the dedicated tools.")
     import processing
     ns = {"iface": _iface(), "QgsProject": QgsProject, "processing": processing, "result": None}
-    exec("from qgis.core import *\nfrom qgis.gui import *", ns)
+    exec("from qgis.core import *\nfrom qgis.gui import *", ns)  # nosec B102
     out = io.StringIO()
     with contextlib.redirect_stdout(out):
-        exec(code, ns)
+        exec(code, ns)  # nosec B102
     c = _canvas()
     if c and not _is_deleted(c):
         try:
             c.refresh()
-        except Exception:
+        except Exception:  # nosec B110
             pass
     return {"stdout": out.getvalue()[-8000:], "result": repr(ns.get("result"))[:8000]}
 

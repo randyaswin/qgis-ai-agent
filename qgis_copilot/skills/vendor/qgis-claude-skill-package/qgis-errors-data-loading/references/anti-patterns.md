@@ -68,14 +68,15 @@ layer = QgsVectorLayer(path, "Roads", "ogr")
 
 ```python
 # WRONG — error-prone, credential exposure risk
-uri = "dbname='gisdb' host=localhost port=5432 user='admin' password='secret' table=\"public\".\"roads\" (geom)"
+uri = "dbname='gisdb' host=localhost port=5432 user='admin' table=\"public\".\"roads\" (geom)"
 layer = QgsVectorLayer(uri, "Roads", "postgres")
 
-# CORRECT — use QgsDataSourceUri
+# CORRECT — use QgsDataSourceUri with authcfg (never hardcode credentials)
 from qgis.core import QgsDataSourceUri
 
 uri = QgsDataSourceUri()
-uri.setConnection("localhost", "5432", "gisdb", "admin", "secret")
+uri.setConnection("localhost", "5432", "gisdb", "", "")
+uri.setAuthConfigId("my_auth_cfg_id")
 uri.setDataSource("public", "roads", "geom", "", "gid")
 layer = QgsVectorLayer(uri.uri(False), "Roads", "postgres")
 ```

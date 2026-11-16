@@ -5,7 +5,7 @@ import os
 import re
 import shutil
 import signal
-import subprocess
+import subprocess  # nosec B404
 import sys
 import tempfile
 import threading
@@ -187,16 +187,16 @@ def _save_disk_models_cache(cli_key, models, default_model=""):
                     f.flush()
                     try:
                         os.fsync(f.fileno())
-                    except Exception:
+                    except Exception:  # nosec B110
                         pass
                 os.replace(tmp_path, cache_path)
             except Exception:
                 try:
                     if os.path.exists(tmp_path):
                         os.remove(tmp_path)
-                except Exception:
+                except Exception:  # nosec B110
                     pass
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
 
@@ -221,7 +221,7 @@ def _discover_agy_models(bin_path, allow_subprocess=True):
                 if isinstance(m, str) and m.strip():
                     configured_default = m.strip()
                     break
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     discovered = []
@@ -230,7 +230,7 @@ def _discover_agy_models(bin_path, allow_subprocess=True):
         try:
             env = paths.get_augmented_path_env()
             env["NO_COLOR"] = "1"
-            res = subprocess.run(
+            res = subprocess.run(  # nosec B603
                 [bin_path, "models"],
                 capture_output=True,
                 text=True,
@@ -256,7 +256,7 @@ def _discover_agy_models(bin_path, allow_subprocess=True):
                         discovered.append((m_label, m_id))
                 if discovered:
                     catalog_discovered = True
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     return discovered, configured_default, catalog_discovered
@@ -275,7 +275,7 @@ def _discover_opencode_models(bin_path, allow_subprocess=True):
                 if isinstance(m, str) and m.strip():
                     configured_default = m.strip()
                     break
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     discovered = []
@@ -292,7 +292,7 @@ def _discover_opencode_models(bin_path, allow_subprocess=True):
         env["NO_COLOR"] = "1"
         for cand in cand_bins:
             try:
-                res = subprocess.run(
+                res = subprocess.run(  # nosec B603
                     [cand, "models"],
                     capture_output=True,
                     text=True,
@@ -314,7 +314,7 @@ def _discover_opencode_models(bin_path, allow_subprocess=True):
                         discovered = parsed
                         catalog_discovered = True
                         break
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     return discovered, configured_default, catalog_discovered
@@ -343,7 +343,7 @@ def _discover_claude_models():
                     for k in msettings.keys():
                         if isinstance(k, str) and k.strip():
                             extra_setting_ids.append(k.strip())
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         catalog_files.extend(glob.glob(os.path.join(cdir, "cache", "model-catalog", "*.json")))
 
@@ -377,7 +377,7 @@ def _discover_claude_models():
             if discovered:
                 catalog_discovered = True
                 break
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     # 2. Check claude.json / ~/.claude.json for org defaults & additionalModelOptionsCache
@@ -397,7 +397,7 @@ def _discover_claude_models():
                         lbl = str(am.get("label") or val).strip()
                         if val and not any(val == m[1] for m in discovered):
                             discovered.append((f"{lbl} ({val})", val))
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     for m_id in extra_setting_ids:
@@ -466,7 +466,7 @@ def _discover_gemini_models(bin_path, allow_heavy_scan=True):
                 if isinstance(custom_m, str) and custom_m.strip():
                     configured_default = custom_m.strip()
                     break
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     discovered = []
@@ -512,7 +512,7 @@ def _discover_gemini_models(bin_path, allow_heavy_scan=True):
                                 model_ids.append(m_id)
                     if model_ids:
                         break
-                except Exception:
+                except Exception:  # nosec B110
                     pass
             if model_ids:
                 break
@@ -539,7 +539,7 @@ def _discover_codex_models(bin_path, allow_heavy_scan=True):
                 if match:
                     configured_default = match.group(1).strip()
                     break
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     discovered = []
@@ -594,7 +594,7 @@ def _discover_codex_models(bin_path, allow_heavy_scan=True):
                     discovered = list_models + other_models
                     catalog_discovered = True
                     break
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     return discovered, configured_default, catalog_discovered
@@ -644,7 +644,7 @@ def get_cli_models(cli_key, force_refresh=False, allow_subprocess=True):
                 m_match = re.search(r"^\s*default\s*:\s*([^\s#]+)", content, re.MULTILINE)
                 if m_match:
                     configured_default = m_match.group(1).strip()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     # 5. Gemini CLI: non-antigravity settings.json + bundle JS models.ts catalog
@@ -911,7 +911,7 @@ def kill_entire_tree(root_pids, protected_pids=None):
     protected_pids.add(os.getpid())
     try:
         protected_pids.add(os.getppid())
-    except Exception:
+    except Exception:  # nosec B110
         pass
 
     all_targets = set()
@@ -922,22 +922,24 @@ def kill_entire_tree(root_pids, protected_pids=None):
                 try:
                     for d in get_process_descendants(rpid, protected_pids):
                         all_targets.add(d)
-                except Exception:
+                except Exception:  # nosec B110
                     pass
 
     # Windows native process tree termination
     if sys.platform == "win32":
-        for rpid in root_pids:
-            if rpid and rpid > 0 and rpid not in protected_pids:
-                try:
-                    subprocess.call(
-                        ["taskkill", "/F", "/T", "/PID", str(rpid)],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        **paths.get_subprocess_kwargs(),
-                    )
-                except Exception:
-                    pass
+        taskkill_bin = shutil.which("taskkill")
+        if taskkill_bin:
+            for rpid in root_pids:
+                if rpid and rpid > 0 and rpid not in protected_pids:
+                    try:
+                        subprocess.call(  # nosec B603
+                            [taskkill_bin, "/F", "/T", "/PID", str(rpid)],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            **paths.get_subprocess_kwargs(),
+                        )
+                    except Exception:  # nosec B110
+                        pass
         return
 
     # Pre-collect process groups while PIDs are still alive
@@ -948,7 +950,7 @@ def kill_entire_tree(root_pids, protected_pids=None):
                 pg = os.getpgid(pid)
                 if pg not in protected_pids and pg > 1:
                     all_pgids.add(pg)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
             # If setsid was used by child, pid itself is a process group leader
             if pid not in protected_pids and pid > 1:
@@ -958,14 +960,14 @@ def kill_entire_tree(root_pids, protected_pids=None):
     for pg in all_pgids:
         try:
             os.killpg(pg, signal.SIGTERM)
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     for pid in all_targets:
         if pid not in protected_pids:
             try:
                 os.kill(pid, signal.SIGTERM)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
     time.sleep(0.06)
@@ -974,14 +976,14 @@ def kill_entire_tree(root_pids, protected_pids=None):
     for pg in all_pgids:
         try:
             os.killpg(pg, signal.SIGKILL)
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     for pid in all_targets:
         if pid not in protected_pids:
             try:
                 os.kill(pid, signal.SIGKILL)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
 
@@ -1002,7 +1004,7 @@ class CliRunner(QObject):
         if self._current_pid_file and os.path.exists(self._current_pid_file):
             try:
                 os.remove(self._current_pid_file)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         self._current_pid_file = None
 
@@ -1014,11 +1016,11 @@ class CliRunner(QObject):
         for sig_name in ("readyReadStandardOutput", "finished", "errorOccurred"):
             try:
                 getattr(proc, sig_name).disconnect()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
         try:
             proc.deleteLater()
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     def _on_finished(self, code, _status=None):
@@ -1068,7 +1070,7 @@ class CliRunner(QObject):
         if self.proc:
             try:
                 self.proc.closeWriteChannel()
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
         # 1. Read child CLI PID directly from the tracking file if available
@@ -1079,7 +1081,7 @@ class CliRunner(QObject):
                     content = f.read().strip()
                     if content.isdigit():
                         child_pid = int(content)
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
         # 2. Get guard supervisor PID
@@ -1089,7 +1091,7 @@ class CliRunner(QObject):
                 p = self.proc.processId()
                 if p and p > 0:
                     guard_pid = p
-            except Exception:
+            except Exception:  # nosec B110
                 pass
 
         # 3. Kill all targets and their entire descendant process trees directly

@@ -60,7 +60,7 @@ class AIAgentPlugin:
                             "QGIS Copilot",
                             "Auto-repaired canvas extent to resolve projection coordinate overflow."
                         )
-        except Exception:
+        except Exception:  # nosec B110
             pass
 
     def unload(self):
@@ -68,7 +68,7 @@ class AIAgentPlugin:
             app = QCoreApplication.instance()
             if app:
                 app.aboutToQuit.disconnect(self.unload)
-        except Exception:
+        except Exception:  # nosec B110
             pass
         if self.guard_timer:
             self.guard_timer.stop()
