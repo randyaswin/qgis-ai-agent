@@ -146,6 +146,15 @@ def package_plugin(repo_root):
                 file_count += 1
                 total_uncompressed_bytes += os.path.getsize(abs_path)
 
+        # QGIS Plugin Repository requires LICENSE inside the plugin root directory
+        plugin_license_arcname = f"{PLUGIN_NAME}/LICENSE"
+        if not os.path.exists(os.path.join(plugin_dir, "LICENSE")):
+            repo_license = os.path.join(repo_root, "LICENSE")
+            if os.path.exists(repo_license):
+                zipf.write(repo_license, plugin_license_arcname)
+                file_count += 1
+                total_uncompressed_bytes += os.path.getsize(repo_license)
+
     # Make versioned duplicate
     shutil.copy2(zip_filename_canonical, zip_filename_versioned)
 
@@ -155,10 +164,13 @@ def package_plugin(repo_root):
         namelist = zipf.namelist()
         expected_meta = f"{PLUGIN_NAME}/metadata.txt"
         expected_init = f"{PLUGIN_NAME}/__init__.py"
+        expected_license = f"{PLUGIN_NAME}/LICENSE"
         if expected_meta not in namelist:
             sys.exit(f"❌ Verification failed: '{expected_meta}' is missing from ZIP root!")
         if expected_init not in namelist:
             sys.exit(f"❌ Verification failed: '{expected_init}' is missing from ZIP root!")
+        if expected_license not in namelist:
+            sys.exit(f"❌ Verification failed: '{expected_license}' is missing from ZIP root!")
 
         # Verify no pycache or forbidden extensions leaked into zip
         for name in namelist:
